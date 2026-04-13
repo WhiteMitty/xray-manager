@@ -17,3 +17,10 @@ curl -fsSL https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-m
 ```bash
 wget -qO- https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh | bash
 ```
+## 调用命令
+
+zdd xray
+
+## 卸载
+
+选项 9 可仅删除脚本或 xray 和脚本一起删除
