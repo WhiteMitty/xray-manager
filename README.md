@@ -36,6 +36,9 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zdd xray
 ```
+```bash
+zdd force install
+```
 <br>
 
 ## 注意：仅 1、4、7 号方式中的 reality 适合直连，8号为激进玩法，容易被墙
