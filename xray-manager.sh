@@ -826,9 +826,11 @@ function try_temporary_timesync() {
         remote_date=""
 
         if command -v curl &>/dev/null; then
-            remote_date=$(curl -fsSI --connect-timeout 5 --max-time 10 "$endpoint" 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^Date:/ {sub(/$/, ""); sub(/^Date:[[:space:]]*/, ""); print; exit}')
+            remote_date=$(curl -fsSI --connect-timeout 5 --max-time 10 "$endpoint" 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^Date:/ {sub(/
+$/, ""); sub(/^Date:[[:space:]]*/, ""); print; exit}')
         elif command -v wget &>/dev/null; then
-            remote_date=$(wget -S --spider -T 10 -t 1 "$endpoint" 2>&1 | awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*Date:/ {sub(/$/, ""); sub(/^[[:space:]]*Date:[[:space:]]*/, ""); print; exit}')
+            remote_date=$(wget -S --spider -T 10 -t 1 "$endpoint" 2>&1 | awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*Date:/ {sub(/
+$/, ""); sub(/^[[:space:]]*Date:[[:space:]]*/, ""); print; exit}')
         fi
 
         if [[ -n "$remote_date" ]]; then
@@ -1912,7 +1914,7 @@ function choose_install_scenario() {
         echo -e "  ${CYAN}5.${NC} SS 传导链（SS 入站 -> SS 出站）" >&2
         echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS / Reality / Vless-Enc 出站）" >&2
         echo -e "  ${CYAN}7.${NC} XHTTP + Reality 分离链路（v6 去 v4 回 / v4 去 v6 回）" >&2
-        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 分离链路（实验性 / 无 TLS）" >&2
+        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 分离链路（实验性 / 高风险）" >&2
         line >&2
         read -r -p "选择 [1-8]: " choice
         case "$choice" in
