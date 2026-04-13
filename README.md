@@ -70,15 +70,22 @@ zdd force install
 
 ## xhttp 使用
 
-## xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
+## xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，
+## 客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
+
+<br>
 
 ![v1演示](xhttp_json.jpg)
 
 ## 复制此处 json 
 
+<br>
+
 ![v2演示](v2rayN.jpg)
 
 ## 在此处粘贴 
+
+<br>
 
 ![v3演示](xhttp_extra.jpg)
 
