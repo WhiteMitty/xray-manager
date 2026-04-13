@@ -33,12 +33,24 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 
 ## 快速调用
 
+# 启动脚本
+
 ```bash
 zdd xray
 ```
+
+# 安装 Reality SS Vless-Enc 三合一
+
 ```bash
-zdd force install
+zdd install
 ```
+
+# 完整卸载 Xray SS-Rust 脚本及各种配置
+
+```bash
+zdd uinstall
+```
+
 <br>
 
 ## 注意：仅 1、4、7 号方式中的 reality 适合直连，8号为激进玩法，容易被墙
