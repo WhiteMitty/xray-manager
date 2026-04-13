@@ -5,13 +5,13 @@
 ### curl
 
 ```bash
-printf '1\n\n\n\n\n' | curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
+curl -fsSL -o xray_manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray_manager.sh --quick-install
 ```
 
 ### wget
 
 ```bash
-printf '1\n\n\n\n\n' | wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
+wget -qO xray_manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray_manager.sh --quick-install
 ```
 
 ## 常规安装
