@@ -28,13 +28,13 @@ zdd xray
 
 支持双栈小鸡进行 v4 v6 上下行分离，也支持端口复用直出 + 至多 3 个落地
 
-<h2 align="center">主界面</h2>
-<p align="center">
+<h2 align="left">主界面</h2>
+<p align="left">
   <img src="main.jpg" alt="主界面" width="900">
 </p>
 
-<h2 align="center">安装界面</h2>
-<p align="center">
+<h2 align="left">安装界面</h2>
+<p align="left">
   <img src="install.jpg" alt="安装界面" width="900">
 </p>
 
