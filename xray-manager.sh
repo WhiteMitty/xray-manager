@@ -1905,16 +1905,16 @@ function choose_install_scenario() {
         echo -e "${CYAN}${BOLD}  第三层：选择安装模板${NC}" >&2
         line >&2
         echo -e "${CYAN}  基础直出:${NC}" >&2
-        echo -e "  ${CYAN}1.${NC} 仅 Reality（直出 / 多落地）" >&2
-        echo -e "  ${CYAN}2.${NC} 仅 SS 直出" >&2
-        echo -e "  ${CYAN}3.${NC} 仅 Vless-Enc 直出" >&2
-        echo -e "  ${CYAN}4.${NC} Reality + Vless-Enc + SS 三入站直出" >&2
+        echo -e "  ${CYAN}1.${NC} 单 Reality（直出 / 多落地）" >&2
+        echo -e "  ${CYAN}2.${NC} 单 SS 直出" >&2
+        echo -e "  ${CYAN}3.${NC} 单 Vless-Enc 直出" >&2
+        echo -e "  ${CYAN}4.${NC} Reality Vless-Enc SS 三入站直出" >&2
         echo -e "" >&2
         echo -e "${CYAN}  进阶链路:${NC}" >&2
         echo -e "  ${CYAN}5.${NC} SS 传导链（SS 入站 -> SS 出站）" >&2
         echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
-        echo -e "  ${CYAN}7.${NC} XHTTP + Reality 分离链路（v6 去 v4 回 / v4 去 v6 回）" >&2
-        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 分离链路（实验性 / 高风险）" >&2
+        echo -e "  ${CYAN}7.${NC} XHTTP + Reality 上下行分离（v6 去 v4 回 / v4 去 v6 回）" >&2
+        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 上下行分离（实验性 / 高风险 / 容易被墙）" >&2
         line >&2
         read -r -p "选择 [1-8]: " choice
         case "$choice" in
