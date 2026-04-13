@@ -1,6 +1,6 @@
 # xray-manager
 
-## 全自动
+## 全自动安装 reality
 
 ### curl
 
