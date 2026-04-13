@@ -37,6 +37,8 @@ zdd xray
 
 ## 注意：仅 1、4、7 号方式中的 reality 适合直连，8号为激进玩法，容易被墙
 
+<br>
+
 <h2 align="left">主界面</h2>
 <p align="left">
   <img src="main.jpg" alt="主界面" width="900">
