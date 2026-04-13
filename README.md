@@ -1,4 +1,4 @@
-# xray-manager 2026-04-13 
+# xray-manager v 0.1.0 2026-04-13 
 
 ## 全自动安装 reality，注：安装会覆盖原有 xray 配置，SNI 为个人喜好可能拉胯
 
