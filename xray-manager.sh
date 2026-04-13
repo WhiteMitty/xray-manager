@@ -1806,7 +1806,15 @@ function benchmark_dest() {
     BEST_DEST=""
     BEST_DEST_POOL_SIG=""
 
+    local domain_col_width=40
     local d
+    for d in "${DEST_OPTIONS[@]}"; do
+        if [[ ${#d} -gt $domain_col_width ]]; then
+            domain_col_width=${#d}
+        fi
+    done
+    domain_col_width=$((domain_col_width + 2))
+
     for d in "${DEST_OPTIONS[@]}"; do
         local times=()
         local total=0
@@ -1847,9 +1855,9 @@ function benchmark_dest() {
         if [[ $avg_val -lt $best_avg ]]; then
             best_avg=$avg_val
             BEST_DEST="$d"
-            printf "  ${GREEN}%-40s %7s %7s %7s %8s ★${NC}\n" "$d" "$col1" "$col2" "$col3" "$avg_str"
+            printf "  ${GREEN}%-${domain_col_width}s %8s %8s %8s %9s ★${NC}\n" "$d" "$col1" "$col2" "$col3" "$avg_str"
         else
-            printf "  %-40s %7s %7s %7s %8s\n" "$d" "$col1" "$col2" "$col3" "$avg_str"
+            printf "  %-${domain_col_width}s %8s %8s %8s %9s\n" "$d" "$col1" "$col2" "$col3" "$avg_str"
         fi
     done
 
