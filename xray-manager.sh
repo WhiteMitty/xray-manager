@@ -251,12 +251,12 @@ case "\${1:-}" in
         shift
         exec "$SELF_SCRIPT_PATH" --quick-install --quick-scenario 4 "\$@"
         ;;
-    unistall|uninstall)
+    uninstall|uninstall)
         shift
         exec "$SELF_SCRIPT_PATH" --quick-uninstall "\$@"
         ;;
     *)
-        echo "用法: zdd xray | zdd install | zdd unistall"
+        echo "用法: zdd xray | zdd install | zdd uninstall"
         exit 1
         ;;
 esac
@@ -380,10 +380,9 @@ function json_escape() {
     if command -v jq >/dev/null 2>&1; then
         printf '%s' "$1" | jq -R -s -c '.' | sed 's/^"//; s/"$//'
     else
-        printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+        printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g'
     fi
 }
-
 
 function load_sni_pool() {
     DEST_OPTIONS=()
@@ -440,14 +439,17 @@ function is_port_in_use_by_non_xray() {
 function generate_short_id() {
     local sid=""
     local i
-    for i in {1..20}; do
+    for i in {1..60}; do
         sid=$(openssl rand -hex 4 2>/dev/null || true)
         if [[ -n "$sid" && "$sid" =~ [0-9] && "$sid" =~ [a-f] ]]; then
             echo "$sid"
             return 0
         fi
     done
-    return 1
+
+    sid=$(printf 'a%06x1' "$(( (($(date +%s 2>/dev/null || echo 0) + $$ + ${RANDOM:-0})) & 0xFFFFFF ))")
+    echo "$sid"
+    return 0
 }
 
 function ask_yes_no() {
@@ -959,6 +961,9 @@ function try_temporary_timesync() {
         fi
 
         if [[ -n "$remote_date" ]]; then
+            if LC_ALL=C date -d '@0' >/dev/null 2>&1; then
+                LC_ALL=C date -d "$remote_date" >/dev/null 2>&1 || continue
+            fi
             if LC_ALL=C date -u -s "$remote_date" >/dev/null 2>&1; then
                 hwclock -w >/dev/null 2>&1 || true
                 echo -e "${GREEN}  ✓ 已通过 HTTPS 响应头完成一次性临时校时${NC}"
@@ -2093,7 +2098,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  快捷指令: zdd xray | zdd install | zdd unistall${NC}"
+    echo -e "${CYAN}  快捷指令: zdd xray | zdd install | zdd uninstall${NC}"
 }
 
 function render_saved_meta_block() {
@@ -2222,16 +2227,29 @@ function uri_decode() {
 function get_query_param() {
     local query="$1"
     local key="$2"
-    local pair k v
+    local pair k v had_noglob=0
     local IFS='&'
+
+    case "$-" in
+        *f*) had_noglob=1 ;;
+    esac
+    set -f
+
     for pair in $query; do
         k="${pair%%=*}"
         v="${pair#*=}"
         if [[ "$k" == "$key" ]]; then
+            if [[ $had_noglob -eq 0 ]]; then
+                set +f
+            fi
             uri_decode "$v"
             return 0
         fi
     done
+
+    if [[ $had_noglob -eq 0 ]]; then
+        set +f
+    fi
     return 1
 }
 
@@ -4745,7 +4763,7 @@ while true; do
     echo -e "  SS 默认加密 2022-blake3-aes-128-gcm 手动模式增加 256-gcm"
     echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
     echo -e "  SNI测速 + 时间同步 + BBR+FQ + Vless-Enc"
-    echo -e "  快捷调用可输入: zdd xray | zdd install | zdd unistall"
+    echo -e "  快捷调用可输入: zdd xray | zdd install | zdd uninstall"
     line
     echo -e "  ${CYAN}01.${NC} 覆盖安装"
     echo -e "  ${CYAN}02.${NC} 更新 Xray"
