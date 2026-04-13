@@ -2,21 +2,6 @@
 
 ## 三次 "1" 一次回车即装完
 
-娱乐版，不喜勿喷，仅测试了 debian12
-
-整合了 vless-enc 等功能的 xray 代理工具箱
-
-具备自启 bbr + fq 及校正时间的功能（代理友好）
-
-可自动从 12 个备选 sni 中选择 tls 握手最快的支持自定义
-
-支持双栈小鸡进行 v4 v6 上下行分离，也支持端口复用直出 + 至多 3 个落地
-
-## 主界面
-![主界面](main.jpg)
-
-## 安装
-
 ### curl
 
 ```bash
@@ -33,7 +18,20 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zdd xray
 ```
-## 使用
+娱乐版，不喜勿喷，仅测试了 debian12
+
+整合了 vless-enc 等功能的 xray 代理工具箱
+
+具备自启 bbr + fq 及校正时间的功能（代理友好）
+
+可自动从 12 个备选 sni 中选择 tls 握手最快的支持自定义
+
+支持双栈小鸡进行 v4 v6 上下行分离，也支持端口复用直出 + 至多 3 个落地
+
+## 主界面
+![主界面](main.jpg)
+
+## 说明
 
 安装代理时若想简单，选择自动
 
