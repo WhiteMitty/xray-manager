@@ -68,7 +68,7 @@ zdd force install
 
 <br>
 
-## xhttp使用
+## xhttp 使用
 
 ## xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
 
