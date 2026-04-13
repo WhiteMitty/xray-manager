@@ -1,6 +1,6 @@
 # xray-manager
 
-### 按 3 次 1，一直回车即可完成 Reality 直出的安装
+## 按 3 次 1，一直回车即可完成 Reality 直出的安装
 
 整合了 vless-enc 等功能的 xray 代理工具箱
 
