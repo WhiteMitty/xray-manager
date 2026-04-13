@@ -45,6 +45,8 @@ vless-enc 的 padding 建议有经验再自行填充，官方默认值足够好
 
 xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客户端仅推荐 v2rayN 因为需要填 xhttp extra
 
+![v2演示](xhttp_extra.jpg)
+
 ## 卸载
 
 9 号功能可完整卸载脚本和 xray 及各种配置文件
