@@ -345,6 +345,14 @@ function should_ignore_timesync_failure() {
     [[ "$QUICK_FORCE" == "1" ]]
 }
 
+function is_stdin_interactive() {
+    [[ -t 0 ]]
+}
+
+function is_quick_install_noninteractive() {
+    [[ "$QUICK_INSTALL" == "1" ]] && ! is_stdin_interactive
+}
+
 function ensure_systemd_supported() {
     if ! command -v systemctl >/dev/null 2>&1; then
         echo -e "${RED}错误：当前系统未检测到 systemd / systemctl，本脚本目前仅支持基于 systemd 的系统。${NC}"
@@ -429,9 +437,17 @@ function generate_short_id() {
 
 function ask_yes_no() {
     local prompt="$1"
-    local answer
+    local answer=""
     while true; do
-        read -r -p "$prompt [y/n]: " answer
+        if ! read -r -p "$prompt [y/n]: " answer; then
+            echo ""
+            if should_ignore_timesync_failure; then
+                echo -e "${YELLOW}  检测到非交互输入 / EOF，force 模式下按 y 处理。${NC}"
+                return 0
+            fi
+            echo -e "${YELLOW}  检测到非交互输入 / EOF，按 n 处理。${NC}"
+            return 1
+        fi
         case "$answer" in
             [yY])
                 return 0
@@ -2749,20 +2765,29 @@ function install_xray() {
 
     echo -e "\n${CYAN}[Step 2/7] 第二层：安装模式${NC}"
     local INSTALL_MODE="auto"
-    while true; do
-        echo -e "  ${CYAN}1.${NC} 自动模式"
-        echo -e "  ${CYAN}2.${NC} 手动模式"
-        read -r -p "选择 [1-2]，默认 1: " INSTALL_MODE_CHOICE
-        case "${INSTALL_MODE_CHOICE:-1}" in
-            1|01) INSTALL_MODE="auto"; break ;;
-            2|02) INSTALL_MODE="manual"; break ;;
-            *) echo -e "${RED}  请输入 1 或 2。${NC}" ;;
-        esac
-    done
+    if is_quick_install_noninteractive; then
+        echo -e "${YELLOW}  检测到非交互快速安装：安装模式自动使用默认值（自动模式）。${NC}"
+    else
+        while true; do
+            echo -e "  ${CYAN}1.${NC} 自动模式"
+            echo -e "  ${CYAN}2.${NC} 手动模式"
+            read -r -p "选择 [1-2]，默认 1: " INSTALL_MODE_CHOICE
+            case "${INSTALL_MODE_CHOICE:-1}" in
+                1|01) INSTALL_MODE="auto"; break ;;
+                2|02) INSTALL_MODE="manual"; break ;;
+                *) echo -e "${RED}  请输入 1 或 2。${NC}" ;;
+            esac
+        done
+    fi
 
     echo -e "\n${CYAN}[Step 3/7] 第三层：模板选择${NC}"
-    local SCENARIO
-    SCENARIO=$(choose_install_scenario)
+    local SCENARIO=""
+    if is_quick_install_noninteractive; then
+        SCENARIO="1"
+        echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 单 Reality）。${NC}"
+    else
+        SCENARIO=$(choose_install_scenario)
+    fi
     local TEMPLATE_LABEL
     TEMPLATE_LABEL=$(get_install_scenario_label "$SCENARIO")
 
@@ -4192,6 +4217,11 @@ function install_default_flow() {
 function run_quick_install_entry() {
     if is_alpine_system; then
         echo -e "${YELLOW}检测到 Alpine / OpenRC，快速安装将自动转到 10 号 Alpine 专用 SS2022 流程。${NC}"
+        if is_quick_install_noninteractive; then
+            echo -e "${RED}当前为非交互快速安装，但 Alpine 专用 SS2022 需要你手动选择 DNS、端口和加密方式。${NC}"
+            echo -e "${YELLOW}请改用交互终端运行本地脚本，或先进入主菜单后执行 10 号 Alpine 专用流程。${NC}"
+            return 1
+        fi
         install_alpine_ss2022
     else
         install_xray
@@ -4586,10 +4616,10 @@ function uninstall_xray_and_delete_self() {
 function uninstall_menu() {
     while true; do
         line
-        center_echo "卸载选项" "${RED}${BOLD}"
+        center_echo "卸载脚本 Xray SS-Rust" "${RED}${BOLD}"
         line
         echo -e "  ${CYAN}1.${NC} 仅卸载脚本"
-        echo -e "  ${CYAN}2.${NC} 卸载脚本和 Xray"
+        echo -e "  ${CYAN}2.${NC} 卸载脚本 Xray SS-Rust"
         echo -e "  ${CYAN}0.${NC} 返回主菜单"
         line
         read -r -p "选择 [0/1/2]: " UNINSTALL_CHOICE
