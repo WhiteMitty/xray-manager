@@ -16,7 +16,7 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
-# 常规安装
+## 常规安装
 
 ## curl
 
@@ -31,7 +31,7 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
-# 快速调用
+## 快速调用
 
 ```bash
 zdd xray
@@ -68,19 +68,23 @@ zdd force install
 
 <br>
 
-# 其他说明
+## xhttp使用
 
 ## xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
 
 ![v1演示](xhttp_json.jpg)
 
+## 复制此处 json 
+
 ![v2演示](v2rayN.jpg)
+
+## 在此处粘贴 
 
 ![v3演示](xhttp_extra.jpg)
 
 <br>
 
-# 完整卸载
+## 完整卸载
 ![v4演示](unistall.jpg)
 
 ## 9 号功能可完整卸载脚本和 xray 及各种配置文件
