@@ -33,19 +33,19 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 
 ## 快速调用
 
-# 启动脚本
+## 启动脚本
 
 ```bash
 zdd xray
 ```
 
-# 安装 Reality SS Vless-Enc 三合一
+## 安装 Reality SS Vless-Enc 三合一
 
 ```bash
 zdd install
 ```
 
-# 完整卸载 Xray SS-Rust 脚本及各种配置
+## 完整卸载 Xray SS-Rust 脚本及各种配置
 
 ```bash
 zdd uinstall
