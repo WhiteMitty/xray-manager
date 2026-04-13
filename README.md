@@ -1,6 +1,6 @@
 # xray-manager
 
-## 全自动安装 reality
+## 全自动安装 reality，警告：此安装会覆盖原有 xray 配置
 
 ### curl
 
