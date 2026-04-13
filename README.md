@@ -19,7 +19,9 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 ## 调用
 
+```bash
 zdd xray
+```
 
 ## 卸载
 
