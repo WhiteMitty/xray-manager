@@ -811,6 +811,40 @@ function install_deps() {
     fi
 }
 
+function try_temporary_timesync() {
+    local -a endpoints=(
+        "https://www.cloudflare.com"
+        "https://www.github.com"
+        "https://www.microsoft.com"
+    )
+    local endpoint=""
+    local remote_date=""
+
+    echo -e "${YELLOW}  时间同步服务仍未完成，正在尝试一次性临时校时...${NC}"
+
+    for endpoint in "${endpoints[@]}"; do
+        remote_date=""
+
+        if command -v curl &>/dev/null; then
+            remote_date=$(curl -fsSI --connect-timeout 5 --max-time 10 "$endpoint" 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^Date:/ {sub(/$/, ""); sub(/^Date:[[:space:]]*/, ""); print; exit}')
+        elif command -v wget &>/dev/null; then
+            remote_date=$(wget -S --spider -T 10 -t 1 "$endpoint" 2>&1 | awk 'BEGIN{IGNORECASE=1} /^[[:space:]]*Date:/ {sub(/$/, ""); sub(/^[[:space:]]*Date:[[:space:]]*/, ""); print; exit}')
+        fi
+
+        if [[ -n "$remote_date" ]]; then
+            if LC_ALL=C date -u -s "$remote_date" >/dev/null 2>&1; then
+                hwclock -w >/dev/null 2>&1 || true
+                echo -e "${GREEN}  ✓ 已通过 HTTPS 响应头完成一次性临时校时${NC}"
+                echo -e "${CYAN}  参考源: ${endpoint}${NC}"
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${RED}  ✗ 一次性临时校时失败。${NC}"
+    return 1
+}
+
 function check_timesync() {
     echo -e "${YELLOW}  检查时间同步状态...${NC}"
 
@@ -879,6 +913,11 @@ function check_timesync() {
             fi
         fi
     done
+
+    if try_temporary_timesync; then
+        echo -e "${YELLOW}  已完成一次性临时校时，继续安装。后续建议系统自行完成长期同步。${NC}"
+        return 0
+    fi
 
     echo -e "${RED}  ✗ 时间同步仍未完成，Reality 安装已中止。${NC}"
     return 1
