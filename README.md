@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-m
 ```bash
 wget -qO- https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh | bash
 ```
-## 调用命令
+## 调用
 
 zdd xray
 
