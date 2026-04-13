@@ -1,6 +1,6 @@
 # xray-manager
 
-## 3 次 1 次回车即可完成安装 ~
+## 三次 1 一次回车即可安装 reality ~
 
 整合了 vless-enc 等功能的 xray 代理工具箱
 
