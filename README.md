@@ -1,6 +1,20 @@
 # xray-manager
 
-## 一直选 “1” 即可快速装机 ~
+## 丁真 · 一键脚本
+
+### curl
+
+```bash
+printf '1\n\n\n\n\n' | curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
+```
+
+### wget
+
+```bash
+printf '1\n\n\n\n\n' | wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
+```
+
+## 常规安装
 
 ### curl
 
@@ -13,6 +27,7 @@ curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-
 ```bash
 wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
 ```
+
 ## 快速调用
 
 ```bash
