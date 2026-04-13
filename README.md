@@ -62,11 +62,13 @@ zdd xray
 
 ## 其他说明
 
-xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客户端仅推荐 v2rayN 因为需要填 xhttp extra
+xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客户端仅推荐 v2rayN 因为除了订阅还需要填 xhttp extra
 
-![v1演示](v2rayN.jpg)
+![v1演示](xhttp_json.jpg)
 
-![v2演示](xhttp_extra.jpg)
+![v2演示](v2rayN.jpg)
+
+![v3演示](xhttp_extra.jpg)
 
 <br>
 
