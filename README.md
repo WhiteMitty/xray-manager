@@ -51,8 +51,9 @@ vless-enc 的 padding 建议有经验再自行填充，官方默认值足够好
 xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客户端仅推荐 v2rayN 因为需要填 xhttp extra
 
 ## XHTTP 订阅示例
-
-
+<p align="center">
+  <img src="xhttp_sub.jpg" alt="主界面" width="800">
+</p>
 
 ## 卸载
 
