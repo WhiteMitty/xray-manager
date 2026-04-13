@@ -4718,7 +4718,7 @@ while true; do
     echo -e "  ${CYAN}06.${NC} SNI 管理 & 测速"
     echo -e "  ${CYAN}07.${NC} 环境检测（时间 & BBR）"
     echo -e "  ${CYAN}08.${NC} 修改 Xray 配置（退出后重启服务生效）"
-    echo -e "  ${CYAN}09.${NC} 卸载 Xray 脚本等配置（可单独卸载脚本）"
+    echo -e "  ${CYAN}09.${NC} 卸载 Xray 脚本等文件（可单独卸载脚本）"
     echo -e "  ${CYAN}10.${NC} Alpine 专用 SS2022（shadowsocks-rust）"
     echo -e "  ${CYAN}00.${NC} 退出脚本"
     line
