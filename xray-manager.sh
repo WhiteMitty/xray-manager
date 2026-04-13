@@ -36,6 +36,12 @@ BEST_DEST=""
 BEST_DEST_POOL_SIG=""
 SNI_POOL_SOURCE="default"
 QUICK_INSTALL=0
+QUICK_FORCE=0
+SERVICE_KIND_FILE="${DATA_DIR}/.install_kind"
+ALPINE_SS_CONFIG_DIR="/etc/shadowsocks-rust"
+ALPINE_SS_CONFIG_FILE="${ALPINE_SS_CONFIG_DIR}/ssserver.json"
+ALPINE_SS_SERVICE_FILE="/etc/init.d/ssserver"
+ALPINE_RESOLV_BACKUP="${DATA_DIR}/alpine_resolv.conf.bak"
 
 DEFAULT_DEST_OPTIONS=(
     "a0.awsstatic.com"
@@ -93,6 +99,23 @@ function clear_screen() {
     fi
 }
 
+function read() {
+    if builtin read "$@"; then
+        return 0
+    fi
+
+    local last_arg=""
+    local arg=""
+    for arg in "$@"; do
+        last_arg="$arg"
+    done
+
+    if [[ -n "$last_arg" && "$last_arg" != -* && "$last_arg" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        printf -v "$last_arg" '%s' ""
+    fi
+    return 1
+}
+
 function add_tmp_file() {
     local f="$1"
     [[ -n "$f" ]] && TMP_FILES+=("$f")
@@ -145,6 +168,9 @@ function materialize_self_source() {
 
 function reexec_with_root() {
     if [[ $EUID -eq 0 ]]; then
+        if [[ -n "${DOUDOU_ENTRY_TEMP:-}" && -f "${DOUDOU_ENTRY_TEMP}" ]]; then
+            rm -f -- "${DOUDOU_ENTRY_TEMP}" >/dev/null 2>&1 || true
+        fi
         return 0
     fi
 
@@ -170,12 +196,12 @@ function reexec_with_root() {
 
     if command -v sudo >/dev/null 2>&1; then
         echo -e "${YELLOW}检测到当前非 root，正在尝试 sudo 提权重新执行...${NC}"
-        exec sudo -E bash "$temp_self" "$@"
+        exec env DOUDOU_ENTRY_TEMP="$temp_self" sudo -E bash "$temp_self" "$@"
     fi
 
     if command -v su >/dev/null 2>&1; then
         local cmd
-        cmd="bash $(printf '%q' "$temp_self")"
+        cmd="DOUDOU_ENTRY_TEMP=$(printf '%q' "$temp_self") bash $(printf '%q' "$temp_self")"
         local arg
         for arg in "$@"; do
             cmd+=" $(printf '%q' "$arg")"
@@ -219,8 +245,16 @@ case "\${1:-}" in
         shift
         exec "$SELF_SCRIPT_PATH" "\$@"
         ;;
+    force)
+        if [[ "\${2:-}" == "install" ]]; then
+            shift 2
+            exec "$SELF_SCRIPT_PATH" --quick-install --force "\$@"
+        fi
+        echo "用法: zdd xray | zdd force install"
+        exit 1
+        ;;
     *)
-        echo "用法: zdd xray"
+        echo "用法: zdd xray | zdd force install"
         exit 1
         ;;
 esac
@@ -239,6 +273,10 @@ function parse_cli_args() {
                 QUICK_INSTALL=1
                 shift
                 ;;
+            --force)
+                QUICK_FORCE=1
+                shift
+                ;;
             *)
                 echo -e "${RED}错误：未知参数 $1${NC}" >&2
                 exit 1
@@ -248,6 +286,64 @@ function parse_cli_args() {
 }
 
 parse_cli_args "$@"
+
+function get_os_id() {
+    if [[ -r /etc/os-release ]]; then
+        awk -F= '/^ID=/{gsub(/"/, "", $2); print tolower($2); exit}' /etc/os-release
+        return 0
+    fi
+    return 1
+}
+
+function is_alpine_system() {
+    local os_id=""
+    os_id=$(get_os_id 2>/dev/null || true)
+    [[ "$os_id" == "alpine" ]] && return 0
+    command -v apk >/dev/null 2>&1 && command -v rc-service >/dev/null 2>&1
+}
+
+function write_install_runtime_kind() {
+    local kind="$1"
+    (
+        umask 077
+        printf '%s\n' "$kind" > "$SERVICE_KIND_FILE"
+    )
+}
+
+function get_install_runtime_kind() {
+    if [[ -f "$SERVICE_KIND_FILE" ]]; then
+        head -n 1 "$SERVICE_KIND_FILE" 2>/dev/null || true
+        return 0
+    fi
+
+    if is_alpine_system && [[ -f "$ALPINE_SS_CONFIG_FILE" || -x "$ALPINE_SS_SERVICE_FILE" || -x /usr/bin/ssserver ]]; then
+        printf '%s\n' 'alpine-ss2022'
+        return 0
+    fi
+
+    if [[ -f "$CONFIG_FILE" || -x /usr/local/bin/xray ]]; then
+        printf '%s\n' 'xray'
+        return 0
+    fi
+
+    return 1
+}
+
+function is_alpine_runtime_present() {
+    [[ "$(get_install_runtime_kind 2>/dev/null || true)" == "alpine-ss2022" ]]
+}
+
+function ensure_alpine_supported() {
+    if ! is_alpine_system; then
+        echo -e "${RED}错误：当前系统不是 Alpine / OpenRC，无法执行 Alpine 专用 SS2022 流程。${NC}"
+        return 1
+    fi
+    return 0
+}
+
+function should_ignore_timesync_failure() {
+    [[ "$QUICK_FORCE" == "1" ]]
+}
 
 function ensure_systemd_supported() {
     if ! command -v systemctl >/dev/null 2>&1; then
@@ -798,13 +894,13 @@ function install_deps() {
             done
         fi
         apt-get update -y || return 1
-        DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget jq openssl coreutils procps psmisc ca-certificates || return 1
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget jq openssl coreutils procps psmisc ca-certificates iproute2 || return 1
     elif command -v dnf &>/dev/null; then
-        dnf install -y curl wget jq openssl coreutils procps-ng psmisc ca-certificates || return 1
+        dnf install -y curl wget jq openssl coreutils procps-ng psmisc ca-certificates iproute || return 1
     elif command -v yum &>/dev/null; then
-        yum install -y curl wget jq openssl coreutils procps-ng psmisc ca-certificates || return 1
+        yum install -y curl wget jq openssl coreutils procps-ng psmisc ca-certificates iproute || return 1
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm curl wget jq openssl coreutils procps-ng psmisc ca-certificates || return 1
+        pacman -Sy --noconfirm curl wget jq openssl coreutils procps-ng psmisc ca-certificates iproute2 || return 1
     else
         echo -e "${RED}未找到受支持的包管理器，请手动安装依赖后重试。${NC}"
         return 1
@@ -923,6 +1019,21 @@ function check_timesync() {
     return 1
 }
 
+function handle_timesync_failure() {
+    local warning_msg="$1"
+    echo -e "${YELLOW}${warning_msg}${NC}"
+    if should_ignore_timesync_failure; then
+        echo -e "${YELLOW}  已启用 force 模式：忽略时间同步检查，继续安装。${NC}"
+        return 0
+    fi
+    if ask_yes_no "  是否仍继续安装"; then
+        echo -e "${YELLOW}  已选择忽略时间同步检查，继续安装。${NC}"
+        return 0
+    fi
+    echo -e "${RED}  已取消安装。${NC}"
+    return 1
+}
+
 function check_bbr() {
     echo -e "${YELLOW}  检查 BBR + FQ 状态...${NC}"
 
@@ -965,6 +1076,534 @@ EOF2
 
     echo -e "${YELLOW}  ⚠ 已写入配置，但当前未完全生效（cc=${new_cc:-unknown}, qdisc=${new_qdisc:-unknown}）。${NC}"
     return 1
+}
+
+function get_alpine_repo_branch() {
+    local release_line=""
+    release_line=$(cat /etc/alpine-release 2>/dev/null || true)
+    if [[ "$release_line" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        printf 'v%s.%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    printf '%s\n' 'edge'
+}
+
+function ensure_alpine_community_repo() {
+    local repo_file="/etc/apk/repositories"
+    local repo_branch community_line
+
+    [[ -f "$repo_file" ]] || {
+        echo -e "${RED}  ✗ 未找到 ${repo_file}${NC}"
+        return 1
+    }
+
+    if grep -Eq '^[[:space:]]*https?://.*/community([[:space:]]|$)' "$repo_file"; then
+        echo -e "${GREEN}  ✓ Alpine community 仓库已启用${NC}"
+        return 0
+    fi
+
+    repo_branch=$(get_alpine_repo_branch)
+    community_line="https://dl-cdn.alpinelinux.org/alpine/${repo_branch}/community"
+    echo -e "${YELLOW}  未检测到 community 仓库，正在追加：${community_line}${NC}"
+    printf '%s\n' "$community_line" >> "$repo_file" || return 1
+    echo -e "${GREEN}  ✓ 已追加 Alpine community 仓库${NC}"
+    return 0
+}
+
+function choose_alpine_dns_provider() {
+    local choice
+    while true; do
+        echo -e "  ${CYAN}1.${NC} Cloudflare（1.1.1.1 / 1.0.0.1）" >&2
+        echo -e "  ${CYAN}2.${NC} Google（8.8.8.8 / 8.8.4.4）" >&2
+        read -r -p "选择安装期间使用的系统 DNS [1-2]，默认 1: " choice
+        case "${choice:-1}" in
+            1|01)
+                printf '%s\n' 'cloudflare'
+                return 0
+                ;;
+            2|02)
+                printf '%s\n' 'google'
+                return 0
+                ;;
+            *)
+                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                ;;
+        esac
+    done
+}
+
+function apply_alpine_dns_provider() {
+    local provider="$1"
+    local primary secondary label
+
+    case "$provider" in
+        cloudflare)
+            primary="1.1.1.1"
+            secondary="1.0.0.1"
+            label="Cloudflare"
+            ;;
+        google)
+            primary="8.8.8.8"
+            secondary="8.8.4.4"
+            label="Google"
+            ;;
+        *)
+            echo -e "${RED}  ✗ 未知 DNS 选项：${provider}${NC}"
+            return 1
+            ;;
+    esac
+
+    if [[ -f /etc/resolv.conf && ! -f "$ALPINE_RESOLV_BACKUP" ]]; then
+        cp -a -- /etc/resolv.conf "$ALPINE_RESOLV_BACKUP" >/dev/null 2>&1 || true
+    fi
+
+    cat > /etc/resolv.conf <<DNS_EOF
+nameserver ${primary}
+nameserver ${secondary}
+DNS_EOF
+
+    echo -e "${GREEN}  ✓ 已设置系统 DNS：${label}（${primary} / ${secondary}）${NC}"
+}
+
+function install_alpine_runtime_deps() {
+    echo -e "${YELLOW}  安装 Alpine 运行依赖...${NC}"
+    apk update || return 1
+    apk add shadowsocks-rust chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+}
+
+function check_timesync_alpine() {
+    echo -e "${YELLOW}  检查 Alpine 时间同步状态...${NC}"
+
+    local leap_status=""
+    if command -v chronyc >/dev/null 2>&1; then
+        leap_status=$(chronyc tracking 2>/dev/null | awk -F': *' '/^Leap status/ {print $2; exit}' || true)
+        if [[ "$leap_status" == "Normal" ]]; then
+            echo -e "${GREEN}  ✓ 时间已同步（chrony: Leap status = Normal）${NC}"
+            return 0
+        fi
+    fi
+
+    echo -e "${YELLOW}  正在启用 chronyd 并等待同步...${NC}"
+    apk add chrony >/dev/null 2>&1 || true
+    rc-update add chronyd default >/dev/null 2>&1 || true
+    rc-service chronyd restart >/dev/null 2>&1 || rc-service chronyd start >/dev/null 2>&1 || true
+
+    local i=""
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 2
+        if command -v chronyc >/dev/null 2>&1; then
+            leap_status=$(chronyc tracking 2>/dev/null | awk -F': *' '/^Leap status/ {print $2; exit}' || true)
+            if [[ "$leap_status" == "Normal" ]]; then
+                echo -e "${GREEN}  ✓ Alpine 时间同步已就绪${NC}"
+                return 0
+            fi
+        fi
+    done
+
+    echo -e "${YELLOW}  chronyd 尚未确认同步，正在尝试一次性临时校时...${NC}"
+    if try_temporary_timesync; then
+        rc-service chronyd restart >/dev/null 2>&1 || true
+        echo -e "${YELLOW}  已通过一次性校时修正当前时间，后续建议继续观察 chronyd 同步状态。${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  ✗ Alpine 时间同步仍未完成。${NC}"
+    return 1
+}
+
+function backup_file_if_exists() {
+    local file_path="$1"
+    local backup_path=""
+    if [[ -f "$file_path" ]]; then
+        backup_path="${file_path}.bak.$(date +%Y%m%d-%H%M%S)"
+        cp -a -- "$file_path" "$backup_path" || return 1
+        echo -e "${YELLOW}  已备份旧文件: ${backup_path}${NC}"
+    fi
+}
+
+function base64_encode_urlsafe_nopad() {
+    printf '%s' "$1" | base64 | tr -d '\r\n=' | tr '+/' '-_'
+}
+
+function build_ss2022_uri() {
+    local host="$1"
+    local port="$2"
+    local method="$3"
+    local password="$4"
+    local tag="$5"
+    local userinfo uri_host
+
+    userinfo=$(base64_encode_urlsafe_nopad "${method}:${password}")
+    uri_host=$(format_host_for_uri "$host")
+    printf 'ss://%s@%s:%s#%s\n' "$userinfo" "$uri_host" "$port" "$(url_encode "$tag")"
+}
+
+function get_alpine_ss_port_from_config() {
+    if [[ -f "$ALPINE_SS_CONFIG_FILE" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+            jq -r '.server_port // empty' "$ALPINE_SS_CONFIG_FILE" 2>/dev/null || true
+        else
+            awk -F: '/"server_port"/ {gsub(/[^0-9]/, "", $2); print $2; exit}' "$ALPINE_SS_CONFIG_FILE" 2>/dev/null || true
+        fi
+    fi
+}
+
+function write_alpine_ssserver_config() {
+    local port="$1"
+    local method="$2"
+    local password="$3"
+
+    mkdir -p "$ALPINE_SS_CONFIG_DIR" || return 1
+    backup_file_if_exists "$ALPINE_SS_CONFIG_FILE" || return 1
+    cat > "$ALPINE_SS_CONFIG_FILE" <<CFG_EOF
+{
+  "server": "::",
+  "server_port": ${port},
+  "password": "$(json_escape "$password")",
+  "method": "$(json_escape "$method")",
+  "mode": "tcp_and_udp",
+  "timeout": 300
+}
+CFG_EOF
+}
+
+function write_alpine_openrc_service() {
+    backup_file_if_exists "$ALPINE_SS_SERVICE_FILE" || return 1
+    cat > "$ALPINE_SS_SERVICE_FILE" <<'SERVICE_EOF'
+#!/sbin/openrc-run
+
+name="shadowsocks-rust server"
+description="Shadowsocks Rust Server"
+
+command="/usr/bin/ssserver"
+command_args="-c /etc/shadowsocks-rust/ssserver.json"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+    need net
+}
+SERVICE_EOF
+    chmod +x "$ALPINE_SS_SERVICE_FILE" >/dev/null 2>&1 || true
+}
+
+function validate_alpine_ss_config() {
+    if [[ ! -f "$ALPINE_SS_CONFIG_FILE" ]]; then
+        echo -e "${RED}  ✗ 未找到配置文件：${ALPINE_SS_CONFIG_FILE}${NC}"
+        return 1
+    fi
+
+    if ! command -v jq >/dev/null 2>&1; then
+        echo -e "${YELLOW}  ⚠ 未检测到 jq，跳过 JSON 语法校验。${NC}"
+        return 0
+    fi
+
+    if ! jq empty "$ALPINE_SS_CONFIG_FILE" >/dev/null 2>&1; then
+        cp -f -- "$ALPINE_SS_CONFIG_FILE" "${DATA_DIR}/last_failed_ssserver.json" 2>/dev/null || true
+        echo -e "${RED}  ✗ SS2022 配置 JSON 语法验证失败。${NC}"
+        echo -e "${YELLOW}  已保留失败配置: ${DATA_DIR}/last_failed_ssserver.json${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}  ✓ SS2022 配置 JSON 语法验证通过${NC}"
+    return 0
+}
+
+function restart_alpine_ssservice() {
+    line
+    echo -e "${YELLOW}  重启 Alpine SS2022 服务...${NC}"
+    ensure_alpine_supported || return 1
+    validate_alpine_ss_config || { line; return 1; }
+
+    if [[ ! -x "$ALPINE_SS_SERVICE_FILE" ]]; then
+        echo -e "${RED}  ✗ 未找到 OpenRC 服务文件：${ALPINE_SS_SERVICE_FILE}${NC}"
+        line
+        return 1
+    fi
+
+    rc-service ssserver restart >/dev/null 2>&1 || rc-service ssserver start >/dev/null 2>&1 || {
+        echo -e "${RED}  ✗ SS2022 服务启动失败。${NC}"
+        line
+        return 1
+    }
+
+    sleep 2
+    if rc-service ssserver status >/dev/null 2>&1; then
+        echo -e "${GREEN}  ✓ SS2022 服务已启动${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ OpenRC 未明确返回运行中，请继续检查监听端口。${NC}"
+    fi
+
+    local listen_port=""
+    listen_port=$(get_alpine_ss_port_from_config)
+    if [[ -n "$listen_port" ]]; then
+        if ss -ltnup 2>/dev/null | grep -q ":${listen_port}\b"; then
+            echo -e "${GREEN}  ✓ 已检测到 ${listen_port} 端口监听${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ 未明确检测到 ${listen_port} 端口监听，请手动检查：ss -ltnup | grep :${listen_port}${NC}"
+        fi
+    fi
+    line
+}
+
+function update_alpine_ssservice() {
+    line
+    echo -e "${YELLOW}  更新 Alpine SS2022（shadowsocks-rust）...${NC}"
+    ensure_alpine_supported || return 1
+    ensure_alpine_community_repo || { line; return 1; }
+
+    apk update || { line; return 1; }
+    apk add --upgrade shadowsocks-rust chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || {
+        echo -e "${RED}  ✗ 更新失败，请检查网络或仓库状态。${NC}"
+        line
+        return 1
+    }
+
+    echo -e "${GREEN}  ✓ shadowsocks-rust 已更新完成${NC}"
+    if [[ -f "$ALPINE_SS_CONFIG_FILE" && -x "$ALPINE_SS_SERVICE_FILE" ]]; then
+        restart_alpine_ssservice || return 1
+        return 0
+    fi
+    line
+}
+
+function show_alpine_ss_status() {
+    line
+    center_echo "Alpine SS2022 服务状态" "${CYAN}${BOLD}"
+    line
+    ensure_alpine_supported || return 1
+
+    if [[ -x "$ALPINE_SS_SERVICE_FILE" ]]; then
+        rc-service ssserver status || true
+    else
+        echo -e "${YELLOW}  未找到 OpenRC 服务文件：${ALPINE_SS_SERVICE_FILE}${NC}"
+    fi
+
+    echo ""
+    local listen_port=""
+    listen_port=$(get_alpine_ss_port_from_config)
+    if [[ -n "$listen_port" ]]; then
+        center_echo "监听检查" "${CYAN}${BOLD}"
+        ss -ltnup 2>/dev/null | grep ":${listen_port}\b" || echo -e "${YELLOW}  未检测到 ${listen_port} 端口监听${NC}"
+        echo ""
+    fi
+
+    center_echo "日志提示" "${CYAN}${BOLD}"
+    echo -e "${YELLOW}  OpenRC 默认没有 journalctl 风格统一日志。${NC}"
+    echo -e "${CYAN}  如需看启动报错，可执行：${NC}"
+    echo -e "${CYAN}    rc-service ssserver restart${NC}"
+    echo -e "${CYAN}    ssserver -c ${ALPINE_SS_CONFIG_FILE} -v${NC}"
+    line
+}
+
+function edit_alpine_ss_config() {
+    while true; do
+        line
+        center_echo "修改配置文件" "${CYAN}${BOLD}"
+        line
+        echo -e "${CYAN}  路径: ${ALPINE_SS_CONFIG_FILE}${NC}"
+        echo -e "${YELLOW}  仅建议熟悉 SS2022 配置者使用。${NC}"
+        echo ""
+        echo -e "  ${CYAN}1.${NC} 编辑当前配置"
+        echo -e "  ${CYAN}2.${NC} 清空配置（高风险）"
+        echo -e "  ${CYAN}0.${NC} 返回主菜单"
+        line
+        read -r -p "选择 [0/1/2]: " EDIT_CHOICE
+
+        if [[ ! -f "$ALPINE_SS_CONFIG_FILE" ]]; then
+            echo -e "${RED}  未找到配置文件，请先执行 Alpine SS2022 安装。${NC}"
+            line
+            return 1
+        fi
+
+        case "$EDIT_CHOICE" in
+            1|01)
+                echo ""
+                if [[ -n "${EDITOR:-}" ]] && command -v "${EDITOR}" >/dev/null 2>&1; then
+                    "${EDITOR}" "$ALPINE_SS_CONFIG_FILE"
+                elif command -v nano >/dev/null 2>&1; then
+                    nano "$ALPINE_SS_CONFIG_FILE"
+                elif command -v vim >/dev/null 2>&1; then
+                    vim "$ALPINE_SS_CONFIG_FILE"
+                elif command -v vi >/dev/null 2>&1; then
+                    vi "$ALPINE_SS_CONFIG_FILE"
+                else
+                    echo -e "${RED}  未找到可用编辑器（nano/vim/vi）。${NC}"
+                    line
+                    return 1
+                fi
+
+                echo ""
+                if command -v jq >/dev/null 2>&1; then
+                    if jq empty "$ALPINE_SS_CONFIG_FILE" >/dev/null 2>&1; then
+                        echo -e "${GREEN}  ✓ JSON 语法校验通过。${NC}"
+                    else
+                        cp -f -- "$ALPINE_SS_CONFIG_FILE" "${DATA_DIR}/last_failed_ssserver.json" 2>/dev/null || true
+                        echo -e "${RED}  ✗ 当前文件不是合法 JSON，请修正后再重启服务。${NC}"
+                        echo -e "${YELLOW}  已保留失败配置: ${DATA_DIR}/last_failed_ssserver.json${NC}"
+                    fi
+                fi
+                echo -e "${YELLOW}  已退出编辑器。请回主菜单执行“重启当前服务”。${NC}"
+                line
+                return 0
+                ;;
+            2|02)
+                echo ""
+                echo -e "${RED}${BOLD}  此操作会将当前配置清空为 0 字节。${NC}"
+                echo -e "${YELLOW}  清空前会自动备份。${NC}"
+                echo -e "${YELLOW}  未重新写入合法 JSON 前，服务无法重启。${NC}"
+                read -r -p "输入 yes 确认清空 ${ALPINE_SS_CONFIG_FILE}: " CONFIRM_CLEAR
+                if [[ "$CONFIRM_CLEAR" != "yes" ]]; then
+                    echo -e "${YELLOW}  已取消。${NC}"
+                    sleep 1
+                    continue
+                fi
+
+                local manual_backup
+                manual_backup="${ALPINE_SS_CONFIG_FILE}.bak.manual-clear.$(date +%Y%m%d-%H%M%S)"
+                cp -a -- "$ALPINE_SS_CONFIG_FILE" "$manual_backup" || {
+                    echo -e "${RED}  备份失败，已取消清空。${NC}"
+                    line
+                    return 1
+                }
+
+                truncate -s 0 "$ALPINE_SS_CONFIG_FILE" || {
+                    echo -e "${RED}  清空失败，请手动检查权限或磁盘状态。${NC}"
+                    line
+                    return 1
+                }
+
+                echo -e "${GREEN}  ✓ 配置文件已清空。${NC}"
+                echo -e "${CYAN}  备份文件: ${manual_backup}${NC}"
+                echo -e "${YELLOW}  请先写入合法配置，再执行“重启当前服务”。${NC}"
+                line
+                return 0
+                ;;
+            "")
+                continue
+                ;;
+            0|00)
+                return 0
+                ;;
+            *)
+                echo -e "${RED}  无效输入，请输入 0、1 或 2。${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+function uninstall_alpine_ss_and_delete_self() {
+    line
+    center_echo "卸载脚本和 SS2022" "${RED}${BOLD}"
+    line
+    echo -e "${RED}  - 卸载 shadowsocks-rust（Alpine）${NC}"
+    echo -e "${RED}  - 删除 SS2022 配置与 OpenRC 服务文件${NC}"
+    echo -e "${RED}  - 删除快捷指令 zdd xray${NC}"
+    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    line
+    read -r -p "输入 yes 继续: " CONFIRM
+    if [[ "$CONFIRM" != "yes" ]]; then
+        echo -e "${YELLOW}已取消。${NC}"
+        return 0
+    fi
+
+    rc-service ssserver stop >/dev/null 2>&1 || true
+    rc-update del ssserver default >/dev/null 2>&1 || true
+    apk del shadowsocks-rust >/dev/null 2>&1 || true
+    remove_path_quiet "$ALPINE_SS_SERVICE_FILE" "$ALPINE_SS_SERVICE_FILE"
+    remove_path_quiet "$ALPINE_SS_CONFIG_DIR" "$ALPINE_SS_CONFIG_DIR"
+
+    cleanup_doudou_runtime
+
+    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    line
+    exit 0
+}
+
+function install_alpine_ss2022() {
+    line
+    echo -e "${GREEN}${BOLD}  Alpine 专用 SS2022 安装${NC}"
+    line
+
+    echo -e "\n${CYAN}[Step 1/7] 系统环境预检${NC}"
+    ensure_alpine_supported || return 1
+
+    echo -e "\n${CYAN}[Step 2/7] 选择安装期间使用的系统 DNS${NC}"
+    local dns_provider=""
+    dns_provider=$(choose_alpine_dns_provider) || return 1
+    apply_alpine_dns_provider "$dns_provider" || return 1
+
+    echo -e "\n${CYAN}[Step 3/7] 检查 Alpine 仓库、时间同步与依赖${NC}"
+    ensure_alpine_community_repo || return 1
+    if ! check_timesync_alpine; then
+        handle_timesync_failure "  警告：时间同步未完成，这可能导致 apk、证书校验、TLS 握手或后续网络请求异常。" || return 1
+    fi
+    install_alpine_runtime_deps || return 1
+    check_bbr || true
+
+    echo -e "\n${CYAN}[Step 4/7] 手动选择 SS2022 参数${NC}"
+    local ss_method=""
+    local ss_port=""
+    ss_method=$(choose_ss_method) || return 1
+    while true; do
+        ss_port=$(read_manual_ss_port "请输入 SS2022 监听端口: ") || return 1
+        if is_port_in_use "$ss_port"; then
+            echo -e "${RED}  端口 ${ss_port} 已被占用，请换一个端口。${NC}"
+        else
+            break
+        fi
+    done
+
+    echo -e "\n${CYAN}[Step 5/7] 生成密钥与写入配置${NC}"
+    local ss_password=""
+    ss_password=$(ssservice genkey -m "$ss_method" 2>/dev/null | tr -d '\r\n')
+    if [[ -z "$ss_password" ]]; then
+        echo -e "${RED}  ✗ 生成 SS2022 密钥失败，请检查 shadowsocks-rust 是否安装完整。${NC}"
+        return 1
+    fi
+    write_alpine_ssserver_config "$ss_port" "$ss_method" "$ss_password" || return 1
+    write_alpine_openrc_service || return 1
+
+    echo -e "\n${CYAN}[Step 6/7] 启动并验证服务${NC}"
+    rc-update add ssserver default >/dev/null 2>&1 || true
+    restart_alpine_ssservice || return 1
+
+    echo -e "\n${CYAN}[Step 7/7] 生成节点信息${NC}"
+    local public_ip_v4=""
+    local public_ip_v6=""
+    local ss_link_v4=""
+    local ss_link_v6=""
+    local sub_text=""
+    local ports_text=""
+
+    public_ip_v4=$(get_public_ip_v4 || true)
+    public_ip_v6=$(get_public_ip_v6 || true)
+
+    if [[ -n "$public_ip_v4" ]]; then
+        ss_link_v4=$(build_ss2022_uri "$public_ip_v4" "$ss_port" "$ss_method" "$ss_password" "SS2022-Alpine-${ss_port}")
+    fi
+    if [[ -n "$public_ip_v6" ]]; then
+        ss_link_v6=$(build_ss2022_uri "$public_ip_v6" "$ss_port" "$ss_method" "$ss_password" "SS2022-Alpine-IPv6-${ss_port}")
+    fi
+
+    sub_text="订阅:\n  SS2022:\n"
+    if [[ -n "$ss_link_v4" ]]; then
+        sub_text+="  ${ss_link_v4}\n"
+    else
+        sub_text+="  （未获取到公网 IPv4，请手动替换为你的服务器地址）\n"
+    fi
+    if [[ -n "$ss_link_v6" ]]; then
+        sub_text+="\n  SS2022 (IPv6):\n  ${ss_link_v6}\n"
+    fi
+
+    ports_text="端口:\n  SS2022 :     ${ss_port}"
+    write_dynamic_result_files "$sub_text" "$ports_text"
+    write_install_runtime_kind "alpine-ss2022"
+    render_saved_node_info "配置完成" || {
+        echo -e "${RED}  节点信息写入失败，请检查 ${INFO_FILE}${NC}"
+        return 1
+    }
 }
 
 function get_public_ip_v4() {
@@ -1029,12 +1668,36 @@ function backup_existing_config() {
     fi
 }
 
+function ensure_sni_benchmark_ready() {
+    local missing=()
+    local ts_probe=""
+
+    command -v openssl >/dev/null 2>&1 || missing+=("openssl")
+    command -v timeout >/dev/null 2>&1 || missing+=("timeout")
+    ts_probe=$(date +%s%3N 2>/dev/null || true)
+    [[ "$ts_probe" =~ ^[0-9]+$ ]] || missing+=("gnu-date")
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo -e "${RED}  ✗ 当前环境缺少 SNI 测速所需依赖。${NC}"
+    echo -e "${YELLOW}  缺失项: ${missing[*]}${NC}"
+    if is_alpine_system; then
+        echo -e "${CYAN}  建议：先执行 10 号 Alpine 专用 SS2022 安装，或手动安装：apk add openssl coreutils${NC}"
+    else
+        echo -e "${CYAN}  建议：先执行 01 安装，或手动安装 openssl / coreutils 后再测速。${NC}"
+    fi
+    return 1
+}
+
 function get_loaded_sni_pool_signature() {
     printf '%s
 ' "${DEST_OPTIONS[@]}" | cksum | awk '{print $1 ":" $2}'
 }
 
 function benchmark_dest() {
+    ensure_sni_benchmark_ready || return 1
     load_sni_pool
     line
     echo -e "${CYAN}${BOLD}  REALITY SNI 延迟测试（每个域名测试 3 次 TLS 握手）${NC}"
@@ -1348,7 +2011,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  快捷指令: zdd xray${NC}"
+    echo -e "${CYAN}  快捷指令: zdd xray | zdd force install${NC}"
 }
 
 function render_saved_meta_block() {
@@ -2080,13 +2743,7 @@ function install_xray() {
     echo -e "\n${CYAN}[Step 1/7] 系统环境预检${NC}"
     ensure_systemd_supported || return 1
     if ! check_timesync; then
-        echo -e "${YELLOW}  警告：时间同步未完成，这可能导致下载、证书校验、TLS 握手或 Reality 相关流程异常。${NC}"
-        if ask_yes_no "  是否仍继续安装"; then
-            echo -e "${YELLOW}  已选择忽略时间同步检查，继续安装。${NC}"
-        else
-            echo -e "${RED}  已取消安装。${NC}"
-            return 1
-        fi
+        handle_timesync_failure "  警告：时间同步未完成，这可能导致下载、证书校验、TLS 握手或 Reality 相关流程异常。" || return 1
     fi
     check_bbr || true
 
@@ -2626,7 +3283,7 @@ function install_xray() {
     fi
     if [[ "$SCENARIO" == "2" || "$SCENARIO" == "4" || "$SCENARIO" == "5" ]]; then
         local SS_USERINFO
-        SS_USERINFO=$(printf '%s' "${LOCAL_SS_METHOD}:${LOCAL_SS_PWD}" | base64 | tr -d '\n' | tr '+/' '-_')
+        SS_USERINFO=$(base64_encode_urlsafe_nopad "${LOCAL_SS_METHOD}:${LOCAL_SS_PWD}")
         SS_NODE_LINK="ss://${SS_USERINFO}@${SERVER_IP_URI}:${LOCAL_SS_PORT}#SS-zdd"
     fi
 
@@ -3518,9 +4175,68 @@ JSONEOF
     esac
 
     write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT"
+    write_install_runtime_kind "xray"
     render_saved_node_info "配置完成" || { echo -e "${RED}  节点信息写入失败，请检查 ${INFO_FILE}${NC}"; return 1; }
 }
 
+
+function install_default_flow() {
+    if is_alpine_system; then
+        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC，已自动转到 10 号 Alpine 专用 SS2022 流程。${NC}"
+        install_alpine_ss2022
+    else
+        install_xray
+    fi
+}
+
+function run_quick_install_entry() {
+    if is_alpine_system; then
+        echo -e "${YELLOW}检测到 Alpine / OpenRC，快速安装将自动转到 10 号 Alpine 专用 SS2022 流程。${NC}"
+        install_alpine_ss2022
+    else
+        install_xray
+    fi
+}
+
+function update_current_service() {
+    if is_alpine_runtime_present || is_alpine_system; then
+        update_alpine_ssservice
+    else
+        update_xray
+    fi
+}
+
+function restart_current_service() {
+    if is_alpine_runtime_present || is_alpine_system; then
+        restart_alpine_ssservice
+    else
+        restart_xray
+    fi
+}
+
+function show_runtime_status() {
+    if is_alpine_runtime_present || is_alpine_system; then
+        show_alpine_ss_status
+    else
+        show_status
+    fi
+}
+
+function edit_runtime_config() {
+    if is_alpine_runtime_present || is_alpine_system; then
+        edit_alpine_ss_config
+    else
+        edit_config
+    fi
+}
+
+function uninstall_current_service_and_delete_self() {
+    if is_alpine_runtime_present || is_alpine_system; then
+        uninstall_alpine_ss_and_delete_self
+    else
+        uninstall_xray_and_delete_self
+    fi
+}
 
 function update_xray() {
     ensure_systemd_supported || return 1
@@ -3742,7 +4458,11 @@ function run_syscheck() {
     line
     center_echo "系统环境检测" "${CYAN}${BOLD}"
     line
-    check_timesync || true
+    if is_alpine_system; then
+        check_timesync_alpine || true
+    else
+        check_timesync || true
+    fi
     echo ""
     check_bbr || true
     line
@@ -3786,6 +4506,8 @@ function cleanup_doudou_runtime() {
 
     remove_path_quiet "$INFO_FILE" "$INFO_FILE"
     remove_path_quiet "$SUB_FILE" "$SUB_FILE"
+    remove_path_quiet "$SERVICE_KIND_FILE" "$SERVICE_KIND_FILE"
+    remove_path_quiet "$ALPINE_RESOLV_BACKUP" "$ALPINE_RESOLV_BACKUP"
     remove_path_quiet "$SNI_POOL_FILE" "$SNI_POOL_FILE"
     remove_path_quiet "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_FILE"
     remove_path_quiet "$QUICK_BIN" "$QUICK_BIN"
@@ -3799,6 +4521,8 @@ function cleanup_script_only_runtime() {
 
     remove_path_quiet "$INFO_FILE" "$INFO_FILE"
     remove_path_quiet "$SUB_FILE" "$SUB_FILE"
+    remove_path_quiet "$SERVICE_KIND_FILE" "$SERVICE_KIND_FILE"
+    remove_path_quiet "$ALPINE_RESOLV_BACKUP" "$ALPINE_RESOLV_BACKUP"
     remove_path_quiet "$SNI_POOL_FILE" "$SNI_POOL_FILE"
     remove_path_quiet "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_FILE"
     remove_path_quiet "$QUICK_BIN" "$QUICK_BIN"
@@ -3813,16 +4537,16 @@ function uninstall_script_only() {
     line
     echo -e "${RED}  - 删除快捷指令 zdd xray${NC}"
     echo -e "${RED}  - 删除本脚本存储目录、生成的 txt 文件与脚本写入项${NC}"
-    echo -e "${RED}  - 保留当前 Xray、配置、服务与相关残留${NC}"
+    echo -e "${RED}  - 保留当前服务、配置与相关残留${NC}"
     line
-    if ! ask_yes_no "是否仅卸载脚本并保留当前 Xray 与配置"; then
+    if ! ask_yes_no "是否仅卸载脚本并保留当前服务与配置"; then
         echo -e "${YELLOW}已取消。${NC}"
         return 0
     fi
 
     cleanup_script_only_runtime
 
-    echo -e "${GREEN}  ✓ 脚本已卸载，当前 Xray 已保留。${NC}"
+    echo -e "${GREEN}  ✓ 脚本已卸载，当前服务已保留。${NC}"
     line
     exit 0
 }
@@ -3878,7 +4602,7 @@ function uninstall_menu() {
                 uninstall_script_only
                 ;;
             2|02)
-                uninstall_xray_and_delete_self
+                uninstall_current_service_and_delete_self
                 ;;
             0|00)
                 return 0
@@ -3892,7 +4616,7 @@ function uninstall_menu() {
 }
 
 if [[ "$QUICK_INSTALL" == "1" ]]; then
-    install_xray
+    run_quick_install_entry
     exit $?
 fi
 
@@ -3907,17 +4631,18 @@ while true; do
     echo -e "  SS 默认加密 2022-blake3-aes-128-gcm 手动模式增加 256-gcm"
     echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
     echo -e "  SNI测速 + 时间同步 + BBR+FQ + Vless-Enc"
-    echo -e "  快捷调用可输入: zdd xray"
+    echo -e "  快捷调用可输入: zdd xray | zdd force install"
     line
     echo -e "  ${CYAN}01.${NC} 安装（覆盖当前配置）"
-    echo -e "  ${CYAN}02.${NC} 更新 Xray"
-    echo -e "  ${CYAN}03.${NC} 重启 Xray"
+    echo -e "  ${CYAN}02.${NC} 更新当前核心 / 服务"
+    echo -e "  ${CYAN}03.${NC} 重启当前服务"
     echo -e "  ${CYAN}04.${NC} 查看节点"
     echo -e "  ${CYAN}05.${NC} 查看状态 & 日志"
     echo -e "  ${CYAN}06.${NC} SNI 管理 & 测速"
     echo -e "  ${CYAN}07.${NC} 环境检测（时间同步 & BBR）"
-    echo -e "  ${CYAN}08.${NC} 修改 Xray 配置文件（退出后重启 Xray 生效）"
-    echo -e "  ${CYAN}09.${NC} 卸载 Xray 和脚本"
+    echo -e "  ${CYAN}08.${NC} 修改当前配置文件（退出后重启服务生效）"
+    echo -e "  ${CYAN}09.${NC} 卸载当前服务和脚本"
+    echo -e "  ${CYAN}10.${NC} Alpine 专用 SS2022（shadowsocks-rust）"
     echo -e "  ${CYAN}00.${NC} 退出脚本"
     line
     read -r -p "选择: " CHOICE
@@ -3926,15 +4651,16 @@ while true; do
         "")
             continue
             ;;
-        1|01) install_xray   ;;
-        2|02) update_xray    ;;
-        3|03) restart_xray   ;;
-        4|04) show_info      ;;
-        5|05) show_status    ;;
-        6|06) manage_sni     ;;
-        7|07) run_syscheck   ;;
-        8|08) edit_config                  ;;
-        9|09) uninstall_menu   ;;
+        1|01) install_default_flow    ;;
+        2|02) update_current_service  ;;
+        3|03) restart_current_service ;;
+        4|04) show_info               ;;
+        5|05) show_runtime_status     ;;
+        6|06) manage_sni              ;;
+        7|07) run_syscheck            ;;
+        8|08) edit_runtime_config     ;;
+        9|09) uninstall_menu          ;;
+        10)   install_alpine_ss2022   ;;
         0|00)
             echo -e "${GREEN}已退出。${NC}"
             sleep 0.3
