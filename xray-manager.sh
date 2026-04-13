@@ -1806,7 +1806,16 @@ function benchmark_dest() {
     BEST_DEST=""
     BEST_DEST_POOL_SIG=""
 
+    local domain_col_width=40
+    local domain_len=0
     local d
+    for d in "${DEST_OPTIONS[@]}"; do
+        domain_len=${#d}
+        if (( domain_len > domain_col_width )); then
+            domain_col_width=$domain_len
+        fi
+    done
+
     for d in "${DEST_OPTIONS[@]}"; do
         local times=()
         local total=0
@@ -1816,11 +1825,7 @@ function benchmark_dest() {
         for i in 1 2 3; do
             local t1 t2 elapsed
             t1=$(date +%s%3N 2>/dev/null || echo 0)
-            if timeout 3 openssl s_client \
-                -connect "${d}:443" \
-                -servername "${d}" \
-                -verify_return_error \
-                </dev/null &>/dev/null; then
+            if timeout 3 openssl s_client                 -connect "${d}:443"                 -servername "${d}"                 -verify_return_error                 </dev/null &>/dev/null; then
                 t2=$(date +%s%3N 2>/dev/null || echo 0)
                 elapsed=$((t2 - t1))
                 [[ $elapsed -lt 0 ]] && elapsed=0
@@ -1844,16 +1849,20 @@ function benchmark_dest() {
         [[ "$col2" != "超时" ]] && col2="${col2} ms"
         [[ "$col3" != "超时" ]] && col3="${col3} ms"
 
-        if [[ "$col1" == "超时" ]]; then col1="   超时"; fi
-        if [[ "$col2" == "超时" ]]; then col2="   超时"; fi
-        if [[ "$col3" == "超时" ]]; then col3="   超时"; fi
+        local cell1="" cell2="" cell3="" avg_cell=""
+        if [[ "$col1" == "超时" ]]; then cell1="   超时"; else printf -v cell1 "%7s" "$col1"; fi
+        if [[ "$col2" == "超时" ]]; then cell2="   超时"; else printf -v cell2 "%7s" "$col2"; fi
+        if [[ "$col3" == "超时" ]]; then cell3="   超时"; else printf -v cell3 "%7s" "$col3"; fi
+        printf -v avg_cell "%8s" "$avg_str"
 
         if [[ $avg_val -lt $best_avg ]]; then
             best_avg=$avg_val
             BEST_DEST="$d"
-            printf "  ${GREEN}%-40s %7s %7s %7s %8s ★${NC}\n" "$d" "$col1" "$col2" "$col3" "$avg_str"
+            printf "  ${GREEN}%-${domain_col_width}s %s %s %s %s ★${NC}
+" "$d" "$cell1" "$cell2" "$cell3" "$avg_cell"
         else
-            printf "  %-40s %7s %7s %7s %8s\n" "$d" "$col1" "$col2" "$col3" "$avg_str"
+            printf "  %-${domain_col_width}s %s %s %s %s
+" "$d" "$cell1" "$cell2" "$cell3" "$avg_cell"
         fi
     done
 
