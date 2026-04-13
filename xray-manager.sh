@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================
-#     Xray 一键管理脚本 v 0.5 Doudou Zhang 2026-04-12
+#        Xray 一键管理脚本 v 0.1.0 Doudou Zhang 2026-04-13
 # ==============================================================
 
 set -u
@@ -16,7 +16,7 @@ NC='\033[0m'
 
 BRAND_HEADER="Designed by Doudou Zhang"
 AUTHOR_NAME="Doudou Zhang"
-SCRIPT_VERSION="v 0.5"
+SCRIPT_VERSION="v 0.1.0"
 UI_WIDTH=60
 DATA_DIR="/usr/local/share/doudou-xray"
 SELF_DIR="/usr/local/lib/doudou"
@@ -1873,14 +1873,14 @@ function write_dynamic_result_files() {
 
 function get_install_scenario_label() {
     case "$1" in
-        1) printf '%s' '仅 Reality（直出 / 多落地）' ;;
-        2) printf '%s' '仅 SS 直出' ;;
-        3) printf '%s' '仅 Vless-Enc 直出' ;;
-        4) printf '%s' 'Reality + Vless-Enc + SS 三入站直出' ;;
+        1) printf '%s' '单 Reality（直出 / 多落地）' ;;
+        2) printf '%s' '单 SS 直出' ;;
+        3) printf '%s' '单 Vless-Enc 直出' ;;
+        4) printf '%s' 'Reality Vless-Enc SS 三入站直出' ;;
         5) printf '%s' 'SS 传导链' ;;
         6) printf '%s' 'Vless-Enc 传导链' ;;
-        7) printf '%s' 'XHTTP + Reality 分离链路' ;;
-        8) printf '%s' 'XHTTP + Vless-Enc 分离链路（实验性）' ;;
+        7) printf '%s' 'XHTTP + Reality 上下行分离' ;;
+        8) printf '%s' 'XHTTP + Vless-Enc 上下行分离（实验性）' ;;
         *) printf '%s' '未知模板' ;;
     esac
 }
@@ -1913,8 +1913,8 @@ function choose_install_scenario() {
         echo -e "${CYAN}  进阶链路:${NC}" >&2
         echo -e "  ${CYAN}5.${NC} SS 传导链（SS 入站 -> SS 出站）" >&2
         echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
-        echo -e "  ${CYAN}7.${NC} XHTTP + Reality 上下行分离（v6 去 v4 回 / v4 去 v6 回）" >&2
-        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 上下行分离（实验性 / 高风险 / 容易被墙）" >&2
+        echo -e "  ${CYAN}7.${NC} XHTTP + Reality 上下行分离（须双栈 / 直出 / 多落地）" >&2
+        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 上下行分离（须双栈 / 直出 / 高风险慎用）" >&2
         line >&2
         read -r -p "选择 [1-8]: " choice
         case "$choice" in
