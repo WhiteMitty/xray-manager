@@ -10,6 +10,10 @@ A Multifunctional Proxy Tool Based on Xray
 
 支持双栈小鸡进行 v4 v6 上下行分离，也支持端口复用直出 + 至多 3 个落地
 
+## 主界面
+![主界面](main.jpg)
+
+
 ## 安装
 
 ### curl
@@ -43,6 +47,10 @@ ss2022 和 vless-enc 均不推荐过墙，均有封 ip 风险
 vless-enc 的 padding 建议有经验再自行填充，官方默认值足够好
 
 xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客户端仅推荐 v2rayN 因为需要填 xhttp extra
+
+## XHTTP 订阅示例
+
+![XHTTP 订阅示例](xhttp_sub.jpg)
 
 ## 卸载
 
