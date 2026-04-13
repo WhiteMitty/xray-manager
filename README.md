@@ -1,6 +1,6 @@
 # xray-manager
 
-## 全自动安装 reality 直出，注意：此安装会覆盖原有 xray 配置，SNI 为个人喜好不保证好用
+## 全自动安装 reality，注：安装会覆盖原有 xray 配置，SNI 为个人喜好可能拉胯
 
 ### curl
 
