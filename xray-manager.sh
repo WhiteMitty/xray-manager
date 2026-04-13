@@ -4713,7 +4713,7 @@ while true; do
     echo -e "  ${CYAN}01.${NC} 覆盖安装"
     echo -e "  ${CYAN}02.${NC} 更新 Xray"
     echo -e "  ${CYAN}03.${NC} 重启 Xray"
-    echo -e "  ${CYAN}04.${NC} 查看订阅"
+    echo -e "  ${CYAN}04.${NC} 查看订阅链接"
     echo -e "  ${CYAN}05.${NC} 查看状态 & 日志"
     echo -e "  ${CYAN}06.${NC} SNI 管理 & 测速"
     echo -e "  ${CYAN}07.${NC} 环境检测（时间 & BBR）"
