@@ -1,6 +1,6 @@
 # xray-manager
 
-A Multifunctional Proxy Tool Based on Xray
+### 按 3 次 1，一直回车即可完成 Reality 直出的安装
 
 整合了 vless-enc 等功能的 xray 代理工具箱
 
@@ -32,8 +32,6 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 zdd xray
 ```
 ## 使用
-
-按 3 次 1，一直回车即可完成 Reality 直出的安装
 
 安装代理时若想简单，选择自动
 
