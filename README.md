@@ -11,5 +11,6 @@ A Multifunctional Proxy Tool Based on Xray
 ```bash
 curl -fsSL https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh | bash
 
+### wget
 ```bash
 wget -qO- https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh | bash
