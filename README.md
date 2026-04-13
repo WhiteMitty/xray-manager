@@ -13,6 +13,7 @@ curl -fsSL -o xray_manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-
 ```bash
 wget -qO xray_manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh &&  printf '1\n1\n1\n1\n' | bash xray_manager.sh --quick-install
 ```
+<br>
 
 ## 常规安装
 
@@ -27,6 +28,7 @@ curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-
 ```bash
 wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
 ```
+<br>
 
 ## 快速调用
 
@@ -54,6 +56,8 @@ zdd xray
   <img src="node_sub.jpg" alt="订阅界面" width="900">
 </p>
 
+<br>
+
 ## 其他说明
 
 安装代理时若想简单，选择自动
@@ -69,6 +73,8 @@ vless-enc 的 padding 建议有经验再自行填充，官方默认值足够好
 xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客户端仅推荐 v2rayN 因为需要填 xhttp extra
 
 ![v2演示](xhttp_extra.jpg)
+
+<br>
 
 ## 完整卸载
 
