@@ -53,6 +53,11 @@ zdd xray
   <img src="install.jpg" alt="安装界面" width="900">
 </p>
 
+<h2 align="left">端口复用</h2>
+<p align="left">
+  <img src="landing.jpg" alt="端口复用" width="900">
+</p>
+
 <h2 align="left">订阅界面</h2>
 <p align="left">
   <img src="node_sub.jpg" alt="订阅界面" width="900">
