@@ -1184,7 +1184,7 @@ DNS_EOF
 function install_alpine_runtime_deps() {
     echo -e "${YELLOW}  安装 Alpine 运行依赖...${NC}"
     apk update || return 1
-    apk add shadowsocks-rust chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+    apk add shadowsocks-rust mimalloc chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
 }
 
 function check_timesync_alpine() {
@@ -1325,6 +1325,39 @@ function validate_alpine_ss_config() {
     return 0
 }
 
+function validate_alpine_ssserver_foreground() {
+    echo -e "${YELLOW}  正在以前台方式短时验证 ssserver 配置...${NC}"
+    validate_alpine_ss_config || return 1
+
+    local fg_log=""
+    local fg_ret=0
+    fg_log=$(mktemp /tmp/ssserver-foreground.XXXXXX.log) || {
+        echo -e "${RED}  ✗ 无法创建前台验证日志文件。${NC}"
+        return 1
+    }
+    add_tmp_file "$fg_log"
+
+    timeout 3 ssserver -c "$ALPINE_SS_CONFIG_FILE" -v >"$fg_log" 2>&1
+    fg_ret=$?
+
+    case "$fg_ret" in
+        124|137|143)
+            echo -e "${GREEN}  ✓ 前台短时验证通过（进程按预期持续运行，已自动结束测试）。${NC}"
+            return 0
+            ;;
+        *)
+            cp -f -- "$fg_log" "${DATA_DIR}/last_failed_ssserver_foreground.log" 2>/dev/null || true
+            echo -e "${RED}  ✗ 前台验证失败，请先修正后再写入 OpenRC 自启。${NC}"
+            if [[ -s "$fg_log" ]]; then
+                echo -e "${CYAN}  最近输出:${NC}"
+                sed -n '1,20p' "$fg_log"
+            fi
+            echo -e "${YELLOW}  已保留失败日志: ${DATA_DIR}/last_failed_ssserver_foreground.log${NC}"
+            return 1
+            ;;
+    esac
+}
+
 function restart_alpine_ssservice() {
     line
     echo -e "${YELLOW}  重启 Alpine SS2022 服务...${NC}"
@@ -1369,7 +1402,7 @@ function update_alpine_ssservice() {
     ensure_alpine_community_repo || { line; return 1; }
 
     apk update || { line; return 1; }
-    apk add --upgrade shadowsocks-rust chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || {
+    apk add --upgrade shadowsocks-rust mimalloc chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || {
         echo -e "${RED}  ✗ 更新失败，请检查网络或仓库状态。${NC}"
         line
         return 1
@@ -1542,15 +1575,12 @@ function install_alpine_ss2022() {
     echo -e "${GREEN}${BOLD}  Alpine 专用 SS2022 安装${NC}"
     line
 
-    echo -e "\n${CYAN}[Step 1/7] 系统环境预检${NC}"
+    echo -e "
+${CYAN}[Step 1/7] 系统环境预检${NC}"
     ensure_alpine_supported || return 1
 
-    echo -e "\n${CYAN}[Step 2/7] 选择安装期间使用的系统 DNS${NC}"
-    local dns_provider=""
-    dns_provider=$(choose_alpine_dns_provider) || return 1
-    apply_alpine_dns_provider "$dns_provider" || return 1
-
-    echo -e "\n${CYAN}[Step 3/7] 检查 Alpine 仓库、时间同步与依赖${NC}"
+    echo -e "
+${CYAN}[Step 2/7] 检查 Alpine 仓库、时间同步与依赖${NC}"
     ensure_alpine_community_repo || return 1
     if ! check_timesync_alpine; then
         handle_timesync_failure "  警告：时间同步未完成，这可能导致 apk、证书校验、TLS 握手或后续网络请求异常。" || return 1
@@ -1558,7 +1588,8 @@ function install_alpine_ss2022() {
     install_alpine_runtime_deps || return 1
     check_bbr || true
 
-    echo -e "\n${CYAN}[Step 4/7] 手动选择 SS2022 参数${NC}"
+    echo -e "
+${CYAN}[Step 3/7] 手动选择 SS2022 参数${NC}"
     local ss_method=""
     local ss_port=""
     ss_method=$(choose_ss_method) || return 1
@@ -1571,21 +1602,29 @@ function install_alpine_ss2022() {
         fi
     done
 
-    echo -e "\n${CYAN}[Step 5/7] 生成密钥与写入配置${NC}"
+    echo -e "
+${CYAN}[Step 4/7] 生成密钥与写入配置${NC}"
     local ss_password=""
-    ss_password=$(ssservice genkey -m "$ss_method" 2>/dev/null | tr -d '\r\n')
+    ss_password=$(ssservice genkey -m "$ss_method" 2>/dev/null | tr -d '
+')
     if [[ -z "$ss_password" ]]; then
         echo -e "${RED}  ✗ 生成 SS2022 密钥失败，请检查 shadowsocks-rust 是否安装完整。${NC}"
         return 1
     fi
     write_alpine_ssserver_config "$ss_port" "$ss_method" "$ss_password" || return 1
-    write_alpine_openrc_service || return 1
 
-    echo -e "\n${CYAN}[Step 6/7] 启动并验证服务${NC}"
+    echo -e "
+${CYAN}[Step 5/7] 前台短时验证配置${NC}"
+    validate_alpine_ssserver_foreground || return 1
+
+    echo -e "
+${CYAN}[Step 6/7] 写入 OpenRC 并启动服务${NC}"
+    write_alpine_openrc_service || return 1
     rc-update add ssserver default >/dev/null 2>&1 || true
     restart_alpine_ssservice || return 1
 
-    echo -e "\n${CYAN}[Step 7/7] 生成节点信息${NC}"
+    echo -e "
+${CYAN}[Step 7/7] 生成节点信息${NC}"
     local public_ip_v4=""
     local public_ip_v6=""
     local ss_link_v4=""
@@ -1603,17 +1642,25 @@ function install_alpine_ss2022() {
         ss_link_v6=$(build_ss2022_uri "$public_ip_v6" "$ss_port" "$ss_method" "$ss_password" "SS2022-Alpine-IPv6-${ss_port}")
     fi
 
-    sub_text="订阅:\n  SS2022:\n"
+    sub_text="订阅:
+  SS2022:
+"
     if [[ -n "$ss_link_v4" ]]; then
-        sub_text+="  ${ss_link_v4}\n"
+        sub_text+="  ${ss_link_v4}
+"
     else
-        sub_text+="  （未获取到公网 IPv4，请手动替换为你的服务器地址）\n"
+        sub_text+="  （未获取到公网 IPv4，请手动替换为你的服务器地址）
+"
     fi
     if [[ -n "$ss_link_v6" ]]; then
-        sub_text+="\n  SS2022 (IPv6):\n  ${ss_link_v6}\n"
+        sub_text+="
+  SS2022 (IPv6):
+  ${ss_link_v6}
+"
     fi
 
-    ports_text="端口:\n  SS2022 :     ${ss_port}"
+    ports_text="端口:
+  SS2022 :     ${ss_port}"
     write_dynamic_result_files "$sub_text" "$ports_text"
     write_install_runtime_kind "alpine-ss2022"
     render_saved_node_info "配置完成" || {
@@ -4218,7 +4265,7 @@ function run_quick_install_entry() {
     if is_alpine_system; then
         echo -e "${YELLOW}检测到 Alpine / OpenRC，快速安装将自动转到 10 号 Alpine 专用 SS2022 流程。${NC}"
         if is_quick_install_noninteractive; then
-            echo -e "${RED}当前为非交互快速安装，但 Alpine 专用 SS2022 需要你手动选择 DNS、端口和加密方式。${NC}"
+            echo -e "${RED}当前为非交互快速安装，但 Alpine 专用 SS2022 需要你手动选择端口和加密方式。${NC}"
             echo -e "${YELLOW}请改用交互终端运行本地脚本，或先进入主菜单后执行 10 号 Alpine 专用流程。${NC}"
             return 1
         fi
