@@ -1,6 +1,6 @@
 # xray-manager
 
-## 丁真 · 一键脚本
+## 全自动
 
 ### curl
 
