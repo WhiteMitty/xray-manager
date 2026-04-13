@@ -9,13 +9,13 @@ A Multifunctional Proxy Tool Based on Xray
 ### curl
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh | bash
+bash <(curl -fsSL https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh)
 ```
 
 ### wget
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh | bash
+bash <(wget -qO- https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager_v0.1.0.sh)
 ```
 ## 调用
 
