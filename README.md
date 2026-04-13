@@ -75,15 +75,13 @@ zdd force install
 
 <br>
 
-![v1演示](xhttp_json.jpg)
-
 ## 复制此处 json 
+![v1演示](xhttp_json.jpg)
 
 <br>
 
-![v2演示](v2rayN.jpg)
-
 ## 在此处粘贴 
+![v2演示](v2rayN.jpg)
 
 <br>
 
