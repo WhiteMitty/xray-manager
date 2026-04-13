@@ -18,7 +18,7 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zdd xray
 ```
-娱乐版，不喜勿喷，仅测试了 debian12
+自用装机娱乐脚本，仅测试了 debian12
 
 整合了 vless-enc 等功能的 xray 代理工具箱
 
