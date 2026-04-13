@@ -43,7 +43,7 @@ zdd xray
 zdd install
 ```
 
-## 完整卸载 Xray SS-Rust 脚本及各种配置
+## 完整卸载 脚本 Xray SS-Rust 及各种配置
 
 ```bash
 zdd uinstall
