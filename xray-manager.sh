@@ -1912,7 +1912,7 @@ function choose_install_scenario() {
         echo -e "" >&2
         echo -e "${CYAN}  进阶链路:${NC}" >&2
         echo -e "  ${CYAN}5.${NC} SS 传导链（SS 入站 -> SS 出站）" >&2
-        echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS / Reality / Vless-Enc 出站）" >&2
+        echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
         echo -e "  ${CYAN}7.${NC} XHTTP + Reality 分离链路（v6 去 v4 回 / v4 去 v6 回）" >&2
         echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 分离链路（实验性 / 高风险）" >&2
         line >&2
