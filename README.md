@@ -1,37 +1,37 @@
 # xray-manager 
 # v 0.1.0 2026-04-13 
 
-## 全自动安装 reality，注：安装会覆盖原有 xray 配置，SNI 为个人喜好可能拉胯
+# 全自动安装 reality，注：安装会覆盖原有 xray 配置，SNI 为个人喜好可能拉胯
 
-### curl
+## curl
 
 ```bash
 curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && printf '1\n1\n1\n1\n' | bash xray-manager.sh --quick-install
 ```
 
-### wget
+## wget
 
 ```bash
 wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh &&  printf '1\n1\n1\n1\n' | bash xray-manager.sh --quick-install
 ```
 <br>
 
-## 常规安装
+# 常规安装
 
-### curl
+## curl
 
 ```bash
 curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
 ```
 
-### wget
+## wget
 
 ```bash
 wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
 ```
 <br>
 
-## 快速调用
+# 快速调用
 
 ```bash
 zdd xray
@@ -68,9 +68,9 @@ zdd force install
 
 <br>
 
-## 其他说明
+# 其他说明
 
-xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
+## xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
 
 ![v1演示](xhttp_json.jpg)
 
@@ -80,9 +80,9 @@ xhttp 只做了 v4 v6 上下行分离，刚需双栈小鸡，客户端仅推荐 
 
 <br>
 
-## 完整卸载
+# 完整卸载
 ![v4演示](unistall.jpg)
 
-### 9 号功能可完整卸载脚本和 xray 及各种配置文件
+## 9 号功能可完整卸载脚本和 xray 及各种配置文件
 
-### 因本身带管理运维功能，所以脚本会留在 vps 上，若嫌弃可以选仅删除脚本
+## 因本身带管理运维功能，所以脚本会留在 vps 上，若嫌弃可以选仅删除脚本
