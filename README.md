@@ -52,7 +52,7 @@ xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客�
 
 ## XHTTP 订阅示例
 
-![XHTTP 订阅示例](xhttp_sub.jpg)
+
 
 ## 卸载
 
