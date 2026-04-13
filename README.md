@@ -31,8 +31,6 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
-## 快速调用
-
 ## 启动脚本
 
 ```bash
