@@ -36,7 +36,9 @@ BEST_DEST=""
 BEST_DEST_POOL_SIG=""
 SNI_POOL_SOURCE="default"
 QUICK_INSTALL=0
+QUICK_UNINSTALL=0
 QUICK_FORCE=0
+QUICK_SCENARIO=""
 SERVICE_KIND_FILE="${DATA_DIR}/.install_kind"
 ALPINE_SS_CONFIG_DIR="/etc/shadowsocks-rust"
 ALPINE_SS_CONFIG_FILE="${ALPINE_SS_CONFIG_DIR}/ssserver.json"
@@ -245,16 +247,16 @@ case "\${1:-}" in
         shift
         exec "$SELF_SCRIPT_PATH" "\$@"
         ;;
-    force)
-        if [[ "\${2:-}" == "install" ]]; then
-            shift 2
-            exec "$SELF_SCRIPT_PATH" --quick-install --force "\$@"
-        fi
-        echo "用法: zdd xray | zdd force install"
-        exit 1
+    install)
+        shift
+        exec "$SELF_SCRIPT_PATH" --quick-install --quick-scenario 4 "\$@"
+        ;;
+    unistall|uninstall)
+        shift
+        exec "$SELF_SCRIPT_PATH" --quick-uninstall "\$@"
         ;;
     *)
-        echo "用法: zdd xray | zdd force install"
+        echo "用法: zdd xray | zdd install | zdd unistall"
         exit 1
         ;;
 esac
@@ -271,6 +273,19 @@ function parse_cli_args() {
         case "$1" in
             --quick-install)
                 QUICK_INSTALL=1
+                shift
+                ;;
+            --quick-uninstall)
+                QUICK_UNINSTALL=1
+                shift
+                ;;
+            --quick-scenario)
+                shift
+                if [[ $# -eq 0 ]]; then
+                    echo -e "${RED}错误：--quick-scenario 需要一个安装模板编号${NC}" >&2
+                    exit 1
+                fi
+                QUICK_SCENARIO="$1"
                 shift
                 ;;
             --force)
@@ -1548,13 +1563,17 @@ function uninstall_alpine_ss_and_delete_self() {
     line
     echo -e "${RED}  - 卸载 shadowsocks-rust（Alpine）${NC}"
     echo -e "${RED}  - 删除 SS2022 配置与 OpenRC 服务文件${NC}"
-    echo -e "${RED}  - 删除快捷指令 zdd xray${NC}"
+    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
     echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
     line
-    read -r -p "输入 yes 继续: " CONFIRM
-    if [[ "$CONFIRM" != "yes" ]]; then
-        echo -e "${YELLOW}已取消。${NC}"
-        return 0
+    if should_auto_confirm_uninstall; then
+        echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
+    else
+        read -r -p "输入 yes 继续: " CONFIRM
+        if [[ "$CONFIRM" != "yes" ]]; then
+            echo -e "${YELLOW}已取消。${NC}"
+            return 0
+        fi
     fi
 
     rc-service ssserver stop >/dev/null 2>&1 || true
@@ -2074,7 +2093,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  快捷指令: zdd xray | zdd force install${NC}"
+    echo -e "${CYAN}  快捷指令: zdd xray | zdd install | zdd unistall${NC}"
 }
 
 function render_saved_meta_block() {
@@ -2830,8 +2849,13 @@ function install_xray() {
     echo -e "\n${CYAN}[Step 3/7] 第三层：模板选择${NC}"
     local SCENARIO=""
     if is_quick_install_noninteractive; then
-        SCENARIO="1"
-        echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 单 Reality）。${NC}"
+        if [[ -n "$QUICK_SCENARIO" ]]; then
+            SCENARIO="$QUICK_SCENARIO"
+            echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用指定值（$(printf '%02d' "$SCENARIO") $(get_install_scenario_label "$SCENARIO")）。${NC}"
+        else
+            SCENARIO="1"
+            echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 单 Reality）。${NC}"
+        fi
     else
         SCENARIO=$(choose_install_scenario)
     fi
@@ -4307,6 +4331,10 @@ function edit_runtime_config() {
     fi
 }
 
+function should_auto_confirm_uninstall() {
+    [[ "$QUICK_UNINSTALL" == "1" ]]
+}
+
 function uninstall_current_service_and_delete_self() {
     if is_alpine_runtime_present || is_alpine_system; then
         uninstall_alpine_ss_and_delete_self
@@ -4612,7 +4640,7 @@ function uninstall_script_only() {
     line
     center_echo "仅卸载脚本" "${RED}${BOLD}"
     line
-    echo -e "${RED}  - 删除快捷指令 zdd xray${NC}"
+    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
     echo -e "${RED}  - 删除本脚本存储目录、生成的 txt 文件与脚本写入项${NC}"
     echo -e "${RED}  - 保留当前服务、配置与相关残留${NC}"
     line
@@ -4634,13 +4662,17 @@ function uninstall_xray_and_delete_self() {
     line
     echo -e "${RED}  - 卸载 Xray${NC}"
     echo -e "${RED}  - 删除配置、服务文件与常见残留${NC}"
-    echo -e "${RED}  - 删除快捷指令 zdd xray${NC}"
+    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
     echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
     line
-    read -r -p "输入 yes 继续: " CONFIRM
-    if [[ "$CONFIRM" != "yes" ]]; then
-        echo -e "${YELLOW}已取消。${NC}"
-        return 0
+    if should_auto_confirm_uninstall; then
+        echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
+    else
+        read -r -p "输入 yes 继续: " CONFIRM
+        if [[ "$CONFIRM" != "yes" ]]; then
+            echo -e "${YELLOW}已取消。${NC}"
+            return 0
+        fi
     fi
 
     echo -e "${YELLOW}  停止并禁用 Xray 服务...${NC}"
@@ -4663,10 +4695,10 @@ function uninstall_xray_and_delete_self() {
 function uninstall_menu() {
     while true; do
         line
-        center_echo "卸载脚本 Xray SS-Rust" "${RED}${BOLD}"
+        center_echo "卸载 脚本 Xray SS-Rust" "${RED}${BOLD}"
         line
         echo -e "  ${CYAN}1.${NC} 仅卸载脚本"
-        echo -e "  ${CYAN}2.${NC} 卸载脚本 Xray SS-Rust"
+        echo -e "  ${CYAN}2.${NC} 卸载 脚本 Xray SS-Rust"
         echo -e "  ${CYAN}0.${NC} 返回主菜单"
         line
         read -r -p "选择 [0/1/2]: " UNINSTALL_CHOICE
@@ -4697,6 +4729,11 @@ if [[ "$QUICK_INSTALL" == "1" ]]; then
     exit $?
 fi
 
+if [[ "$QUICK_UNINSTALL" == "1" ]]; then
+    uninstall_current_service_and_delete_self
+    exit $?
+fi
+
 while true; do
     clear_screen
     line
@@ -4708,7 +4745,7 @@ while true; do
     echo -e "  SS 默认加密 2022-blake3-aes-128-gcm 手动模式增加 256-gcm"
     echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
     echo -e "  SNI测速 + 时间同步 + BBR+FQ + Vless-Enc"
-    echo -e "  快捷调用可输入: zdd xray | zdd force install"
+    echo -e "  快捷调用可输入: zdd xray | zdd install | zdd unistall"
     line
     echo -e "  ${CYAN}01.${NC} 覆盖安装"
     echo -e "  ${CYAN}02.${NC} 更新 Xray"
