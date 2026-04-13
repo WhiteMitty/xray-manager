@@ -13,7 +13,7 @@ curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-
 ```bash
 wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
 ```
-## 调用
+## 快速调用
 
 ```bash
 zdd xray
@@ -43,7 +43,7 @@ zdd xray
   <img src="node_sub.jpg" alt="订阅界面" width="900">
 </p>
 
-## 说明
+## 其他说明
 
 安装代理时若想简单，选择自动
 
@@ -59,6 +59,6 @@ xhttp 只做了基于 v4 v6 的上下行分离，所以刚需双栈小鸡，客�
 
 ![v2演示](xhttp_extra.jpg)
 
-## 卸载
+## 完整卸载
 
 9 号功能可完整卸载脚本和 xray 及各种配置文件
