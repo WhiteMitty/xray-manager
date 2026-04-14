@@ -441,6 +441,96 @@ function is_port_in_use_by_non_xray() {
     '
 }
 
+function get_port_listener_details() {
+    local port="$1"
+    ss -ltnupH 2>/dev/null | awk -v port="$port" '
+        $5 ~ ("(^|:|\\])" port "$") { print }
+    '
+}
+
+function is_port_in_use_by_xray() {
+    local port="$1"
+    get_port_listener_details "$port" | grep -q 'users:(("xray"'
+}
+
+function get_xray_pids_by_port() {
+    local port="$1"
+    get_port_listener_details "$port" | grep -o 'pid=[0-9]\+' | cut -d= -f2 | sort -u
+}
+
+function print_port_listener_details() {
+    local port="$1"
+    local details=""
+    details=$(get_port_listener_details "$port")
+    if [[ -n "$details" ]]; then
+        echo -e "${CYAN}  端口 ${port} 占用详情:${NC}"
+        printf '%s\n' "$details"
+    else
+        echo -e "${GREEN}  端口 ${port} 当前未检测到监听${NC}"
+    fi
+}
+
+function show_reality_alternate_port_hint() {
+    local port="$1"
+    local alternate_port=""
+
+    case "$port" in
+        443)
+            alternate_port="8443"
+            ;;
+        8443)
+            alternate_port="443"
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    if is_port_in_use "$alternate_port"; then
+        echo -e "${RED}  另外端口 ${alternate_port} 也已被占用。${NC}"
+        print_port_listener_details "$alternate_port"
+        echo -e "${RED}  当前 443 和 8443 都不可用于 Reality。${NC}"
+    else
+        echo -e "${YELLOW}  提示：备用端口 ${alternate_port} 当前空闲，如需继续可改用 ${alternate_port}。${NC}"
+    fi
+}
+
+function stop_xray_occupying_port() {
+    local port="$1"
+    local pids=""
+    local i=""
+
+    echo -e "${YELLOW}  检测到端口 ${port} 当前由 xray 占用，正在尝试关闭旧实例...${NC}"
+    systemctl stop xray >/dev/null 2>&1 || true
+
+    for i in 1 2 3; do
+        sleep 1
+        if ! is_port_in_use "$port"; then
+            echo -e "${GREEN}  ✓ 已释放端口 ${port}（通过停止 xray 服务）${NC}"
+            return 0
+        fi
+    done
+
+    if is_port_in_use_by_xray "$port"; then
+        pids=$(get_xray_pids_by_port "$port" | tr '\n' ' ' | sed 's/[[:space:]]\+$//')
+        if [[ -n "$pids" ]]; then
+            echo -e "${YELLOW}  systemd 停止后仍检测到残留 xray 进程，正在尝试结束: ${pids}${NC}"
+            kill $pids >/dev/null 2>&1 || true
+            for i in 1 2 3; do
+                sleep 1
+                if ! is_port_in_use "$port"; then
+                    echo -e "${GREEN}  ✓ 已释放端口 ${port}（已结束残留 xray 进程）${NC}"
+                    return 0
+                fi
+            done
+        fi
+    fi
+
+    echo -e "${RED}  ✗ 端口 ${port} 仍被占用，无法继续。${NC}"
+    print_port_listener_details "$port"
+    return 1
+}
+
 function generate_short_id() {
     local sid=""
     local i
@@ -1157,8 +1247,67 @@ function install_alpine_runtime_deps() {
     apk add shadowsocks-rust mimalloc chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
 }
 
+function ensure_alpine_shanghai_timezone() {
+    echo -e "${YELLOW}  正在设置 Alpine 时区为 Asia/Shanghai...${NC}"
+    apk update >/dev/null 2>&1 || true
+    apk add tzdata >/dev/null 2>&1 || true
+
+    if [[ -e /usr/share/zoneinfo/Asia/Shanghai ]]; then
+        ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime || true
+        printf '%s\n' 'Asia/Shanghai' > /etc/timezone || true
+        echo -e "${GREEN}  ✓ 当前时区已设置为 Asia/Shanghai${NC}"
+        echo -e "${CYAN}  当前时间: $(date 2>/dev/null || true)${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}  ⚠ 未找到 Asia/Shanghai 时区文件，跳过时区设置。${NC}"
+    return 1
+}
+
+function manual_set_alpine_time() {
+    local hour=""
+    local minute=""
+    local current_date=""
+    local manual_ts=""
+
+    echo -e "${YELLOW}  现在可按上海时间手动输入时间。${NC}"
+    echo -e "${CYAN}  当前时间: $(date 2>/dev/null || true)${NC}"
+
+    while true; do
+        read -r -p "请输入小时 [0-23]: " hour
+        if [[ "$hour" =~ ^[0-9]+$ ]] && (( hour >= 0 && hour <= 23 )); then
+            printf -v hour '%02d' "$hour"
+            break
+        fi
+        echo -e "${RED}  小时必须是 0-23。${NC}"
+    done
+
+    while true; do
+        read -r -p "请输入分钟 [0-59]: " minute
+        if [[ "$minute" =~ ^[0-9]+$ ]] && (( minute >= 0 && minute <= 59 )); then
+            printf -v minute '%02d' "$minute"
+            break
+        fi
+        echo -e "${RED}  分钟必须是 0-59。${NC}"
+    done
+
+    current_date=$(date +%F 2>/dev/null || true)
+    [[ -n "$current_date" ]] || current_date="1970-01-01"
+    manual_ts="${current_date} ${hour}:${minute}:00"
+
+    if date -s "$manual_ts" >/dev/null 2>&1; then
+        hwclock -w >/dev/null 2>&1 || true
+        echo -e "${GREEN}  ✓ 已手动设置时间为: $(date 2>/dev/null || true)${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  ✗ 手动设置时间失败。${NC}"
+    return 1
+}
+
 function check_timesync_alpine() {
     echo -e "${YELLOW}  检查 Alpine 时间同步状态...${NC}"
+    ensure_alpine_shanghai_timezone || true
 
     local leap_status=""
     if command -v chronyc >/dev/null 2>&1; then
@@ -1191,6 +1340,18 @@ function check_timesync_alpine() {
         rc-service chronyd restart >/dev/null 2>&1 || true
         echo -e "${YELLOW}  已通过一次性校时修正当前时间，后续建议继续观察 chronyd 同步状态。${NC}"
         return 0
+    fi
+
+    if is_stdin_interactive; then
+        echo -e "${YELLOW}  一次性临时校时也失败了。${NC}"
+        if ask_yes_no "  是否按上海时间手动输入当前时间"; then
+            if manual_set_alpine_time; then
+                rc-service chronyd restart >/dev/null 2>&1 || true
+                return 0
+            fi
+        fi
+    else
+        echo -e "${YELLOW}  当前为非交互模式，跳过手动输入时间。${NC}"
     fi
 
     echo -e "${RED}  ✗ Alpine 时间同步仍未完成。${NC}"
@@ -2787,15 +2948,54 @@ function precheck_reality_port_before_apply() {
     case "$scenario" in
         1|4|7)
             echo -e "${YELLOW}  端口预检...${NC}"
-            if is_port_in_use_by_non_xray "$port"; then
-                echo -e "${RED}  端口 ${port} 已被非 xray 进程占用，安装已中止。${NC}"
-                echo -e "${YELLOW}  请先执行：ss -ltnup | grep :${port}${NC}"
-                return 1
+
+            if ! is_port_in_use "$port"; then
+                echo -e "${GREEN}  ✓ Reality 目标端口 ${port} 当前空闲${NC}"
+                return 0
             fi
-            echo -e "${GREEN}  ✓ Reality 目标端口 ${port} 未被非 xray 进程占用${NC}"
+
+            if is_port_in_use_by_xray "$port"; then
+                stop_xray_occupying_port "$port" || {
+                    show_reality_alternate_port_hint "$port"
+                    return 1
+                }
+                echo -e "${GREEN}  ✓ Reality 目标端口 ${port} 已可继续使用${NC}"
+                return 0
+            fi
+
+            echo -e "${RED}  端口 ${port} 已被非 xray 进程占用，安装已中止。${NC}"
+            print_port_listener_details "$port"
+            show_reality_alternate_port_hint "$port"
+            echo -e "${YELLOW}  请先执行：ss -ltnup | grep :${port}${NC}"
+            return 1
             ;;
     esac
     return 0
+}
+
+function precheck_reusable_xray_port_before_apply() {
+    local port="$1"
+    local label="$2"
+
+    [[ -n "$port" ]] || return 0
+
+    echo -e "${YELLOW}  端口预检...${NC}"
+
+    if ! is_port_in_use "$port"; then
+        echo -e "${GREEN}  ✓ ${label} 目标端口 ${port} 当前空闲${NC}"
+        return 0
+    fi
+
+    if is_port_in_use_by_xray "$port"; then
+        stop_xray_occupying_port "$port" || return 1
+        echo -e "${GREEN}  ✓ ${label} 目标端口 ${port} 已可继续使用${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  端口 ${port} 已被非 xray 进程占用，安装已中止。${NC}"
+    print_port_listener_details "$port"
+    echo -e "${YELLOW}  请先执行：ss -ltnup | grep :${port}${NC}"
+    return 1
 }
 
 function install_xray() {
@@ -3204,13 +3404,15 @@ function install_xray() {
     fi
 
     if [[ "$SCENARIO" == "3" || "$SCENARIO" == "4" || "$SCENARIO" == "6" || "$SCENARIO" == "8" ]]; then
-        UUID=$(/usr/local/bin/xray uuid 2>/dev/null || true)
-        [[ -n "$UUID" ]] || { echo -e "${RED}  ✗ 生成 Vless-Enc UUID 失败，安装已中止。${NC}"; return 1; }
+        if [[ -z "${UUID:-}" ]]; then
+            UUID=$(/usr/local/bin/xray uuid 2>/dev/null || true)
+            [[ -n "$UUID" ]] || { echo -e "${RED}  ✗ 生成 Vless-Enc UUID 失败，安装已中止。${NC}"; return 1; }
+        fi
     fi
 
     if [[ "$SCENARIO" == "2" || "$SCENARIO" == "4" || "$SCENARIO" == "5" ]]; then
         if [[ "$SS_PORT_SOURCE" == "manual" ]]; then
-            while is_port_in_use "$MANUAL_SS_PORT" || [[ "$MANUAL_SS_PORT" == "$PORT" ]]; do
+            while is_port_in_use_by_non_xray "$MANUAL_SS_PORT" || [[ "$MANUAL_SS_PORT" == "$PORT" ]]; do
                 echo -e "${RED}  端口 ${MANUAL_SS_PORT} 已被占用或与 Reality 冲突。${NC}"
                 MANUAL_SS_PORT=$(read_manual_ss_port "请重新输入 SS2022 端口: ")
             done
@@ -3227,7 +3429,7 @@ function install_xray() {
 
     if [[ "$SCENARIO" == "3" || "$SCENARIO" == "4" || "$SCENARIO" == "6" || "$SCENARIO" == "8" ]]; then
         if [[ "$ENC_PORT_SOURCE" == "manual" ]]; then
-            while is_port_in_use "$MANUAL_ENC_PORT" || [[ "$MANUAL_ENC_PORT" == "$PORT" || "$MANUAL_ENC_PORT" == "$LOCAL_SS_PORT" ]]; do
+            while is_port_in_use_by_non_xray "$MANUAL_ENC_PORT" || [[ "$MANUAL_ENC_PORT" == "$PORT" || "$MANUAL_ENC_PORT" == "$LOCAL_SS_PORT" ]]; do
                 echo -e "${RED}  端口 ${MANUAL_ENC_PORT} 已被占用或与现有端口冲突。${NC}"
                 MANUAL_ENC_PORT=$(read_manual_ss_port "请重新输入 Vless-Enc 端口: ")
             done
@@ -3272,6 +3474,10 @@ function install_xray() {
     fi
 
     echo -e "${GREEN}  ✓ 端口、密钥与模板参数已准备完成${NC}"
+
+    precheck_reality_port_before_apply "$SCENARIO" "$PORT" || return 1
+    precheck_reusable_xray_port_before_apply "$LOCAL_SS_PORT" "SS2022" || return 1
+    precheck_reusable_xray_port_before_apply "$LOCAL_ENC_PORT" "Vless-Enc" || return 1
 
     echo -e "\n${CYAN}[Step 7/7] 写入配置并启动服务${NC}"
     render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
