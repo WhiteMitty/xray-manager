@@ -2860,7 +2860,7 @@ function choose_install_scenario() {
         echo -e "${CYAN}${BOLD}  第三层：选择安装模板${NC}" >&2
         line >&2
         echo -e "${CYAN}  基础直出:${NC}" >&2
-        echo -e "  ${CYAN}1.${NC} 单 Reality（直出 / 多落地）" >&2
+        echo -e "  ${CYAN}1.${NC} 单 Reality" >&2
         echo -e "  ${CYAN}2.${NC} 单 SS 直出" >&2
         echo -e "  ${CYAN}3.${NC} 单 Vless-Enc 直出" >&2
         echo -e "  ${CYAN}4.${NC} Reality Vless-Enc SS 三入站直出" >&2
