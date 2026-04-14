@@ -89,26 +89,9 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ### xhttp 使用
 
 ### xhttp 只做了 v4 v6 分离，刚需双栈机器
-### 客户端仅推荐 v2rayN 因除订阅还要填 xhttp extra
+### 推荐 Xray 内核的代理如 v2rayN Exclave
 
 <br>
-
-### 复制此处 json 
-![v1演示](xhttp_json.jpg)
-
-<br>
-
-### 在此处粘贴 
-![v2演示](v2rayN.jpg)
-
-<br>
-
-![v3演示](xhttp_extra.jpg)
-
-<br>
-
-### 完整卸载
-![v4演示](unistall.jpg)
 
 ### 9 号功能可完整卸载脚本和 xray 及各种配置文件
 
