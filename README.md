@@ -42,6 +42,11 @@ zdd xray
 ```bash
 zdd install
 ```
+## 更新脚本和 Xray
+
+```bash
+zdd update
+```
 
 ## 完整卸载 脚本 Xray SS-Rust 及各种配置
 
