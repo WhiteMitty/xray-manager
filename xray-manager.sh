@@ -45,6 +45,7 @@ SERVICE_KIND_FILE="${DATA_DIR}/.install_kind"
 ALPINE_SS_CONFIG_DIR="/etc/shadowsocks-rust"
 ALPINE_SS_CONFIG_FILE="${ALPINE_SS_CONFIG_DIR}/ssserver.json"
 ALPINE_SS_SERVICE_FILE="/etc/init.d/ssserver"
+ALPINE_XRAY_SERVICE_FILE="/etc/init.d/xray"
 ALPINE_RESOLV_BACKUP="${DATA_DIR}/alpine_resolv.conf.bak"
 
 DEFAULT_DEST_OPTIONS=(
@@ -328,7 +329,7 @@ function self_update_and_update_xray() {
     chmod 755 "$SELF_SCRIPT_PATH" >/dev/null 2>&1 || true
 
     echo -e "${GREEN}  ✓ 脚本已更新到最新版本。${NC}"
-    echo -e "${YELLOW}  正在继续更新 Xray 核心程序...${NC}"
+    echo -e "${YELLOW}  正在继续更新当前运行组件...${NC}"
     line
     exec env DOUDOU_SELF_UPDATED=1 bash "$SELF_SCRIPT_PATH" --quick-update
 }
@@ -404,6 +405,11 @@ function get_install_runtime_kind() {
         return 0
     fi
 
+    if is_alpine_system && [[ -x "$ALPINE_XRAY_SERVICE_FILE" || ( -x /usr/local/bin/xray && -f "$CONFIG_FILE" ) ]]; then
+        printf '%s\n' 'alpine-xray-vlessenc'
+        return 0
+    fi
+
     if is_alpine_system && [[ -f "$ALPINE_SS_CONFIG_FILE" || -x "$ALPINE_SS_SERVICE_FILE" || -x /usr/bin/ssserver ]]; then
         printf '%s\n' 'alpine-ss2022'
         return 0
@@ -418,7 +424,14 @@ function get_install_runtime_kind() {
 }
 
 function is_alpine_runtime_present() {
-    [[ "$(get_install_runtime_kind 2>/dev/null || true)" == "alpine-ss2022" ]]
+    case "$(get_install_runtime_kind 2>/dev/null || true)" in
+        alpine-ss2022|alpine-xray-vlessenc)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 function ensure_alpine_supported() {
@@ -1388,10 +1401,55 @@ function ensure_alpine_community_repo() {
     return 0
 }
 
+function is_alpine_ss_runtime_ready() {
+    command -v ssserver >/dev/null 2>&1 && command -v ssservice >/dev/null 2>&1
+}
+
+function install_alpine_shadowsocks_rust_package() {
+    echo -e "${YELLOW}  安装 shadowsocks-rust 运行组件...${NC}"
+    apk add shadowsocks-rust mimalloc || return 1
+    return 0
+}
+
+function ensure_alpine_ss_runtime_ready() {
+    if is_alpine_ss_runtime_ready; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}  当前未检测到 shadowsocks-rust 运行组件。${NC}"
+    if ask_yes_no "  是否现在继续安装 shadowsocks-rust"; then
+        install_alpine_shadowsocks_rust_package || return 1
+        if is_alpine_ss_runtime_ready; then
+            return 0
+        fi
+        echo -e "${RED}  ✗ 安装后仍未检测到 ssserver / ssservice。${NC}"
+        return 1
+    fi
+
+    echo -e "${RED}  已取消：SS2022 流程必须依赖 shadowsocks-rust。${NC}"
+    return 1
+}
+
 function install_alpine_runtime_deps() {
     echo -e "${YELLOW}  安装 Alpine 运行依赖...${NC}"
     apk update || return 1
-    apk add shadowsocks-rust mimalloc chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+    apk add chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+
+    if is_alpine_ss_runtime_ready; then
+        echo -e "${GREEN}  ✓ 已检测到 shadowsocks-rust 运行组件${NC}"
+        return 0
+    fi
+
+    if install_alpine_shadowsocks_rust_package; then
+        echo -e "${GREEN}  ✓ shadowsocks-rust 已安装完成${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}  ⚠ shadowsocks-rust 安装失败。${NC}"
+    if ask_yes_no "  是否继续完成其余环境准备"; then
+        return 0
+    fi
+    return 1
 }
 
 function ensure_alpine_shanghai_timezone() {
@@ -1416,6 +1474,7 @@ function manual_set_alpine_time() {
     local minute=""
     local current_date=""
     local manual_ts=""
+    local manual_log=""
 
     echo -e "${YELLOW}  现在可按上海时间手动输入时间。${NC}"
     echo -e "${CYAN}  当前时间: $(date 2>/dev/null || true)${NC}"
@@ -1441,14 +1500,32 @@ function manual_set_alpine_time() {
     current_date=$(date +%F 2>/dev/null || true)
     [[ -n "$current_date" ]] || current_date="1970-01-01"
     manual_ts="${current_date} ${hour}:${minute}:00"
+    manual_log=$(mktemp /tmp/alpine-manual-time.XXXXXX.log) || {
+        echo -e "${RED}  ✗ 无法创建手动校时日志文件。${NC}"
+        return 1
+    }
+    add_tmp_file "$manual_log"
 
-    if date -s "$manual_ts" >/dev/null 2>&1; then
+    rc-service chronyd stop >/dev/null 2>&1 || true
+
+    if date -s "$manual_ts" >"$manual_log" 2>&1 || \
+       date -s "${current_date} ${hour}:${minute}" >"$manual_log" 2>&1 || \
+       { command -v busybox >/dev/null 2>&1 && busybox date -s "$manual_ts" >"$manual_log" 2>&1; }; then
         hwclock -w >/dev/null 2>&1 || true
+        rc-service chronyd start >/dev/null 2>&1 || true
         echo -e "${GREEN}  ✓ 已手动设置时间为: $(date 2>/dev/null || true)${NC}"
         return 0
     fi
 
+    cp -f -- "$manual_log" "${DATA_DIR}/last_failed_manual_time.log" 2>/dev/null || true
     echo -e "${RED}  ✗ 手动设置时间失败。${NC}"
+    if grep -Eqi 'Operation not permitted|not permitted|settimeofday|can.t set date|Cannot set date' "$manual_log"; then
+        echo -e "${YELLOW}  提示：这更像是当前机器 / 虚拟化环境禁止修改系统时间，不是脚本输入格式本身的问题。${NC}"
+    else
+        echo -e "${YELLOW}  提示：更像是当前机器上的 date / chronyd / 权限状态异常，已保留日志供排查。${NC}"
+    fi
+    echo -e "${YELLOW}  已保留失败日志: ${DATA_DIR}/last_failed_manual_time.log${NC}"
+    rc-service chronyd start >/dev/null 2>&1 || true
     return 1
 }
 
@@ -1650,6 +1727,9 @@ function restart_alpine_ssservice() {
 
     rc-service ssserver restart >/dev/null 2>&1 || rc-service ssserver start >/dev/null 2>&1 || {
         echo -e "${RED}  ✗ SS2022 服务启动失败。${NC}"
+        echo -e "${YELLOW}  正在补做一次前台验证，用于区分是配置问题还是 OpenRC / 机器环境问题...${NC}"
+        validate_alpine_ssserver_foreground || true
+        rc-service ssserver status || true
         line
         return 1
     }
@@ -1891,6 +1971,7 @@ ${CYAN}[Step 3/7] 手动选择 SS2022 参数${NC}"
 
     echo -e "
 ${CYAN}[Step 4/7] 生成密钥与写入配置${NC}"
+    ensure_alpine_ss_runtime_ready || return 1
     local ss_password=""
     ss_password=$(ssservice genkey -m "$ss_method" 2>/dev/null | tr -d '\n')
     if [[ -z "$ss_password" ]]; then
@@ -2878,11 +2959,36 @@ cat <<'EOF'
 EOF
 }
 
+function normalize_block_spacing() {
+    awk '
+        NR == 1 {
+            print
+            prev_blank = ($0 == "")
+            next
+        }
+        {
+            is_top = ($0 != "" && $0 !~ /^[[:space:]]/)
+            if (is_top && !prev_blank) {
+                print ""
+            }
+            print
+            prev_blank = ($0 == "")
+        }
+    '
+}
+
 function write_dynamic_result_files() {
     local sub_text="$1"
     local ports_text="$2"
     local now_time
+    local normalized_sub_text=""
+    local normalized_ports_text=""
     now_time=$(date '+%Y-%m-%d %H:%M:%S')
+
+    normalized_sub_text=$(printf '%b\n' "$sub_text" | normalize_block_spacing)
+    if [[ -n "$ports_text" ]]; then
+        normalized_ports_text=$(printf '%b\n' "$ports_text" | normalize_block_spacing)
+    fi
 
     (
         umask 077
@@ -2890,9 +2996,9 @@ function write_dynamic_result_files() {
             printf '作者    : %s\n' "$AUTHOR_NAME"
             printf '版本    : %s\n' "$SCRIPT_VERSION"
             printf '生成时间: %s\n\n' "$now_time"
-            printf '%b\n' "$sub_text"
-            if [[ -n "$ports_text" ]]; then
-                printf '\n%b\n' "$ports_text"
+            printf '%s\n' "$normalized_sub_text"
+            if [[ -n "$normalized_ports_text" ]]; then
+                printf '\n%s\n' "$normalized_ports_text"
             fi
         } > "$INFO_FILE"
 
@@ -2900,7 +3006,7 @@ function write_dynamic_result_files() {
             printf '作者    : %s\n' "$AUTHOR_NAME"
             printf '版本    : %s\n' "$SCRIPT_VERSION"
             printf '生成时间: %s\n\n' "$now_time"
-            printf '%b\n' "$sub_text"
+            printf '%s\n' "$normalized_sub_text"
         } > "$SUB_FILE"
     )
 
@@ -3212,6 +3318,860 @@ function precheck_reusable_xray_port_before_apply() {
     print_port_listener_details "$port"
     echo -e "${YELLOW}  请先执行：ss -ltnup | grep :${port}${NC}"
     return 1
+}
+
+
+function install_alpine_base_deps() {
+    echo -e "${YELLOW}  安装 Alpine 基础依赖...${NC}"
+    apk update || return 1
+    apk add chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+}
+
+function get_alpine_xray_enc_port_from_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        if command -v jq >/dev/null 2>&1; then
+            jq -r '.inbounds[]? | select(.tag=="in-enc") | .port' "$CONFIG_FILE" 2>/dev/null | head -n 1
+        else
+            awk -F: '/"tag"[[:space:]]*:[[:space:]]*"in-enc"/ {found=1} found && /"port"/ {gsub(/[^0-9]/, "", $2); print $2; exit}' "$CONFIG_FILE" 2>/dev/null || true
+        fi
+    fi
+}
+
+function write_alpine_xray_openrc_service() {
+    backup_file_if_exists "$ALPINE_XRAY_SERVICE_FILE" || return 1
+    cat > "$ALPINE_XRAY_SERVICE_FILE" <<'SERVICE_EOF'
+#!/sbin/openrc-run
+
+name="xray"
+description="Xray Service"
+
+command="/usr/local/bin/xray"
+command_args="run -config /usr/local/etc/xray/config.json"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+    need net
+}
+SERVICE_EOF
+    chmod +x "$ALPINE_XRAY_SERVICE_FILE" >/dev/null 2>&1 || true
+}
+
+function choose_alpine_vlessenc_scenario() {
+    local choice
+    while true; do
+        line >&2
+        echo -e "${CYAN}${BOLD}  第三层：选择 Alpine Vless-Enc 模板${NC}" >&2
+        line >&2
+        echo -e "  ${CYAN}3.${NC} 单 Vless-Enc 直出" >&2
+        echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        line >&2
+        read -r -p "选择 [3/6/0/b]: " choice
+        case "$choice" in
+            3|6) printf '%s' "$choice"; return 0 ;;
+            0|00) printf '%s' '__BACK__'; return 0 ;;
+            b|B) printf '%s' '__MAIN__'; return 0 ;;
+            *) echo -e "${RED}  请输入 3、6、0 或 b。${NC}" >&2 ;;
+        esac
+    done
+}
+
+function restart_alpine_xray_service() {
+    line
+    echo -e "${YELLOW}  重启 Alpine Xray（Vless-Enc）服务...${NC}"
+    ensure_alpine_supported || return 1
+
+    if [[ ! -x /usr/local/bin/xray ]]; then
+        echo -e "${RED}  ✗ 未找到 /usr/local/bin/xray${NC}"
+        line
+        return 1
+    fi
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${RED}  ✗ 未找到配置文件：${CONFIG_FILE}${NC}"
+        line
+        return 1
+    fi
+
+    if ! /usr/local/bin/xray run -test -config "$CONFIG_FILE"; then
+        echo -e "${RED}  ✗ 当前配置验证失败，已取消重启。${NC}"
+        line
+        return 1
+    fi
+
+    if [[ ! -x "$ALPINE_XRAY_SERVICE_FILE" ]]; then
+        echo -e "${RED}  ✗ 未找到 OpenRC 服务文件：${ALPINE_XRAY_SERVICE_FILE}${NC}"
+        line
+        return 1
+    fi
+
+    rc-update add xray default >/dev/null 2>&1 || true
+    rc-service xray restart >/dev/null 2>&1 || rc-service xray start >/dev/null 2>&1 || {
+        echo -e "${RED}  ✗ Alpine Xray 服务启动失败。${NC}"
+        rc-service xray status || true
+        line
+        return 1
+    }
+
+    local check_attempt=0
+    while [[ $check_attempt -lt 5 ]]; do
+        sleep 2
+        if rc-service xray status >/dev/null 2>&1; then
+            break
+        fi
+        check_attempt=$((check_attempt + 1))
+        echo -e "${YELLOW}  等待服务启动... (${check_attempt}/5)${NC}"
+    done
+
+    if ! rc-service xray status >/dev/null 2>&1; then
+        echo -e "${RED}  Alpine Xray 服务启动失败！${NC}"
+        rc-service xray status || true
+        echo -e "${YELLOW}  可继续手动排查：/usr/local/bin/xray run -config ${CONFIG_FILE}${NC}"
+        line
+        return 1
+    fi
+
+    echo -e "${GREEN}  ✓ Alpine Xray 服务已启动${NC}"
+
+    local listen_port=""
+    listen_port=$(get_alpine_xray_enc_port_from_config)
+    if [[ -n "$listen_port" ]]; then
+        if ss -ltnup 2>/dev/null | grep -q ":${listen_port}\b"; then
+            echo -e "${GREEN}  ✓ 已检测到 ${listen_port} 端口监听${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ 未明确检测到 ${listen_port} 端口监听，请手动检查：ss -ltnup | grep :${listen_port}${NC}"
+        fi
+    fi
+    line
+}
+
+function update_alpine_xray_service() {
+    line
+    echo -e "${YELLOW}  更新 Alpine Xray（Vless-Enc）...${NC}"
+    ensure_alpine_supported || return 1
+    ensure_alpine_community_repo || { line; return 1; }
+    install_alpine_base_deps || { line; return 1; }
+
+    echo -e "${YELLOW}  安装 / 更新 Xray 核心程序...${NC}"
+    download_and_run_xray_installer install || {
+        echo -e "${RED}  ✗ Xray 更新失败，请检查网络后重试。${NC}"
+        line
+        return 1
+    }
+
+    if [[ ! -x /usr/local/bin/xray ]]; then
+        echo -e "${RED}  ✗ 更新失败：未找到 /usr/local/bin/xray${NC}"
+        line
+        return 1
+    fi
+
+    echo -e "${GREEN}  ✓ $(/usr/local/bin/xray version | head -1)${NC}"
+
+    if [[ -f "$CONFIG_FILE" ]]; then
+        write_alpine_xray_openrc_service || { line; return 1; }
+        restart_alpine_xray_service || return 1
+        return 0
+    fi
+    line
+}
+
+function show_alpine_xray_status() {
+    line
+    center_echo "Alpine Xray（Vless-Enc）服务状态" "${CYAN}${BOLD}"
+    line
+    ensure_alpine_supported || return 1
+
+    if [[ -x /usr/local/bin/xray ]]; then
+        echo -e "${CYAN}  版本: $(/usr/local/bin/xray version | head -1)${NC}"
+    else
+        echo -e "${YELLOW}  版本: N/A${NC}"
+    fi
+
+    if [[ -x "$ALPINE_XRAY_SERVICE_FILE" ]]; then
+        rc-service xray status || true
+    else
+        echo -e "${YELLOW}  未找到 OpenRC 服务文件：${ALPINE_XRAY_SERVICE_FILE}${NC}"
+    fi
+
+    echo ""
+    local listen_port=""
+    listen_port=$(get_alpine_xray_enc_port_from_config)
+    if [[ -n "$listen_port" ]]; then
+        center_echo "监听检查" "${CYAN}${BOLD}"
+        ss -ltnup 2>/dev/null | grep ":${listen_port}\b" || echo -e "${YELLOW}  未检测到 ${listen_port} 端口监听${NC}"
+        echo ""
+    fi
+
+    center_echo "日志提示" "${CYAN}${BOLD}"
+    echo -e "${YELLOW}  OpenRC 默认没有 journalctl 风格统一日志。${NC}"
+    echo -e "${CYAN}  如需看启动报错，可执行：${NC}"
+    echo -e "${CYAN}    rc-service xray restart${NC}"
+    echo -e "${CYAN}    /usr/local/bin/xray run -config ${CONFIG_FILE}${NC}"
+    line
+}
+
+function edit_alpine_xray_config() {
+    while true; do
+        line
+        center_echo "修改 Alpine Xray 配置文件" "${CYAN}${BOLD}"
+        line
+        echo -e "${CYAN}  路径: ${CONFIG_FILE}${NC}"
+        echo -e "${YELLOW}  仅建议熟悉 Xray 配置者使用。${NC}"
+        echo ""
+        echo -e "  ${CYAN}1.${NC} 编辑当前配置"
+        echo -e "  ${CYAN}2.${NC} 清空配置（高风险）"
+        echo -e "  ${CYAN}0.${NC} 返回主菜单"
+        line
+        read -r -p "选择 [0/1/2]: " EDIT_CHOICE
+
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+            echo -e "${RED}  未找到配置文件，请先执行 Alpine Vless-Enc 安装。${NC}"
+            line
+            return 1
+        fi
+
+        case "$EDIT_CHOICE" in
+            1|01)
+                echo ""
+                if [[ -n "${EDITOR:-}" ]] && command -v "${EDITOR}" >/dev/null 2>&1; then
+                    "${EDITOR}" "$CONFIG_FILE"
+                elif command -v nano >/dev/null 2>&1; then
+                    nano "$CONFIG_FILE"
+                elif command -v vim >/dev/null 2>&1; then
+                    vim "$CONFIG_FILE"
+                elif command -v vi >/dev/null 2>&1; then
+                    vi "$CONFIG_FILE"
+                else
+                    echo -e "${RED}  未找到可用编辑器（nano/vim/vi）。${NC}"
+                    line
+                    return 1
+                fi
+
+                echo ""
+                if /usr/local/bin/xray run -test -config "$CONFIG_FILE" >/dev/null 2>&1; then
+                    echo -e "${GREEN}  ✓ Xray 配置语法校验通过。${NC}"
+                else
+                    cp -f -- "$CONFIG_FILE" "${DATA_DIR}/last_failed_config.json" 2>/dev/null || true
+                    echo -e "${RED}  ✗ 当前文件不是合法 Xray 配置，请修正后再重启服务。${NC}"
+                    echo -e "${YELLOW}  已保留失败配置: ${DATA_DIR}/last_failed_config.json${NC}"
+                fi
+                echo -e "${YELLOW}  已退出编辑器。请回主菜单执行“重启当前服务”。${NC}"
+                line
+                return 0
+                ;;
+            2|02)
+                echo ""
+                echo -e "${RED}${BOLD}  此操作会将当前配置清空为 0 字节。${NC}"
+                echo -e "${YELLOW}  清空前会自动备份。${NC}"
+                echo -e "${YELLOW}  未重新写入合法 JSON 前，服务无法重启。${NC}"
+                read -r -p "输入 yes 确认清空 ${CONFIG_FILE}: " CONFIRM_CLEAR
+                if [[ "$CONFIRM_CLEAR" != "yes" ]]; then
+                    echo -e "${YELLOW}  已取消。${NC}"
+                    sleep 1
+                    continue
+                fi
+
+                local manual_backup
+                manual_backup="${CONFIG_FILE}.bak.manual-clear.$(date +%Y%m%d-%H%M%S)"
+                cp -a -- "$CONFIG_FILE" "$manual_backup" || {
+                    echo -e "${RED}  备份失败，已取消清空。${NC}"
+                    line
+                    return 1
+                }
+
+                truncate -s 0 "$CONFIG_FILE" || {
+                    echo -e "${RED}  清空失败，请手动检查权限或磁盘状态。${NC}"
+                    line
+                    return 1
+                }
+
+                echo -e "${GREEN}  ✓ 配置文件已清空。${NC}"
+                echo -e "${CYAN}  备份文件: ${manual_backup}${NC}"
+                echo -e "${YELLOW}  请先写入合法配置，再执行“重启当前服务”。${NC}"
+                line
+                return 0
+                ;;
+            "")
+                continue
+                ;;
+            0|00)
+                return 0
+                ;;
+            *)
+                echo -e "${RED}  无效输入，请输入 0、1 或 2。${NC}"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+function cleanup_xray_artifacts_alpine() {
+    echo -e "${YELLOW}  清理 Alpine Xray 残留...${NC}"
+    rc-service xray stop >/dev/null 2>&1 || true
+    rc-update del xray default >/dev/null 2>&1 || true
+    remove_path_quiet "$ALPINE_XRAY_SERVICE_FILE" "$ALPINE_XRAY_SERVICE_FILE"
+    cleanup_xray_artifacts
+}
+
+function uninstall_alpine_xray_and_delete_self() {
+    line
+    center_echo "卸载脚本和 Alpine Xray" "${RED}${BOLD}"
+    line
+    echo -e "${RED}  - 卸载 Xray（Alpine）${NC}"
+    echo -e "${RED}  - 删除 Xray 配置与 OpenRC 服务文件${NC}"
+    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
+    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    line
+    if should_auto_confirm_uninstall; then
+        echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
+    else
+        read -r -p "输入 yes 继续: " CONFIRM
+        if [[ "$CONFIRM" != "yes" ]]; then
+            echo -e "${YELLOW}已取消。${NC}"
+            return 0
+        fi
+    fi
+
+    cleanup_xray_artifacts_alpine
+    cleanup_doudou_runtime
+
+    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    line
+    exit 0
+}
+
+function install_alpine_xray_vlessenc() {
+    line
+    echo -e "${GREEN}${BOLD}  Alpine 专用 Xray（仅 Vless-Enc）安装${NC}"
+    line
+    ensure_alpine_supported || return 1
+
+    echo -e "\n${CYAN}[Step 1/6] 时间同步与基础环境${NC}"
+    ensure_alpine_community_repo || return 1
+    if ! check_timesync_alpine; then
+        handle_timesync_failure "  警告：时间同步未完成，这可能导致 apk、证书校验、TLS 握手或后续网络请求异常。" || return 1
+    fi
+    check_bbr || true
+
+    local INSTALL_MODE="auto"
+    local SCENARIO=""
+    local TEMPLATE_LABEL=""
+    local FREEDOM_DOMAIN_STRATEGY="UseIPv4"
+    local FREEDOM_DESC="IPv4 优先"
+    local ENC_PORT_SOURCE="auto"
+    local MANUAL_ENC_PORT=""
+    local ENC_RTT_MODE="0rtt"
+    local ENC_SHAPE_MODE="xorpub"
+    local ENC_TICKET_WINDOW="600s"
+    local ENC_AUTH_METHOD="x25519"
+    local -a LANDING_LINKS=()
+    local -a LANDING_LABELS=()
+    local -a LANDING_JSONS=()
+    local -a LANDING_TAGS=()
+
+    while true; do
+        echo -e "\n${CYAN}[Step 2/6] 第二层：安装模式${NC}"
+        while true; do
+            echo -e "  ${CYAN}1.${NC} 自动模式"
+            echo -e "  ${CYAN}2.${NC} 手动模式"
+            echo -e "  ${CYAN}0.${NC} 返回主菜单"
+            read -r -p "选择 [1-2/0]，默认 1: " INSTALL_MODE_CHOICE
+            case "${INSTALL_MODE_CHOICE:-1}" in
+                1|01) INSTALL_MODE="auto"; break ;;
+                2|02) INSTALL_MODE="manual"; break ;;
+                0|00) return 0 ;;
+                *) echo -e "${RED}  请输入 1、2 或 0。${NC}" ;;
+            esac
+        done
+
+        while true; do
+            echo -e "\n${CYAN}[Step 3/6] 第三层：模板选择${NC}"
+            SCENARIO=$(choose_alpine_vlessenc_scenario)
+            case "$SCENARIO" in
+                __BACK__)
+                    break
+                    ;;
+                __MAIN__)
+                    return 0
+                    ;;
+            esac
+
+            while true; do
+                TEMPLATE_LABEL=$(get_install_scenario_label "$SCENARIO")
+                FREEDOM_DOMAIN_STRATEGY="UseIPv4"
+                FREEDOM_DESC="IPv4 优先"
+                ENC_PORT_SOURCE="auto"
+                MANUAL_ENC_PORT=""
+                ENC_RTT_MODE="0rtt"
+                ENC_SHAPE_MODE="xorpub"
+                ENC_TICKET_WINDOW="600s"
+                ENC_AUTH_METHOD="x25519"
+                LANDING_LINKS=()
+                LANDING_LABELS=()
+                LANDING_JSONS=()
+                LANDING_TAGS=()
+
+                echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
+                echo -e "${YELLOW}  说明：该 Alpine Xray 流程仅提供 Vless-Enc，不包含 Reality，也不提供 padding / delay 选项。${NC}"
+                echo -e "${YELLOW}  说明：01 安装为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
+
+                if [[ "$INSTALL_MODE" == "auto" ]]; then
+                    echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
+                    echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
+                    echo -e "${CYAN}    - Vless-Enc 端口：随机高位端口${NC}"
+                    if [[ "$SCENARIO" == "3" ]]; then
+                        echo -e "${CYAN}    - 出口：freedom / ${FREEDOM_DESC}${NC}"
+                    else
+                        echo -e "${CYAN}    - 出口：VLESS / Reality / Vless-Enc${NC}"
+                    fi
+                fi
+
+                if [[ "$INSTALL_MODE" == "manual" ]]; then
+                    echo ""
+                    if ask_yes_no "  是否手动选择直连出站的 IPv4 策略（y=手动选择，n=使用默认配置：IPv4 优先）"; then
+                        FREEDOM_DOMAIN_STRATEGY=$(choose_freedom_domain_strategy)
+                        case "$FREEDOM_DOMAIN_STRATEGY" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        [[ "$FREEDOM_DOMAIN_STRATEGY" == "ForceIPv4" ]] && FREEDOM_DESC="仅 IPv4"
+                    fi
+
+                    echo ""
+                    if ask_yes_no "  是否手动指定 Vless-Enc 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
+                        MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 端口: ")
+                        ENC_PORT_SOURCE="manual"
+                    fi
+                    echo ""
+                    echo -e "${CYAN}  Vless-Enc 握手模式：${NC}"
+                    echo -e "${CYAN}  - 0rtt：更偏性能；1rtt：更偏保守${NC}"
+                    ENC_RTT_MODE=$(choose_vlessenc_rtt_mode)
+                    case "$ENC_RTT_MODE" in
+                        __BACK__)
+                            continue
+                            ;;
+                        __MAIN__)
+                            return 0
+                            ;;
+                    esac
+                    echo ""
+                    echo -e "${CYAN}  Vless-Enc 包形态：${NC}"
+                    echo -e "${CYAN}  - xorpub / native / random：默认推荐 xorpub${NC}"
+                    ENC_SHAPE_MODE=$(choose_vlessenc_shape_mode)
+                    case "$ENC_SHAPE_MODE" in
+                        __BACK__)
+                            continue
+                            ;;
+                        __MAIN__)
+                            return 0
+                            ;;
+                    esac
+                    echo ""
+                    echo -e "${CYAN}  Vless-Enc 认证方式：${NC}"
+                    echo -e "${CYAN}  - x25519 更短；mlkem768 更长且认证也抗量子${NC}"
+                    ENC_AUTH_METHOD=$(choose_vlessenc_auth_method)
+                    case "$ENC_AUTH_METHOD" in
+                        __BACK__)
+                            continue
+                            ;;
+                        __MAIN__)
+                            return 0
+                            ;;
+                    esac
+                fi
+
+                if [[ "$SCENARIO" == "6" ]]; then
+                    echo ""
+                    echo -e "${CYAN}  当前模板为 Vless-Enc 传导链，需要输入 1 个落地目标链接。${NC}"
+                    while true; do
+                        local one_link=""
+                        read -r -p "请输入落地链接: " one_link
+                        one_link=$(printf '%s' "$one_link" | tr -d ' ')
+                        if [[ -n "$one_link" ]]; then
+                            LANDING_LINKS=("$one_link")
+                            break
+                        fi
+                        echo -e "${RED}  落地链接不能为空。${NC}"
+                    done
+                fi
+
+                break 3
+            done
+        done
+    done
+
+    echo -e "\n${CYAN}[Step 4/6] 安装依赖与 Xray 核心${NC}"
+    render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
+    install_alpine_base_deps || {
+        echo -e "${RED}依赖安装失败，请检查网络和软件源。${NC}"
+        return 1
+    }
+
+    echo -e "${YELLOW}  安装 Xray 核心程序...${NC}"
+    download_and_run_xray_installer install || {
+        echo -e "${RED}Xray 安装失败！请检查网络连接后重试。${NC}"
+        return 1
+    }
+
+    if [[ ! -x /usr/local/bin/xray ]]; then
+        echo -e "${RED}Xray 安装失败：未找到 /usr/local/bin/xray${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}  ✓ 安装成功：$(/usr/local/bin/xray version | head -1)${NC}"
+
+    echo -e "\n${CYAN}[Step 5/6] 生成密钥、端口与传导参数${NC}"
+    render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
+
+    local PORT=""
+    local UUID=""
+    local LOCAL_ENC_PORT=""
+    local VLESSENC_PAIR_RAW="" VLESS_ENC_DECRYPTION_BASE="" VLESS_ENC_ENCRYPTION_BASE=""
+    local VLESS_ENC_DECRYPTION="" VLESS_ENC_ENCRYPTION=""
+
+    UUID=$(/usr/local/bin/xray uuid 2>/dev/null || true)
+    [[ -n "$UUID" ]] || { echo -e "${RED}  ✗ 生成 Vless-Enc UUID 失败，安装已中止。${NC}"; return 1; }
+
+    if [[ "$ENC_PORT_SOURCE" == "manual" ]]; then
+        while is_port_in_use_by_non_xray "$MANUAL_ENC_PORT"; do
+            echo -e "${RED}  端口 ${MANUAL_ENC_PORT} 已被占用。${NC}"
+            MANUAL_ENC_PORT=$(read_manual_ss_port "请重新输入 Vless-Enc 端口: ")
+        done
+        LOCAL_ENC_PORT="$MANUAL_ENC_PORT"
+    else
+        LOCAL_ENC_PORT=$(pick_random_free_port_excluding) || { echo -e "${RED}  ✗ 无法为 Vless-Enc 选出可用的随机高位端口。${NC}"; return 1; }
+    fi
+
+    VLESSENC_PAIR_RAW=$(get_vlessenc_pair_from_xray "$ENC_AUTH_METHOD" || true)
+    [[ -n "$VLESSENC_PAIR_RAW" ]] || { echo -e "${RED}  ✗ 调用 xray vlessenc 生成 Vless-Enc 参数失败。${NC}"; return 1; }
+    VLESS_ENC_DECRYPTION_BASE=${VLESSENC_PAIR_RAW%%$'\t'*}
+    VLESS_ENC_ENCRYPTION_BASE=${VLESSENC_PAIR_RAW#*$'\t'}
+    [[ -n "$VLESS_ENC_DECRYPTION_BASE" && -n "$VLESS_ENC_ENCRYPTION_BASE" ]] || { echo -e "${RED}  ✗ 解析 xray vlessenc 输出失败。${NC}"; return 1; }
+    VLESS_ENC_DECRYPTION=$(rewrite_vlessenc_block2_block3 "$VLESS_ENC_DECRYPTION_BASE" "$ENC_SHAPE_MODE" "$ENC_TICKET_WINDOW") || { echo -e "${RED}  ✗ 重写服务端 Vless-Enc 参数失败。${NC}"; return 1; }
+    VLESS_ENC_ENCRYPTION=$(rewrite_vlessenc_block2_block3 "$VLESS_ENC_ENCRYPTION_BASE" "$ENC_SHAPE_MODE" "$ENC_RTT_MODE") || { echo -e "${RED}  ✗ 重写客户端 Vless-Enc 参数失败。${NC}"; return 1; }
+
+    if [[ "$SCENARIO" == "6" ]]; then
+        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析落地 / 传导链接失败，请检查格式。${NC}"; return 1; }
+        print_parsed_outbound_preview
+        LANDING_JSONS=("$PARSED_OUTBOUND_JSON")
+        LANDING_LABELS=("$PARSED_LINK_LABEL")
+        LANDING_TAGS=("landing")
+    fi
+
+    echo -e "${GREEN}  ✓ 端口、密钥与模板参数已准备完成${NC}"
+
+    echo -e "\n${CYAN}[Step 6/6] 写入配置并启动服务${NC}"
+    render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
+    ensure_runtime_layout
+    mkdir -p "$CONFIG_DIR"
+    backup_existing_config || { echo -e "${RED}  旧配置备份失败，安装已中止。${NC}"; return 1; }
+
+    local OUTBOUND_JSON
+    OUTBOUND_JSON='{
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {
+        "domainStrategy": "'"${FREEDOM_DOMAIN_STRATEGY}"'"
+      }
+    }'
+
+    local INBOUNDS_JSON=""
+    local OUTBOUNDS_JSON=""
+    local ALLOW_RULES_JSON=""
+    local COMMON_RULES_JSON
+    local SUBS_TEXT=""
+    local PORTS_TEXT=""
+    local SERVER_IP_RAW="" SERVER_IP_URI="" SERVER_IP_URI_V6="" SERVER_IP_V4="" SERVER_IP_V6=""
+    local VLESS_ENC_LINK_V6=""
+    local VLESS_ENC_LINK=""
+    local VLESS_ENC_ENCRYPTION_URI=""
+    local TEMP_CONFIG=""
+
+    COMMON_RULES_JSON=$(get_common_block_rules_json)
+
+    SERVER_IP_V4=$(get_public_ip_v4 || true)
+    SERVER_IP_V6=$(get_public_ip_v6 || true)
+    if [[ -n "$SERVER_IP_V4" ]]; then
+        SERVER_IP_RAW="$SERVER_IP_V4"
+    elif [[ -n "$SERVER_IP_V6" ]]; then
+        SERVER_IP_RAW="$SERVER_IP_V6"
+    fi
+    if [[ -z "$SERVER_IP_RAW" ]]; then
+        read -r -p "请输入本机公网 IP/域名: " SERVER_IP_RAW
+    fi
+    [[ -n "$SERVER_IP_RAW" ]] || { echo -e "${RED}  未提供服务器地址，安装中止。${NC}"; return 1; }
+    SERVER_IP_URI=$(format_host_for_uri "$SERVER_IP_RAW")
+    if [[ -n "$SERVER_IP_V6" ]]; then
+        SERVER_IP_URI_V6=$(format_host_for_uri "$SERVER_IP_V6")
+    fi
+
+    VLESS_ENC_ENCRYPTION_URI=$(url_encode "$VLESS_ENC_ENCRYPTION")
+    VLESS_ENC_LINK="vless://${UUID}@${SERVER_IP_URI}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-zdd"
+    if [[ -n "$SERVER_IP_URI_V6" ]]; then
+        VLESS_ENC_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-IPv6-zdd"
+    fi
+
+    case "$SCENARIO" in
+        3)
+            INBOUNDS_JSON=$(cat <<EOF
+    {
+      "tag": "in-enc",
+      "listen": "::",
+      "port": ${LOCAL_ENC_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "flow": "xtls-rprx-vision",
+            "email": "enc_user"
+          }
+        ],
+        "decryption": "${VLESS_ENC_DECRYPTION}"
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    }
+EOF
+)
+            OUTBOUNDS_JSON=$(cat <<EOF
+    ${OUTBOUND_JSON},
+    {
+      "tag": "blocked",
+      "protocol": "blackhole"
+    }
+EOF
+)
+            ALLOW_RULES_JSON=$(cat <<'EOF'
+      {
+        "type": "field",
+        "inboundTag": ["in-enc"],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+EOF
+)
+            SUBS_TEXT=$(cat <<EOF
+当前架构:
+  - 入口: Vless-Enc
+  - 出口: freedom / ${FREEDOM_DESC}
+订阅:
+Vless-Enc（直出）:
+  ${VLESS_ENC_LINK}
+EOF
+)
+            if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
+                SUBS_TEXT+=$(cat <<EOF
+Vless-Enc（直出 / IPv6）:
+  ${VLESS_ENC_LINK_V6}
+EOF
+)
+            fi
+            PORTS_TEXT=$(cat <<EOF
+端口:
+  Vless-Enc:   ${LOCAL_ENC_PORT}
+出站说明:
+  直连策略:    ${FREEDOM_DESC}
+EOF
+)
+            ;;
+        6)
+            INBOUNDS_JSON=$(cat <<EOF
+    {
+      "tag": "in-enc",
+      "listen": "::",
+      "port": ${LOCAL_ENC_PORT},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${UUID}",
+            "flow": "xtls-rprx-vision",
+            "email": "enc_user"
+          }
+        ],
+        "decryption": "${VLESS_ENC_DECRYPTION}"
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    }
+EOF
+)
+            OUTBOUNDS_JSON=$(cat <<EOF
+    ${OUTBOUND_JSON},
+${LANDING_JSONS[0]},
+    {
+      "tag": "blocked",
+      "protocol": "blackhole"
+    }
+EOF
+)
+            ALLOW_RULES_JSON=$(cat <<'EOF'
+      {
+        "type": "field",
+        "inboundTag": ["in-enc"],
+        "network": "tcp,udp",
+        "outboundTag": "landing"
+      },
+EOF
+)
+            SUBS_TEXT=$(cat <<EOF
+当前架构:
+  - 入口: Vless-Enc
+  - 出口: VLESS / Reality / Vless-Enc
+订阅:
+Vless-Enc（传导链入口）:
+  ${VLESS_ENC_LINK}
+EOF
+)
+            if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
+                SUBS_TEXT+=$(cat <<EOF
+Vless-Enc（传导链入口 / IPv6）:
+  ${VLESS_ENC_LINK_V6}
+EOF
+)
+            fi
+            SUBS_TEXT+=$(cat <<EOF
+说明:
+  - 入口协议: Vless-Enc 入站
+  - 出口协议: VLESS / Reality / Vless-Enc 出站（按你输入的链接决定）
+  - 当前传导目标: ${LANDING_LABELS[0]}
+  - 传导原始链接: ${LANDING_LINKS[0]}
+EOF
+)
+            PORTS_TEXT=$(cat <<EOF
+端口:
+  Vless-Enc:   ${LOCAL_ENC_PORT}
+出站说明:
+  传导方向:    Vless-Enc 入站 -> VLESS / Reality / Vless-Enc 出站
+  传导目标:    ${LANDING_LABELS[0]}
+EOF
+)
+            ;;
+        *)
+            echo -e "${RED}  未知 Alpine Vless-Enc 模板：${SCENARIO}${NC}"
+            return 1
+            ;;
+    esac
+
+    TEMP_CONFIG=$(mktemp /tmp/xray-alpine-config.XXXXXX.json) || {
+        echo -e "${RED}  ✗ 无法创建临时配置文件。${NC}"
+        return 1
+    }
+    add_tmp_file "$TEMP_CONFIG"
+
+    cat > "$TEMP_CONFIG" <<JSONEOF
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "none"
+  },
+  "inbounds": [
+${INBOUNDS_JSON}
+  ],
+  "outbounds": [
+${OUTBOUNDS_JSON}
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+${COMMON_RULES_JSON}
+${ALLOW_RULES_JSON}
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "blocked"
+      }
+    ]
+  }
+}
+JSONEOF
+
+    echo -e "${YELLOW}  验证配置文件...${NC}"
+    if ! /usr/local/bin/xray run -test -config "$TEMP_CONFIG"; then
+        cp -f -- "$TEMP_CONFIG" "${DATA_DIR}/last_failed_config.json" 2>/dev/null || true
+        echo -e "${RED}  ✗ 配置文件验证失败！${NC}"
+        echo -e "${YELLOW}  已保留失败配置: ${DATA_DIR}/last_failed_config.json${NC}"
+        echo -e "${YELLOW}  当前运行中的旧配置未被覆盖。${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}  ✓ 配置文件语法验证通过${NC}"
+
+    cp -f -- "$TEMP_CONFIG" "$CONFIG_FILE" || return 1
+    write_alpine_xray_openrc_service || return 1
+    rc-update add xray default >/dev/null 2>&1 || true
+
+    rc-service xray restart >/dev/null 2>&1 || rc-service xray start >/dev/null 2>&1 || {
+        echo -e "${RED}  Alpine Xray 服务启动失败！${NC}"
+        rc-service xray status || true
+        return 1
+    }
+
+    local check_attempt=0
+    while [[ $check_attempt -lt 5 ]]; do
+        sleep 2
+        if rc-service xray status >/dev/null 2>&1; then
+            break
+        fi
+        check_attempt=$((check_attempt + 1))
+        echo -e "${YELLOW}  等待服务启动... (${check_attempt}/5)${NC}"
+    done
+
+    if ! rc-service xray status >/dev/null 2>&1; then
+        echo -e "${RED}  Alpine Xray 服务启动失败！${NC}"
+        rc-service xray status || true
+        echo -e "${YELLOW}  可继续手动排查：/usr/local/bin/xray run -config ${CONFIG_FILE}${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}  ✓ Alpine Xray 服务已启动${NC}"
+
+    if ss -ltnup 2>/dev/null | grep -q ":${LOCAL_ENC_PORT}\b"; then
+        echo -e "${GREEN}  ✓ 已检测到 ${LOCAL_ENC_PORT} 端口监听${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ 未明确检测到 ${LOCAL_ENC_PORT} 端口监听，请手动检查：ss -ltnup | grep :${LOCAL_ENC_PORT}${NC}"
+    fi
+
+    write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT"
+    write_install_runtime_kind "alpine-xray-vlessenc"
+    render_saved_node_info "配置完成" || { echo -e "${RED}  节点信息写入失败，请检查 ${INFO_FILE}${NC}"; return 1; }
+}
+
+function install_alpine_service_entry() {
+    ensure_alpine_supported || return 1
+    while true; do
+        line
+        center_echo "Alpine 专用入口" "${CYAN}${BOLD}"
+        line
+        echo -e "  ${CYAN}1.${NC} Alpine 专用 Xray（仅 Vless-Enc，无 Reality，无 padding）"
+        echo -e "  ${CYAN}2.${NC} Alpine 专用 SS2022（shadowsocks-rust）"
+        echo -e "  ${CYAN}0.${NC} 返回主菜单"
+        line
+        read -r -p "选择 [0/1/2]: " ALPINE_INSTALL_CHOICE
+        case "$ALPINE_INSTALL_CHOICE" in
+            1|01)
+                install_alpine_xray_vlessenc
+                return $?
+                ;;
+            2|02)
+                install_alpine_ss2022
+                return $?
+                ;;
+            0|00)
+                return 0
+                ;;
+            *)
+                echo -e "${RED}无效输入，请重新选择。${NC}"
+                sleep 1
+                ;;
+        esac
+    done
 }
 
 function install_xray() {
@@ -4800,7 +5760,10 @@ JSONEOF
     done
 
     if ! systemctl is-active --quiet xray; then
-        echo -e "${RED}  Xray 服务启动失败！请查看日志：journalctl -u xray -n 50 --no-pager${NC}"
+        echo -e "${RED}  Xray 服务启动失败！${NC}"
+        echo -e "${YELLOW}  说明：这里不是连续重启 5 次，而是单次 restart 后连续 5 次检查仍未进入 active。${NC}"
+        systemctl status xray --no-pager -l 2>/dev/null | sed -n '1,25p' || true
+        echo -e "${YELLOW}  请继续查看完整日志：journalctl -u xray -n 50 --no-pager${NC}"
         return 1
     fi
     echo -e "${GREEN}  ✓ Xray 服务已启动${NC}"
@@ -4820,57 +5783,100 @@ JSONEOF
 
 function install_default_flow() {
     if is_alpine_system; then
-        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC，已自动转到 10 号 Alpine 专用 SS2022 流程。${NC}"
-        install_alpine_ss2022
-    else
-        install_xray
+        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC。${NC}"
+        echo -e "${YELLOW}  请使用 10 号 Alpine 专用入口，再选择 Vless-Enc 或 SS2022。${NC}"
+        return 1
     fi
+    install_xray
 }
 
 function run_quick_install_entry() {
     if is_alpine_system; then
-        echo -e "${YELLOW}检测到 Alpine / OpenRC，快速安装将自动转到 10 号 Alpine 专用 SS2022 流程。${NC}"
-        if is_quick_install_noninteractive; then
-            echo -e "${RED}当前为非交互快速安装，但 Alpine 专用 SS2022 需要你手动选择端口和加密方式。${NC}"
-            echo -e "${YELLOW}请改用交互终端运行本地脚本，或先进入主菜单后执行 10 号 Alpine 专用流程。${NC}"
-            return 1
-        fi
-        install_alpine_ss2022
-    else
-        install_xray
+        echo -e "${YELLOW}检测到 Alpine / OpenRC。${NC}"
+        echo -e "${YELLOW}请先进入主菜单后执行 10 号 Alpine 专用入口。${NC}"
+        return 1
     fi
+    install_xray
 }
 
 function update_current_service() {
-    if is_alpine_runtime_present || is_alpine_system; then
-        update_alpine_ssservice
-    else
-        update_xray
-    fi
+    local runtime_kind=""
+    runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
+    case "$runtime_kind" in
+        alpine-ss2022)
+            update_alpine_ssservice
+            ;;
+        alpine-xray-vlessenc)
+            update_alpine_xray_service
+            ;;
+        xray|"")
+            if is_alpine_system; then
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                return 1
+            fi
+            update_xray
+            ;;
+    esac
 }
 
 function restart_current_service() {
-    if is_alpine_runtime_present || is_alpine_system; then
-        restart_alpine_ssservice
-    else
-        restart_xray
-    fi
+    local runtime_kind=""
+    runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
+    case "$runtime_kind" in
+        alpine-ss2022)
+            restart_alpine_ssservice
+            ;;
+        alpine-xray-vlessenc)
+            restart_alpine_xray_service
+            ;;
+        xray|"")
+            if is_alpine_system; then
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                return 1
+            fi
+            restart_xray
+            ;;
+    esac
 }
 
 function show_runtime_status() {
-    if is_alpine_runtime_present || is_alpine_system; then
-        show_alpine_ss_status
-    else
-        show_status
-    fi
+    local runtime_kind=""
+    runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
+    case "$runtime_kind" in
+        alpine-ss2022)
+            show_alpine_ss_status
+            ;;
+        alpine-xray-vlessenc)
+            show_alpine_xray_status
+            ;;
+        xray|"")
+            if is_alpine_system; then
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                return 1
+            fi
+            show_status
+            ;;
+    esac
 }
 
 function edit_runtime_config() {
-    if is_alpine_runtime_present || is_alpine_system; then
-        edit_alpine_ss_config
-    else
-        edit_config
-    fi
+    local runtime_kind=""
+    runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
+    case "$runtime_kind" in
+        alpine-ss2022)
+            edit_alpine_ss_config
+            ;;
+        alpine-xray-vlessenc)
+            edit_alpine_xray_config
+            ;;
+        xray|"")
+            if is_alpine_system; then
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                return 1
+            fi
+            edit_config
+            ;;
+    esac
 }
 
 function should_auto_confirm_uninstall() {
@@ -4878,11 +5884,23 @@ function should_auto_confirm_uninstall() {
 }
 
 function uninstall_current_service_and_delete_self() {
-    if is_alpine_runtime_present || is_alpine_system; then
-        uninstall_alpine_ss_and_delete_self
-    else
-        uninstall_xray_and_delete_self
-    fi
+    local runtime_kind=""
+    runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
+    case "$runtime_kind" in
+        alpine-ss2022)
+            uninstall_alpine_ss_and_delete_self
+            ;;
+        alpine-xray-vlessenc)
+            uninstall_alpine_xray_and_delete_self
+            ;;
+        xray|"")
+            if is_alpine_system; then
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                return 1
+            fi
+            uninstall_xray_and_delete_self
+            ;;
+    esac
 }
 
 function update_xray() {
@@ -5266,6 +6284,68 @@ function uninstall_menu() {
     done
 }
 
+function get_xray_binary_path() {
+    if [[ -x /usr/local/bin/xray ]]; then
+        printf '%s\n' '/usr/local/bin/xray'
+        return 0
+    fi
+
+    if command -v xray >/dev/null 2>&1; then
+        command -v xray
+        return 0
+    fi
+
+    return 1
+}
+
+function is_xray_running_now() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet xray 2>/dev/null && return 0
+    fi
+
+    pgrep -x xray >/dev/null 2>&1
+}
+
+function get_xray_running_badge() {
+    if is_xray_running_now; then
+        printf '%b运行中%b' "$GREEN" "$NC"
+    else
+        printf '%b未运行%b' "$RED" "$NC"
+    fi
+}
+
+function get_xray_version_badge() {
+    local xray_bin=""
+    local version_line=""
+
+    xray_bin=$(get_xray_binary_path 2>/dev/null || true)
+    if [[ -z "$xray_bin" ]]; then
+        printf '%bN/A%b' "$YELLOW" "$NC"
+        return 0
+    fi
+
+    version_line=$("$xray_bin" version 2>/dev/null | head -1)
+    if [[ -z "$version_line" ]]; then
+        printf '%bN/A%b' "$YELLOW" "$NC"
+        return 0
+    fi
+
+    printf '%b%s%b' "$CYAN" "$version_line" "$NC"
+}
+
+function show_main_header() {
+    line
+    echo -e "  ${GREEN}${BOLD}Xray Manager ${SCRIPT_VERSION}${NC}"
+    echo -e "  ${GREEN}${BRAND_HEADER}${NC}"
+    echo -e "  ${YELLOW}警告：SS 和 Vless-Enc 不适合过墙；Vless-Enc 的 padding 功能慎用${NC}"
+    echo -e "  Xray 状态 : $(get_xray_running_badge)"
+    echo -e "  Xray 版本 : $(get_xray_version_badge)"
+    echo -e "  ${CYAN}快捷指令:${NC}"
+    echo -e "    ${CYAN}zdd xray${NC}    | ${CYAN}zdd install${NC}"
+    echo -e "    ${CYAN}zdd update${NC}  | ${CYAN}zdd uninstall${NC}"
+    line
+}
+
 if [[ "$QUICK_INSTALL" == "1" ]]; then
     run_quick_install_entry
     exit $?
@@ -5278,7 +6358,7 @@ fi
 
 if [[ "$QUICK_UPDATE" == "1" ]]; then
     if [[ "${DOUDOU_SELF_UPDATED:-0}" == "1" ]]; then
-        update_xray
+        update_current_service
     else
         self_update_and_update_xray
     fi
@@ -5287,19 +6367,7 @@ fi
 
 while true; do
     clear_screen
-    line
-    echo -e "  ${GREEN}${BOLD}Xray Manager ${SCRIPT_VERSION}${NC}"
-    echo -e "  ${GREEN}${BRAND_HEADER}${NC}"
-    echo -e "  ${YELLOW}警告！SS 和 Vless-Enc 不适合过墙${NC}"
-    echo -e "  ${YELLOW}警告！Vless-Enc 的 padding 功能慎用${NC}"
-    echo -e "  Reality 端口 443 手动模式增加 8443 路由 AsIs 无修改选项"
-    echo -e "  SS 默认 2022-blake3-aes-128-gcm 手动模式增加 aes-256-gcm"
-    echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
-    echo -e "  SNI 测速池 + 时间同步 + 端口复用 + BBR + Vless-Enc + XHTTP" 
-    echo -e "  ${CYAN}快捷指令:${NC}"
-    echo -e "    ${CYAN}zdd xray${NC}    | ${CYAN}zdd install${NC}"
-    echo -e "    ${CYAN}zdd update${NC}  | ${CYAN}zdd uninstall${NC}"
-    line
+    show_main_header
     echo -e "  ${CYAN}01.${NC} 覆盖安装"
     echo -e "  ${CYAN}02.${NC} 更新 Xray"
     echo -e "  ${CYAN}03.${NC} 重启 Xray"
@@ -5309,7 +6377,7 @@ while true; do
     echo -e "  ${CYAN}07.${NC} 环境检测（时间 & BBR）"
     echo -e "  ${CYAN}08.${NC} 修改 Xray 配置（退出后重启服务生效）"
     echo -e "  ${CYAN}09.${NC} 卸载 Xray 脚本等文件（可单独卸载脚本）"
-    echo -e "  ${CYAN}10.${NC} Alpine 专用 SS2022（shadowsocks-rust）"
+    echo -e "  ${CYAN}10.${NC} Alpine 专用 Vless-Enc / SS2022"
     echo -e "  ${CYAN}00.${NC} 退出脚本"
     line
     read -r -p "选择: " CHOICE
@@ -5327,7 +6395,7 @@ while true; do
         7|07) run_syscheck            ;;
         8|08) edit_runtime_config     ;;
         9|09) uninstall_menu          ;;
-        10)   install_alpine_ss2022   ;;
+        10)   install_alpine_service_entry   ;;
         0|00)
             echo -e "${GREEN}已退出。${NC}"
             sleep 0.3
