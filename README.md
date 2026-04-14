@@ -80,11 +80,6 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
   <img src="landing.jpg" alt="端口复用" width="900">
 </p>
 
-<h4 align="left">节点订阅界面</h4>
-<p align="left">
-  <img src="node_sub.jpg" alt="订阅界面" width="900">
-</p>
-
 
 
 
