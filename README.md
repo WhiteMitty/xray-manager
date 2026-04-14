@@ -1,19 +1,6 @@
 # xray-manager 
 ## v 0.1.0 2026-04-13 
 
-## 全自动安装 reality，注：安装会覆盖原有 xray 配置，SNI 为个人喜好可能拉胯
-
-## curl
-
-```bash
-curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && printf '1\n1\n1\n1\n' | bash xray-manager.sh --quick-install
-```
-
-## wget
-
-```bash
-wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh &&  printf '1\n1\n1\n1\n' | bash xray-manager.sh --quick-install
-```
 <br>
 
 ## 常规安装
@@ -54,6 +41,21 @@ zdd update
 zdd uinstall
 ```
 
+<br>
+
+## 慎用！全自动安装，此脚本没有取消选项将会覆盖原先所有配置！
+
+## curl
+
+```bash
+curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && printf '1\n1\n1\n1\n' | bash xray-manager.sh --quick-install
+```
+
+## wget
+
+```bash
+wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh &&  printf '1\n1\n1\n1\n' | bash xray-manager.sh --quick-install
+```
 <br>
 
 ## 注：SS-Rust 除阿尔卑斯系统外不会额外安装，所以也没设置更新选项
