@@ -2262,13 +2262,19 @@ function print_download_error_reason() {
 
 function download_and_run_xray_installer() {
     local action="$1"
-    local installer curl_err url max_retry retry sleep_seconds curl_ret
+    local installer curl_err url max_retry retry sleep_seconds curl_ret runner
     installer=$(mktemp /tmp/xray-install.XXXXXX.sh)
     curl_err=$(mktemp /tmp/xray-install-curl.XXXXXX.log)
     add_tmp_file "$installer"
     add_tmp_file "$curl_err"
 
-    url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+    if is_alpine_system; then
+        url="https://github.com/XTLS/Xray-install/raw/main/alpinelinux/install-release.sh"
+        runner="ash"
+    else
+        url="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+        runner="bash"
+    fi
     max_retry=3
     sleep_seconds=10
 
@@ -2300,7 +2306,7 @@ function download_and_run_xray_installer() {
         fi
     done
 
-    if ! grep -Eq '(^#!/.*(sh|bash))|XTLS|Xray-install' "$installer"; then
+    if ! grep -Eq '(^#!/.*(sh|ash|bash))|XTLS|Xray-install' "$installer"; then
         echo -e "${RED}  ✗ 下载内容校验失败，已拒绝执行。${NC}"
         echo -e "${YELLOW}    判断：获取到的内容不像官方安装脚本，可能是下载异常、网页错误页或上游临时返回了非脚本内容。${NC}"
         return 1
@@ -2310,10 +2316,10 @@ function download_and_run_xray_installer() {
 
     case "$action" in
         install)
-            bash "$installer" install
+            "$runner" "$installer" install
             ;;
         remove)
-            bash "$installer" remove --purge
+            "$runner" "$installer" remove --purge
             ;;
         *)
             return 1
@@ -3363,17 +3369,18 @@ function choose_alpine_vlessenc_scenario() {
         line >&2
         echo -e "${CYAN}${BOLD}  第三层：选择 Alpine Vless-Enc 模板${NC}" >&2
         line >&2
-        echo -e "  ${CYAN}3.${NC} 单 Vless-Enc 直出" >&2
-        echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
+        echo -e "  ${CYAN}1.${NC} 单 Vless-Enc 直出" >&2
+        echo -e "  ${CYAN}2.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         line >&2
-        read -r -p "选择 [3/6/0/b]: " choice
+        read -r -p "选择 [1/2/0/b]: " choice
         case "$choice" in
-            3|6) printf '%s' "$choice"; return 0 ;;
+            1|01) printf '%s' '3'; return 0 ;;
+            2|02) printf '%s' '6'; return 0 ;;
             0|00) printf '%s' '__BACK__'; return 0 ;;
             b|B) printf '%s' '__MAIN__'; return 0 ;;
-            *) echo -e "${RED}  请输入 3、6、0 或 b。${NC}" >&2 ;;
+            *) echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2 ;;
         esac
     done
 }
