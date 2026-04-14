@@ -58,9 +58,9 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
-## 注：SS-Rust 除阿尔卑斯系统外不会额外安装，所以也没设置更新选项
-## 注：仅 1、4、7 号方式中的 reality 适合直连，8号为激进玩法，容易被墙
-## 注：确保 443、8443 未被占用，防火墙已放行，Reality 写死 443/8443 端口
+## SS-Rust 除阿尔卑斯系统外不会额外安装，所以也没设置更新选项
+## 仅 1、4、7 号方式中的 reality 适合直连，8号为激进玩法，容易被墙
+## 确保 443、8443 未被占用，防火墙已放行，Reality 写死 443/8443 端口
 
 <br>
 
