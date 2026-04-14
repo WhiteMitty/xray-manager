@@ -46,21 +46,23 @@ ALPINE_SS_SERVICE_FILE="/etc/init.d/ssserver"
 ALPINE_RESOLV_BACKUP="${DATA_DIR}/alpine_resolv.conf.bak"
 
 DEFAULT_DEST_OPTIONS=(
-    "sabanciuniv.edu"
+    "www.amd.com"
+    "www.sony.com"
+    "www.tesla.com"
+    "www.intel.com"
+    "www.adobe.com"
+    "www.amazon.com"
     "a0.awsstatic.com"
-    "cdn.jsdelivr.net" 
     "d1.awsstatic.com"
     "s0.awsstatic.com"
-    "t0.m.awsstatic.com"   
-    "addons.mozilla.org" 
+    "cdn.jsdelivr.net"
+    "gateway.icloud.com"
     "m.media-amazon.com"
-    "player.live-video.net" 
-    "ds-aksb-a.akamaihd.net" 
-    "static.cloud.coveo.com"
-    "prod.pa.cdn.uis.awsstatic.com" 
+    "addons.mozilla.org"
+    "t0.m.awsstatic.com"
+    "cdn77.api.userway.org"
     "images-na.ssl-images-amazon.com"
     "download-installer.cdn.mozilla.net"
-    "gray.video-player.arcpublishing.com"
 )
 
 function line() {
@@ -1147,61 +1149,6 @@ function ensure_alpine_community_repo() {
     printf '%s\n' "$community_line" >> "$repo_file" || return 1
     echo -e "${GREEN}  ✓ 已追加 Alpine community 仓库${NC}"
     return 0
-}
-
-function choose_alpine_dns_provider() {
-    local choice
-    while true; do
-        echo -e "  ${CYAN}1.${NC} Cloudflare（1.1.1.1 / 1.0.0.1）" >&2
-        echo -e "  ${CYAN}2.${NC} Google（8.8.8.8 / 8.8.4.4）" >&2
-        read -r -p "选择安装期间使用的系统 DNS [1-2]，默认 1: " choice
-        case "${choice:-1}" in
-            1|01)
-                printf '%s\n' 'cloudflare'
-                return 0
-                ;;
-            2|02)
-                printf '%s\n' 'google'
-                return 0
-                ;;
-            *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
-                ;;
-        esac
-    done
-}
-
-function apply_alpine_dns_provider() {
-    local provider="$1"
-    local primary secondary label
-
-    case "$provider" in
-        cloudflare)
-            primary="1.1.1.1"
-            secondary="1.0.0.1"
-            label="Cloudflare"
-            ;;
-        google)
-            primary="8.8.8.8"
-            secondary="8.8.4.4"
-            label="Google"
-            ;;
-        *)
-            echo -e "${RED}  ✗ 未知 DNS 选项：${provider}${NC}"
-            return 1
-            ;;
-    esac
-
-    if [[ -f /etc/resolv.conf && ! -f "$ALPINE_RESOLV_BACKUP" ]]; then
-        cp -a -- /etc/resolv.conf "$ALPINE_RESOLV_BACKUP" >/dev/null 2>&1 || true
-    fi
-
-    cat > /etc/resolv.conf <<DNS_EOF
-nameserver ${primary}
-nameserver ${secondary}
-DNS_EOF
-
-    echo -e "${GREEN}  ✓ 已设置系统 DNS：${label}（${primary} / ${secondary}）${NC}"
 }
 
 function install_alpine_runtime_deps() {
