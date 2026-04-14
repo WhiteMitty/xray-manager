@@ -3822,12 +3822,14 @@ function install_alpine_xray_vlessenc() {
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
                     echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
-                    echo -e "${CYAN}    - Vless-Enc 端口：随机高位端口${NC}"
+                    echo -e "${CYAN}    - Vless-Enc 端口：手动输入${NC}"
                     if [[ "$SCENARIO" == "3" ]]; then
                         echo -e "${CYAN}    - 出口：freedom / ${FREEDOM_DESC}${NC}"
                     else
                         echo -e "${CYAN}    - 出口：VLESS / Reality / Vless-Enc${NC}"
                     fi
+                    MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 端口: ")
+                    ENC_PORT_SOURCE="manual"
                 fi
 
                 if [[ "$INSTALL_MODE" == "manual" ]]; then
@@ -4063,6 +4065,8 @@ EOF
 订阅:
 Vless-Enc（直出）:
   ${VLESS_ENC_LINK}
+提示:
+  - 若当前为 NAT / 内网转发环境，请确认入口端口已放通，或已正确配置端口转发。
 EOF
 )
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
@@ -4128,6 +4132,8 @@ EOF
 订阅:
 Vless-Enc（传导链入口）:
   ${VLESS_ENC_LINK}
+提示:
+  - 若当前为 NAT / 内网转发环境，请确认入口端口已放通，或已正确配置端口转发。
 EOF
 )
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
