@@ -42,7 +42,7 @@ zdd xray
 ```bash
 zdd install
 ```
-## 更新脚本和 Xray
+## 更新脚本和 Xray (不包括 SS-Rust)
 
 ```bash
 zdd update
