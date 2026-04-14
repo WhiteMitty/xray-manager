@@ -21,6 +21,7 @@ UI_WIDTH=60
 DATA_DIR="/usr/local/share/doudou-xray"
 SELF_DIR="/usr/local/lib/doudou"
 SELF_SCRIPT_PATH="${SELF_DIR}/xray_manager.sh"
+SCRIPT_REMOTE_URL="https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh"
 QUICK_BIN="/usr/local/bin/zdd"
 LEGACY_QUICK_BIN="/usr/local/bin/doudou"
 INFO_FILE="${DATA_DIR}/xray_node_info.txt"
@@ -37,6 +38,7 @@ BEST_DEST_POOL_SIG=""
 SNI_POOL_SOURCE="default"
 QUICK_INSTALL=0
 QUICK_UNINSTALL=0
+QUICK_UPDATE=0
 QUICK_FORCE=0
 QUICK_SCENARIO=""
 SERVICE_KIND_FILE="${DATA_DIR}/.install_kind"
@@ -256,17 +258,79 @@ case "\${1:-}" in
         shift
         exec "$SELF_SCRIPT_PATH" --quick-install --quick-scenario 4 "\$@"
         ;;
+    update)
+        shift
+        exec "$SELF_SCRIPT_PATH" --quick-update "\$@"
+        ;;
     uninstall|uninstall)
         shift
         exec "$SELF_SCRIPT_PATH" --quick-uninstall "\$@"
         ;;
     *)
-        echo "用法: zdd xray | zdd install | zdd uninstall"
+        echo "用法: zdd xray | zdd install | zdd update | zdd uninstall"
         exit 1
         ;;
 esac
 EOF
     chmod 755 "$QUICK_BIN" >/dev/null 2>&1 || true
+}
+
+function download_latest_script_to() {
+    local target_path="$1"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$target_path" "$SCRIPT_REMOTE_URL" || return 1
+        return 0
+    fi
+
+    if command -v wget >/dev/null 2>&1; then
+        wget -qO "$target_path" "$SCRIPT_REMOTE_URL" || return 1
+        return 0
+    fi
+
+    echo -e "${RED}错误：未检测到 curl 或 wget，无法拉取最新脚本。${NC}"
+    return 1
+}
+
+function self_update_and_update_xray() {
+    line
+    echo -e "${YELLOW}  正在拉取最新脚本并覆盖当前版本...${NC}"
+
+    local temp_script=""
+    temp_script=$(mktemp /tmp/doudou-self-update.XXXXXX.sh) || {
+        echo -e "${RED}  ✗ 无法创建临时更新文件。${NC}"
+        line
+        return 1
+    }
+    add_tmp_file "$temp_script"
+
+    if ! download_latest_script_to "$temp_script"; then
+        echo -e "${RED}  ✗ 最新脚本拉取失败，请检查网络后重试。${NC}"
+        line
+        return 1
+    fi
+
+    if ! grep -q '^#!/bin/bash' "$temp_script"; then
+        echo -e "${RED}  ✗ 拉取结果不是有效脚本，已取消覆盖。${NC}"
+        line
+        return 1
+    fi
+
+    ensure_runtime_layout
+    if ! mv -f -- "$temp_script" "$SELF_SCRIPT_PATH" 2>/dev/null; then
+        if ! cp -f -- "$temp_script" "$SELF_SCRIPT_PATH" 2>/dev/null; then
+            echo -e "${RED}  ✗ 覆盖当前脚本失败。${NC}"
+            line
+            return 1
+        fi
+        rm -f -- "$temp_script" >/dev/null 2>&1 || true
+    fi
+    chmod 755 "$SELF_SCRIPT_PATH" >/dev/null 2>&1 || true
+
+    echo -e "${GREEN}  ✓ 脚本已更新到最新版本。${NC}"
+    echo -e "${YELLOW}  正在继续更新 Xray 核心程序...${NC}"
+    line
+    exec env DOUDOU_SELF_UPDATED=1 bash "$SELF_SCRIPT_PATH" --quick-update
 }
 
 reexec_with_root "$@"
@@ -282,6 +346,10 @@ function parse_cli_args() {
                 ;;
             --quick-uninstall)
                 QUICK_UNINSTALL=1
+                shift
+                ;;
+            --quick-update)
+                QUICK_UPDATE=1
                 shift
                 ;;
             --quick-scenario)
@@ -2222,7 +2290,9 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  快捷指令: zdd xray | zdd install | zdd uninstall${NC}"
+    echo -e "${CYAN}  快捷指令:${NC}"
+    echo -e "${CYAN}    zdd xray    | zdd install${NC}"
+    echo -e "${CYAN}    zdd update  | zdd uninstall${NC}"
 }
 
 function render_saved_meta_block() {
@@ -4921,6 +4991,15 @@ if [[ "$QUICK_UNINSTALL" == "1" ]]; then
     exit $?
 fi
 
+if [[ "$QUICK_UPDATE" == "1" ]]; then
+    if [[ "${DOUDOU_SELF_UPDATED:-0}" == "1" ]]; then
+        update_xray
+    else
+        self_update_and_update_xray
+    fi
+    exit $?
+fi
+
 while true; do
     clear_screen
     line
@@ -4932,7 +5011,9 @@ while true; do
     echo -e "  SS 默认加密 2022-blake3-aes-128-gcm 手动模式增加 256-gcm"
     echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
     echo -e "  SNI测速 + 时间同步 + BBR+FQ + Vless-Enc"
-    echo -e "  快捷调用可输入: zdd xray | zdd install | zdd uninstall"
+    echo -e "  ${CYAN}快捷指令:${NC}"
+    echo -e "    ${CYAN}zdd xray${NC}    | ${CYAN}zdd install${NC}"
+    echo -e "    ${CYAN}zdd update${NC}  | ${CYAN}zdd uninstall${NC}"
     line
     echo -e "  ${CYAN}01.${NC} 覆盖安装"
     echo -e "  ${CYAN}02.${NC} 更新 Xray"
