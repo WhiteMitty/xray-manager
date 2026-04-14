@@ -41,7 +41,7 @@ zdd uninstall
 
 <br>
 
-#### ⚠ 慎用！全自动安装，此脚本将覆盖原先所有配置！ ![warning](https://img.shields.io/badge/Warning-无法取消-red)
+#### ⚠ 慎用！全自动覆盖安装！ ![warning](https://img.shields.io/badge/Warning-无法取消-red)
 
 #### curl
 
