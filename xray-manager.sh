@@ -5003,12 +5003,12 @@ fi
 while true; do
     clear_screen
     line
-    echo -e "  ${GREEN}${BOLD}Xray 一键管理脚本 ${SCRIPT_VERSION}${NC}"
+    echo -e "  ${GREEN}${BOLD}Xray Manager ${SCRIPT_VERSION}${NC}"
     echo -e "  ${GREEN}${BRAND_HEADER}${NC}"
     echo -e "  ${YELLOW}警告！SS 和 Vless-Enc 不适合过墙${NC}"
-    echo -e "  ${YELLOW}警告！Vless-Enc 手动模式的 padding 更推荐默认不填${NC}"
-    echo -e "  Reality 默认端口 443 手动模式增加 8443"
-    echo -e "  SS 默认加密 2022-blake3-aes-128-gcm 手动模式增加 256-gcm"
+    echo -e "  ${YELLOW}警告！Vless-Enc 的 padding 功能慎用${NC}"
+    echo -e "  Reality 端口 443 手动模式增加 8443 路由 AsIs 无修改选项"
+    echo -e "  SS 默认 2022-blake3-aes-128-gcm 手动模式增加 aes-256-gcm"
     echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
     echo -e "  SNI 测速池 + 时间同步 + 端口复用 + BBR + Vless-Enc + XHTTP" 
     echo -e "  ${CYAN}快捷指令:${NC}"
