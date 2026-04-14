@@ -38,7 +38,7 @@ zdd update
 ## 完整卸载 脚本 Xray SS-Rust 及各种配置
 
 ```bash
-zdd uinstall
+zdd uninstall
 ```
 
 <br>
