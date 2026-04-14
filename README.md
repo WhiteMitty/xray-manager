@@ -56,41 +56,35 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
+#### 推荐 Xray 内核的代理如 v2rayN Exclave
+#### xhttp 只做了 v4 v6 分离，刚需双栈机器
 #### SS-Rust 除阿尔卑斯系统外不会额外安装，所以也没设置更新选项
-#### 仅 1、4、7 号方式中的 reality 适合直连，8号为激进玩法，容易被墙
+#### 仅 1、4、7 号方式中的 reality 适合直连，8 号为激进玩法，容易被墙
 #### 确保 443、8443 未被占用，防火墙已放行，Reality 写死 443/8443 端口
+#### 因本身带管理运维功能，所以脚本会留在 vps 上，若嫌弃可以用 9 号功能删除
 
 <br>
 
-<h2 align="left">主界面</h2>
+<h4 align="left">主界面</h4>
 <p align="left">
   <img src="main.jpg" alt="主界面" width="900">
 </p>
 
-<h2 align="left">安装界面</h2>
+<h4 align="left">安装界面</h4>
 <p align="left">
   <img src="install.jpg" alt="安装界面" width="900">
 </p>
 
-<h2 align="left">粘贴落地链接</h2>
+<h4 align="left">粘贴落地链接</h4>
 <p align="left">
   <img src="landing.jpg" alt="端口复用" width="900">
 </p>
 
-<h2 align="left">节点订阅界面</h2>
+<h4 align="left">节点订阅界面</h4>
 <p align="left">
   <img src="node_sub.jpg" alt="订阅界面" width="900">
 </p>
 
-<br>
 
-#### xhttp 使用
 
-#### xhttp 只做了 v4 v6 分离，刚需双栈机器
-#### 推荐 Xray 内核的代理如 v2rayN Exclave
 
-<br>
-
-#### 9 号功能可完整卸载脚本和 xray 及各种配置文件
-
-#### 因本身带管理运维功能，所以脚本会留在 vps 上，若嫌弃可以选仅删除脚本
