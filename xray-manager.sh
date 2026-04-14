@@ -743,7 +743,7 @@ function choose_ss_method() {
 function choose_reality_landing_count() {
     local choice
     while true; do
-        echo -e "  ${CYAN}1.${NC} 纯直出（不增加落地）" >&2
+        echo -e "  ${CYAN}1.${NC} 直出（不增加落地）" >&2
         echo -e "  ${CYAN}2.${NC} 1 个落地出口（直出 + 1 落地）" >&2
         echo -e "  ${CYAN}3.${NC} 2 个落地出口（直出 + 2 落地）" >&2
         echo -e "  ${CYAN}4.${NC} 3 个落地出口（直出 + 3 落地）" >&2
