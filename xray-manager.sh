@@ -6447,7 +6447,7 @@ function get_xray_version_badge() {
         return 0
     fi
 
-    version_line=$("$xray_bin" version 2>/dev/null | head -1)
+    version_line=$("$xray_bin" version 2>/dev/null | awk 'NR==1 {print $1, $2; exit}')
     if [[ -z "$version_line" ]]; then
         printf '%bN/A%b' "$YELLOW" "$NC"
         return 0
@@ -6460,7 +6460,7 @@ function show_main_header() {
     line
     echo -e "  ${GREEN}${BOLD}Xray Manager ${SCRIPT_VERSION}${NC}"
     echo -e "  ${GREEN}${BRAND_HEADER}${NC}"
-    echo -e "  ${YELLOW}警告：SS 和 Vless-Enc 不适合过墙；Vless-Enc 的 padding 功能慎用${NC}"
+    echo -e "  ${YELLOW}SS 和 Vless-Enc 不适合过墙；Vless-Enc 的 padding 功能慎用${NC}"
     echo -e "  Xray 状态 : $(get_xray_running_badge)"
     echo -e "  Xray 版本 : $(get_xray_version_badge)"
     echo -e "  ${CYAN}快捷指令:${NC}"
