@@ -70,7 +70,7 @@ DEFAULT_DEST_OPTIONS=(
 function line() {
     local linebuf
     printf -v linebuf '%*s' "$UI_WIDTH" ''
-    echo -e "${GREEN}${linebuf// /=}${NC}"
+    echo -e "${GREEN}${linebuf// /-}${NC}"
 }
 
 function center_text() {
@@ -262,7 +262,7 @@ case "\${1:-}" in
         shift
         exec "$SELF_SCRIPT_PATH" --quick-update "\$@"
         ;;
-    uninstall|uninstall)
+    uninstall)
         shift
         exec "$SELF_SCRIPT_PATH" --quick-uninstall "\$@"
         ;;
@@ -463,8 +463,7 @@ function load_sni_pool() {
 
     if [[ -f "$SNI_POOL_FILE" ]]; then
         while IFS= read -r linebuf; do
-            linebuf=$(printf '%s' "$linebuf" | tr -d '
-')
+            linebuf=$(printf '%s' "$linebuf" | tr -d '\n')
             [[ -n "$linebuf" ]] && DEST_OPTIONS+=("$linebuf")
         done < "$SNI_POOL_FILE"
         if [[ ${#DEST_OPTIONS[@]} -gt 0 ]]; then
@@ -647,7 +646,9 @@ function choose_freedom_domain_strategy() {
     while true; do
         echo -e "  ${CYAN}1.${NC} IPv4 优先（UseIPv4）" >&2
         echo -e "  ${CYAN}2.${NC} 仅 IPv4（ForceIPv4）" >&2
-        read -r -p "选择 [1-2]，默认 1（1=IPv4 优先 / 2=仅 IPv4）: " ds_choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 [1-2/0/b]，默认 1（1=IPv4 优先 / 2=仅 IPv4）: " ds_choice
         case "${ds_choice:-1}" in
             1|01)
                 echo "UseIPv4"
@@ -657,8 +658,16 @@ function choose_freedom_domain_strategy() {
                 echo "ForceIPv4"
                 return 0
                 ;;
+            0|00)
+                echo "__BACK__"
+                return 0
+                ;;
+            b|B)
+                echo "__MAIN__"
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -701,7 +710,9 @@ function choose_reality_port() {
     while true; do
         echo -e "  ${CYAN}1.${NC} 443（默认）" >&2
         echo -e "  ${CYAN}2.${NC} 8443" >&2
-        read -r -p "选择 Reality 端口 [1-2]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 Reality 端口 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 echo "443"
@@ -711,8 +722,16 @@ function choose_reality_port() {
                 echo "8443"
                 return 0
                 ;;
+            0|00)
+                echo "__BACK__"
+                return 0
+                ;;
+            b|B)
+                echo "__MAIN__"
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -723,7 +742,9 @@ function choose_ss_method() {
     while true; do
         echo -e "  ${CYAN}1.${NC} 2022-blake3-aes-128-gcm（默认）" >&2
         echo -e "  ${CYAN}2.${NC} 2022-blake3-aes-256-gcm" >&2
-        read -r -p "选择 SS2022 加密方式 [1-2]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 SS2022 加密方式 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 echo "2022-blake3-aes-128-gcm"
@@ -733,8 +754,16 @@ function choose_ss_method() {
                 echo "2022-blake3-aes-256-gcm"
                 return 0
                 ;;
+            0|00)
+                echo "__BACK__"
+                return 0
+                ;;
+            b|B)
+                echo "__MAIN__"
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -747,7 +776,9 @@ function choose_reality_landing_count() {
         echo -e "  ${CYAN}2.${NC} 1 个落地出口（直出 + 1 落地）" >&2
         echo -e "  ${CYAN}3.${NC} 2 个落地出口（直出 + 2 落地）" >&2
         echo -e "  ${CYAN}4.${NC} 3 个落地出口（直出 + 3 落地）" >&2
-        read -r -p "选择 Reality 落地数量 [1-4]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 Reality 落地数量 [1-4/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' "0"
@@ -765,8 +796,16 @@ function choose_reality_landing_count() {
                 printf '%s' "3"
                 return 0
                 ;;
+            0|00)
+                printf '%s' '__BACK__'
+                return 0
+                ;;
+            b|B)
+                printf '%s' '__MAIN__'
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1-4。${NC}" >&2
+                echo -e "${RED}  请输入 1-4、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -779,7 +818,9 @@ function choose_vlessenc_padding_profile() {
         echo -e "  ${CYAN}2.${NC} 温和（轻微增加长度与节奏扰动）" >&2
         echo -e "  ${CYAN}3.${NC} 激进（更明显的实验性 padding / delay）" >&2
         echo -e "  ${CYAN}4.${NC} 手动自定义（客户端 / 服务端分别输入）" >&2
-        read -r -p "选择实验性 padding / delay 档位 [1-4]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择实验性 padding / delay 档位 [1-4/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' "off"
@@ -797,8 +838,16 @@ function choose_vlessenc_padding_profile() {
                 printf '%s' "custom"
                 return 0
                 ;;
+            0|00)
+                printf '%s' '__BACK__'
+                return 0
+                ;;
+            b|B)
+                printf '%s' '__MAIN__'
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1-4。${NC}" >&2
+                echo -e "${RED}  请输入 1-4、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -806,11 +855,11 @@ function choose_vlessenc_padding_profile() {
 
 function get_vlessenc_padding_profile_desc() {
     case "$1" in
-        off) printf '%s' '默认（核心自动 padding / delay）' ;;
-        gentle) printf '%s' '温和（客户端 / 服务端使用不同轻量规则）' ;;
-        aggressive) printf '%s' '激进（客户端 / 服务端使用不同重规则）' ;;
-        custom) printf '%s' '手动自定义（客户端 / 服务端分别输入）' ;;
-        *) printf '%s' '默认（核心自动 padding / delay）' ;;
+        off) printf '%s' '默认：不额外追加自定义 padding / delay，保持核心默认行为' ;;
+        gentle) printf '%s' '温和：少量 padding + 轻微 delay，主要做轻量长度与节奏扰动' ;;
+        aggressive) printf '%s' '激进：更多 padding 段与更大 delay 抖动，伪装更强但更影响时延与稳定性' ;;
+        custom) printf '%s' '手动自定义：客户端 / 服务端分别输入规则，适合已理解格式后再改' ;;
+        *) printf '%s' '默认：不额外追加自定义 padding / delay，保持核心默认行为' ;;
     esac
 }
 
@@ -905,7 +954,9 @@ function choose_vlessenc_rtt_mode() {
     while true; do
         echo -e "  ${CYAN}1.${NC} 0rtt（更偏性能 / 重连更快）" >&2
         echo -e "  ${CYAN}2.${NC} 1rtt（强制完整握手 / 更偏保守）" >&2
-        read -r -p "选择 [1-2]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 echo "0rtt"
@@ -915,8 +966,16 @@ function choose_vlessenc_rtt_mode() {
                 echo "1rtt"
                 return 0
                 ;;
+            0|00)
+                echo "__BACK__"
+                return 0
+                ;;
+            b|B)
+                echo "__MAIN__"
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -928,7 +987,9 @@ function choose_vlessenc_shape_mode() {
         echo -e "  ${CYAN}1.${NC} xorpub（推荐：原始格式 + 公钥部分混淆）" >&2
         echo -e "  ${CYAN}2.${NC} native（原始格式）" >&2
         echo -e "  ${CYAN}3.${NC} random（更随机化的表现形式）" >&2
-        read -r -p "选择 [1-3]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 [1-3/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 echo "xorpub"
@@ -942,8 +1003,16 @@ function choose_vlessenc_shape_mode() {
                 echo "random"
                 return 0
                 ;;
+            0|00)
+                echo "__BACK__"
+                return 0
+                ;;
+            b|B)
+                echo "__MAIN__"
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1、2 或 3。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、3、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -954,7 +1023,9 @@ function choose_vlessenc_auth_method() {
     while true; do
         echo -e "  ${CYAN}1.${NC} x25519（更短；认证不抗量子）" >&2
         echo -e "  ${CYAN}2.${NC} mlkem768（更长；认证也抗量子）" >&2
-        read -r -p "选择 [1-2]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 echo "x25519"
@@ -964,8 +1035,16 @@ function choose_vlessenc_auth_method() {
                 echo "mlkem768"
                 return 0
                 ;;
+            0|00)
+                echo "__BACK__"
+                return 0
+                ;;
+            b|B)
+                echo "__MAIN__"
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -1796,6 +1875,11 @@ ${CYAN}[Step 3/7] 手动选择 SS2022 参数${NC}"
     local ss_method=""
     local ss_port=""
     ss_method=$(choose_ss_method) || return 1
+    case "$ss_method" in
+        __BACK__|__MAIN__)
+            return 0
+            ;;
+    esac
     while true; do
         ss_port=$(read_manual_ss_port "请输入 SS2022 监听端口: ") || return 1
         if is_port_in_use "$ss_port"; then
@@ -1808,8 +1892,7 @@ ${CYAN}[Step 3/7] 手动选择 SS2022 参数${NC}"
     echo -e "
 ${CYAN}[Step 4/7] 生成密钥与写入配置${NC}"
     local ss_password=""
-    ss_password=$(ssservice genkey -m "$ss_method" 2>/dev/null | tr -d '
-')
+    ss_password=$(ssservice genkey -m "$ss_method" 2>/dev/null | tr -d '\n')
     if [[ -z "$ss_password" ]]; then
         echo -e "${RED}  ✗ 生成 SS2022 密钥失败，请检查 shadowsocks-rust 是否安装完整。${NC}"
         return 1
@@ -1846,7 +1929,7 @@ ${CYAN}[Step 7/7] 生成节点信息${NC}"
     fi
 
     sub_text="订阅:
-  SS2022:
+SS2022:
 "
     if [[ -n "$ss_link_v4" ]]; then
         sub_text+="  ${ss_link_v4}
@@ -1857,8 +1940,8 @@ ${CYAN}[Step 7/7] 生成节点信息${NC}"
     fi
     if [[ -n "$ss_link_v6" ]]; then
         sub_text+="
-  SS2022 (IPv6):
-  ${ss_link_v6}
+SS2022 (IPv6):
+${ss_link_v6}
 "
     fi
 
@@ -2053,8 +2136,7 @@ function print_download_error_reason() {
     local curl_code="$1"
     local err_file="$2"
     local raw_msg=""
-    raw_msg=$(tail -n 1 "$err_file" 2>/dev/null | tr -d '
-')
+    raw_msg=$(tail -n 1 "$err_file" 2>/dev/null | tr -d '\n')
 
     case "$curl_code" in
         6)
@@ -2199,33 +2281,33 @@ function write_subscription_files() {
 生成时间: ${now_time}
 
 订阅:
-  REALITY:
-  ${reality_link}
+REALITY:
+${reality_link}
 
-  Vless-Enc:
-  ${enc_link}
+Vless-Enc:
+${enc_link}
 
-  SS2022:
-  ${ss_link}
+SS2022:
+${ss_link}
 INFOEOF
 
         if [[ -n "$reality_link_v6" && -n "$ss_link_v6" ]]; then
             cat >> "$INFO_FILE" <<INFOEOF
 
-  REALITY (IPv6):
-  ${reality_link_v6}
+REALITY (IPv6):
+${reality_link_v6}
 INFOEOF
             if [[ -n "$enc_link_v6" ]]; then
                 cat >> "$INFO_FILE" <<INFOEOF
 
-  Vless-Enc (IPv6):
-  ${enc_link_v6}
+Vless-Enc (IPv6):
+${enc_link_v6}
 INFOEOF
             fi
             cat >> "$INFO_FILE" <<INFOEOF
 
-  SS2022 (IPv6):
-  ${ss_link_v6}
+SS2022 (IPv6):
+${ss_link_v6}
 INFOEOF
         fi
 
@@ -2243,33 +2325,33 @@ INFOEOF
 生成时间: ${now_time}
 
 订阅:
-  REALITY:
-  ${reality_link}
+REALITY:
+${reality_link}
 
-  Vless-Enc:
-  ${enc_link}
+Vless-Enc:
+${enc_link}
 
-  SS2022:
-  ${ss_link}
+SS2022:
+${ss_link}
 SUBEOF
 
         if [[ -n "$reality_link_v6" && -n "$ss_link_v6" ]]; then
             cat >> "$SUB_FILE" <<SUBEOF
 
-  REALITY (IPv6):
-  ${reality_link_v6}
+REALITY (IPv6):
+${reality_link_v6}
 SUBEOF
             if [[ -n "$enc_link_v6" ]]; then
                 cat >> "$SUB_FILE" <<SUBEOF
 
-  Vless-Enc (IPv6):
-  ${enc_link_v6}
+Vless-Enc (IPv6):
+${enc_link_v6}
 SUBEOF
             fi
             cat >> "$SUB_FILE" <<SUBEOF
 
-  SS2022 (IPv6):
-  ${ss_link_v6}
+SS2022 (IPv6):
+${ss_link_v6}
 SUBEOF
         fi
     )
@@ -2869,12 +2951,16 @@ function choose_install_scenario() {
         echo -e "  ${CYAN}5.${NC} SS 传导链（SS 入站 -> SS 出站）" >&2
         echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
         echo -e "  ${CYAN}7.${NC} XHTTP + Reality 上下行分离（须双栈 / 直出 / 多落地）" >&2
-        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 上下行分离（须双栈 / 直出 / ${YELLOW}高风险慎用${NC}）" >&2    
+        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 上下行分离（须双栈 / 直出 / ${YELLOW}高风险慎用${NC}）" >&2
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         line >&2
-        read -r -p "选择 [1-8]: " choice
+        read -r -p "选择 [1-8/0/b]: " choice
         case "$choice" in
             1|2|3|4|5|6|7|8) printf '%s' "$choice"; return 0 ;;
-            *) echo -e "${RED}  请输入 1-8。${NC}" >&2 ;;
+            0|00) printf '%s' '__BACK__'; return 0 ;;
+            b|B) printf '%s' '__MAIN__'; return 0 ;;
+            *) echo -e "${RED}  请输入 1-8、0 或 b。${NC}" >&2 ;;
         esac
     done
 }
@@ -2884,7 +2970,9 @@ function choose_xhttp_split_direction() {
     while true; do
         echo -e "  ${CYAN}1.${NC} v6 去 / v4 回（默认）" >&2
         echo -e "  ${CYAN}2.${NC} v4 去 / v6 回" >&2
-        read -r -p "选择 XHTTP 分离方向 [1-2]，默认 1: " choice
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择 XHTTP 分离方向 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' 'v6_up_v4_down'
@@ -2894,8 +2982,16 @@ function choose_xhttp_split_direction() {
                 printf '%s' 'v4_up_v6_down'
                 return 0
                 ;;
+            0|00)
+                printf '%s' '__BACK__'
+                return 0
+                ;;
+            b|B)
+                printf '%s' '__MAIN__'
+                return 0
+                ;;
             *)
-                echo -e "${RED}  请输入 1 或 2。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -3011,6 +3107,56 @@ function write_xhttp_client_patch_file() {
     XHTTP_PATCH_LAST_JSON=$(build_xhttp_client_patch_json "$address" "$port" "$security" "$server_name" "$fingerprint" "$public_key" "$short_id" "$path") || return 1
     return 0
 }
+
+function compact_json_inline() {
+    local json_text="$1"
+    if command -v jq >/dev/null 2>&1; then
+        printf '%s' "$json_text" | jq -c . 2>/dev/null || printf '%s' "$json_text" | tr -d '\n'
+    else
+        printf '%s' "$json_text" | tr -d '\n'
+    fi
+}
+
+function build_xhttp_reality_full_link() {
+    local uuid="$1"
+    local up_host_uri="$2"
+    local up_port="$3"
+    local down_address="$4"
+    local down_port="$5"
+    local server_name="$6"
+    local fingerprint="$7"
+    local public_key="$8"
+    local short_id="$9"
+    local path="${10}"
+    local share_name="${11}"
+    local extra_json=""
+    local extra_compact=""
+    local extra_uri=""
+
+    extra_json=$(build_xhttp_client_patch_json "$down_address" "$down_port" "reality" "$server_name" "$fingerprint" "$public_key" "$short_id" "$path") || return 1
+    extra_compact=$(compact_json_inline "$extra_json")
+    extra_uri=$(url_encode "$extra_compact")
+    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$server_name" "$fingerprint" "$public_key" "$short_id" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
+}
+
+function build_xhttp_vlessenc_full_link() {
+    local uuid="$1"
+    local up_host_uri="$2"
+    local up_port="$3"
+    local down_address="$4"
+    local down_port="$5"
+    local enc_value="$6"
+    local path="$7"
+    local share_name="$8"
+    local extra_json=""
+    local extra_compact=""
+    local extra_uri=""
+
+    extra_json=$(build_xhttp_client_patch_json "$down_address" "$down_port" "none" "" "" "" "" "$path") || return 1
+    extra_compact=$(compact_json_inline "$extra_json")
+    extra_uri=$(url_encode "$extra_compact")
+    printf 'vless://%s@%s:%s?encryption=%s&flow=xtls-rprx-vision&security=none&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$(url_encode "$enc_value")" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
+}
 function precheck_reality_port_before_apply() {
     local scenario="$1"
     local port="$2"
@@ -3080,39 +3226,9 @@ function install_xray() {
     fi
     check_bbr || true
 
-    echo -e "\n${CYAN}[Step 2/7] 第二层：安装模式${NC}"
     local INSTALL_MODE="auto"
-    if is_quick_install_noninteractive; then
-        echo -e "${YELLOW}  检测到非交互快速安装：安装模式自动使用默认值（自动模式）。${NC}"
-    else
-        while true; do
-            echo -e "  ${CYAN}1.${NC} 自动模式"
-            echo -e "  ${CYAN}2.${NC} 手动模式"
-            read -r -p "选择 [1-2]，默认 1: " INSTALL_MODE_CHOICE
-            case "${INSTALL_MODE_CHOICE:-1}" in
-                1|01) INSTALL_MODE="auto"; break ;;
-                2|02) INSTALL_MODE="manual"; break ;;
-                *) echo -e "${RED}  请输入 1 或 2。${NC}" ;;
-            esac
-        done
-    fi
-
-    echo -e "\n${CYAN}[Step 3/7] 第三层：模板选择${NC}"
     local SCENARIO=""
-    if is_quick_install_noninteractive; then
-        if [[ -n "$QUICK_SCENARIO" ]]; then
-            SCENARIO="$QUICK_SCENARIO"
-            echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用指定值（$(printf '%02d' "$SCENARIO") $(get_install_scenario_label "$SCENARIO")）。${NC}"
-        else
-            SCENARIO="1"
-            echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 单 Reality）。${NC}"
-        fi
-    else
-        SCENARIO=$(choose_install_scenario)
-    fi
-    local TEMPLATE_LABEL
-    TEMPLATE_LABEL=$(get_install_scenario_label "$SCENARIO")
-
+    local TEMPLATE_LABEL=""
     local FREEDOM_DOMAIN_STRATEGY="UseIPv4"
     local REALITY_PORT="$DEFAULT_PORT"
     local SNI_SOURCE="auto"
@@ -3151,189 +3267,360 @@ function install_xray() {
     local XHTTP_REQ_V4=""
     local XHTTP_REQ_V6=""
 
-    echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
+    while true; do
+        echo -e "
+${CYAN}[Step 2/7] 第二层：安装模式${NC}"
+        if is_quick_install_noninteractive; then
+            echo -e "${YELLOW}  检测到非交互快速安装：安装模式自动使用默认值（自动模式）。${NC}"
+            INSTALL_MODE="auto"
+        else
+            while true; do
+                echo -e "  ${CYAN}1.${NC} 自动模式"
+                echo -e "  ${CYAN}2.${NC} 手动模式"
+                echo -e "  ${CYAN}0.${NC} 返回主菜单"
+                read -r -p "选择 [1-2/0]，默认 1: " INSTALL_MODE_CHOICE
+                case "${INSTALL_MODE_CHOICE:-1}" in
+                    1|01) INSTALL_MODE="auto"; break ;;
+                    2|02) INSTALL_MODE="manual"; break ;;
+                    0|00) return 0 ;;
+                    *) echo -e "${RED}  请输入 1、2 或 0。${NC}" ;;
+                esac
+            done
+        fi
 
-    case "$SCENARIO" in
-        1)
-            echo -e "${CYAN}  说明：Reality 专用模板支持 0-3 个落地出口。0 代表纯直出；1-3 代表在直出之外，再增加 1-3 个落地入口。${NC}"
-            echo -e "${CYAN}  这些入口共用同一个 Reality 监听端口，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
-            REALITY_LANDING_COUNT=$(choose_reality_landing_count)
-            if (( REALITY_LANDING_COUNT > 0 )); then
-                NEED_LANDING="1"
-                LANDING_EXPECT="any"
-            fi
-            ;;
-        5)
-            NEED_LANDING="1"
-            LANDING_EXPECT="ss"
-            ;;
-        6)
-            NEED_LANDING="1"
-            LANDING_EXPECT="vless"
-            ;;
-        7)
-            XHTTP_MODE_ENABLED="1"
-            XHTTP_SECURITY="reality"
-            echo -e "${CYAN}  说明：该模板使用 XHTTP + Reality，并通过 downloadSettings 做去程 / 回程分离。${NC}"
-            echo -e "${CYAN}  这些入口共用同一个 XHTTP + Reality 监听端口，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
-            REALITY_LANDING_COUNT=$(choose_reality_landing_count)
-            if (( REALITY_LANDING_COUNT > 0 )); then
-                NEED_LANDING="1"
-                LANDING_EXPECT="any"
-            fi
-            ;;
-        8)
-            XHTTP_MODE_ENABLED="1"
-            XHTTP_SECURITY="none"
-            ENC_RTT_MODE="1rtt"
-            ENC_SHAPE_MODE="random"
-            ENC_AUTH_METHOD="mlkem768"
-            ENC_PADDING_PROFILE="aggressive"
-            ENC_PADDING_PROFILE_DESC="$(get_vlessenc_padding_profile_desc aggressive)"
-            echo -e "${RED}${BOLD}  警告：该模板为 XHTTP + Vless-Enc，无 TLS / 无 Reality，仅适合实验研究，不建议在高风险公网环境使用。${NC}"
-            ;;
-    esac
-
-    echo -e "${YELLOW}  说明：01 安装为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
-
-    if [[ "$INSTALL_MODE" == "auto" ]]; then
-        echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
-        case "$SCENARIO" in
-            1)
-                echo -e "${CYAN}    - Reality 端口：${REALITY_PORT}${NC}"
-                echo -e "${CYAN}    - Reality SNI：自动测速选优${NC}"
-                if (( REALITY_LANDING_COUNT == 0 )); then
-                    echo -e "${CYAN}    - 架构：纯直出${NC}"
+        while true; do
+            echo -e "
+${CYAN}[Step 3/7] 第三层：模板选择${NC}"
+            if is_quick_install_noninteractive; then
+                if [[ -n "$QUICK_SCENARIO" ]]; then
+                    SCENARIO="$QUICK_SCENARIO"
+                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用指定值（$(printf '%02d' "$SCENARIO") $(get_install_scenario_label "$SCENARIO")）。${NC}"
                 else
-                    echo -e "${CYAN}    - 架构：直出 + ${REALITY_LANDING_COUNT} 个落地出口${NC}"
+                    SCENARIO="1"
+                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 单 Reality）。${NC}"
                 fi
-                ;;
-            2)
-                echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
-                echo -e "${CYAN}    - SS2022 端口：随机高位端口${NC}"
-                ;;
-            3)
-                echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
-                echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
-                echo -e "${CYAN}    - Vless-Enc 端口：随机高位端口${NC}"
-                ;;
-            4)
-                echo -e "${CYAN}    - Reality 端口：${REALITY_PORT}${NC}"
-                echo -e "${CYAN}    - Reality SNI：自动测速选优${NC}"
-                echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
-                echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
-                echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
-                ;;
-            5)
-                echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
-                echo -e "${CYAN}    - 入口：SS 入站${NC}"
-                echo -e "${CYAN}    - 出口：SS 落地${NC}"
-                ;;
-            6)
-                echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
-                echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
-                echo -e "${CYAN}    - 入口：Vless-Enc 入站${NC}"
-                echo -e "${CYAN}    - 出口：VLESS / Reality / Vless-Enc${NC}"
-                ;;
-            7)
-                echo -e "${CYAN}    - XHTTP + Reality：启用${NC}"
-                echo -e "${CYAN}    - 分离方向：${XHTTP_SPLIT_DESC}${NC}"
-                echo -e "${CYAN}    - XHTTP path：${XHTTP_PATH}${NC}"
-                echo -e "${CYAN}    - Reality 端口：${REALITY_PORT}${NC}"
-                echo -e "${CYAN}    - Reality SNI：自动测速选优${NC}"
-                echo -e "${CYAN}    - 客户端：推荐 v2rayN + Xray 内核；其他客户端本脚本不支持自动适配${NC}"
-                ;;
-            8)
-                echo -e "${CYAN}    - XHTTP + Vless-Enc：实验性启用${NC}"
-                echo -e "${CYAN}    - 分离方向：${XHTTP_SPLIT_DESC}${NC}"
-                echo -e "${CYAN}    - XHTTP path：${XHTTP_PATH}${NC}"
-                echo -e "${CYAN}    - Vless-Enc：random / 1rtt / mlkem768 认证${NC}"
-                echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
-                echo -e "${CYAN}    - 客户端：推荐 v2rayN + Xray 内核；其他客户端本脚本不支持自动适配${NC}"
-                ;;
-        esac
-    fi
-
-    if [[ "$INSTALL_MODE" == "manual" ]]; then
-        echo ""
-        if ask_yes_no "  是否手动选择直连出站的 IPv4 策略（y=手动选择，n=使用默认配置：IPv4 优先）"; then
-            FREEDOM_DOMAIN_STRATEGY=$(choose_freedom_domain_strategy)
-            [[ "$FREEDOM_DOMAIN_STRATEGY" == "ForceIPv4" ]] && FREEDOM_DESC="仅 IPv4"
-        fi
-
-        if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" || "$SCENARIO" == "7" ]]; then
-            echo ""
-            echo -e "${CYAN}  当前模板包含 Reality 入站，因此需要设置 Reality 端口与 SNI。${NC}"
-            echo -e "${CYAN}  Reality 端口：${NC}"
-            REALITY_PORT=$(choose_reality_port)
-            echo ""
-            if ask_yes_no "  是否手动输入 REALITY SNI（y=手动输入，n=使用默认配置：自动测速选优）"; then
-                MANUAL_DEST=$(read_manual_sni "请输入 SNI / serverName / dest 域名: ")
-                SNI_SOURCE="manual"
-            fi
-        fi
-
-        if [[ "$SCENARIO" == "2" || "$SCENARIO" == "4" || "$SCENARIO" == "5" ]]; then
-            echo ""
-            echo -e "${YELLOW}  警告！SS 和 Vless-Enc 不适合过墙${NC}"
-            echo -e "${CYAN}  先定义 SS2022 入站，再决定具体加密方式。${NC}"
-            echo -e "${CYAN}  SS2022 加密方式：${NC}"
-            LOCAL_SS_METHOD=$(choose_ss_method)
-            SS_METHOD_DESC="$LOCAL_SS_METHOD"
-            if ask_yes_no "  是否手动指定 SS2022 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
-                MANUAL_SS_PORT=$(read_manual_ss_port "请输入 SS2022 端口: ")
-                SS_PORT_SOURCE="manual"
-            fi
-        fi
-
-        if [[ "$SCENARIO" == "3" || "$SCENARIO" == "4" || "$SCENARIO" == "6" || "$SCENARIO" == "8" ]]; then
-            echo ""
-            if [[ "$SCENARIO" != "8" ]]; then
-                echo -e "${YELLOW}  警告！SS 和 Vless-Enc 不适合过墙${NC}"
             else
-                echo -e "${RED}  警告！该模板无 TLS / 无 Reality，仅适合实验研究。${NC}"
+                SCENARIO=$(choose_install_scenario)
+                case "$SCENARIO" in
+                    __BACK__)
+                        break
+                        ;;
+                    __MAIN__)
+                        return 0
+                        ;;
+                esac
             fi
-            echo -e "${CYAN}  先定义 Vless-Enc 入站端口，再配置握手与实验性参数。${NC}"
-            if ask_yes_no "  是否手动指定 Vless-Enc 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
-                MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 端口: ")
-                ENC_PORT_SOURCE="manual"
-            fi
-            echo ""
-            echo -e "${CYAN}  Vless-Enc 握手模式：${NC}"
-            echo -e "${CYAN}  - 0rtt：更偏性能；1rtt：更偏保守${NC}"
-            ENC_RTT_MODE=$(choose_vlessenc_rtt_mode)
-            echo ""
-            echo -e "${CYAN}  Vless-Enc 包形态：${NC}"
-            echo -e "${CYAN}  - xorpub / native / random：默认推荐 xorpub${NC}"
-            ENC_SHAPE_MODE=$(choose_vlessenc_shape_mode)
-            echo ""
-            echo -e "${CYAN}  Vless-Enc 认证方式：${NC}"
-            echo -e "${CYAN}  - x25519 更短；mlkem768 更长且认证也抗量子${NC}"
-            ENC_AUTH_METHOD=$(choose_vlessenc_auth_method)
-            echo ""
-            echo -e "${CYAN}  Vless-Enc 实验性 padding / delay：${NC}"
-            echo -e "${CYAN}  - 客户端与服务端将使用不同规则；手动自定义时可分别输入。${NC}"
-            ENC_PADDING_PROFILE=$(choose_vlessenc_padding_profile)
-            ENC_PADDING_PROFILE_DESC=$(get_vlessenc_padding_profile_desc "$ENC_PADDING_PROFILE")
-            if [[ "$ENC_PADDING_PROFILE" == "custom" ]]; then
-                echo ""
-                ENC_PADDING_CLIENT=$(read_manual_vlessenc_padding_profile "客户端")
-                echo ""
-                ENC_PADDING_SERVER=$(read_manual_vlessenc_padding_profile "服务端")
-            fi
-        fi
 
-        if [[ "$SCENARIO" == "7" || "$SCENARIO" == "8" ]]; then
-            echo ""
-            echo -e "${CYAN}  当前模板包含 XHTTP 分离链路，需要额外指定分离方向与 path。${NC}"
-            XHTTP_SPLIT_DIRECTION=$(choose_xhttp_split_direction)
-            XHTTP_SPLIT_DESC=$(get_xhttp_split_direction_desc "$XHTTP_SPLIT_DIRECTION")
-            echo -e "${CYAN}  客户端建议：v2rayN + Xray 内核。其他客户端本脚本不支持自动适配。${NC}"
-            if ask_yes_no "  是否手动指定 XHTTP path（y=手动输入，n=使用默认随机 path）"; then
-                XHTTP_PATH=$(read_manual_xhttp_path "请输入 XHTTP path: ")
-            fi
-        fi
-    fi
+            while true; do
+                TEMPLATE_LABEL=$(get_install_scenario_label "$SCENARIO")
+                FREEDOM_DOMAIN_STRATEGY="UseIPv4"
+                REALITY_PORT="$DEFAULT_PORT"
+                SNI_SOURCE="auto"
+                MANUAL_DEST=""
+                DEST=""
+                SS_PORT_SOURCE="auto"
+                MANUAL_SS_PORT=""
+                ENC_PORT_SOURCE="auto"
+                MANUAL_ENC_PORT=""
+                ENC_RTT_MODE="0rtt"
+                ENC_SHAPE_MODE="xorpub"
+                ENC_TICKET_WINDOW="600s"
+                ENC_AUTH_METHOD="x25519"
+                ENC_PADDING_PROFILE="off"
+                ENC_PADDING_PROFILE_DESC="$(get_vlessenc_padding_profile_desc off)"
+                ENC_PADDING_CLIENT=""
+                ENC_PADDING_SERVER=""
+                NEED_LANDING="0"
+                LANDING_LINK=""
+                LANDING_EXPECT="any"
+                FREEDOM_DESC="IPv4 优先"
+                SS_METHOD_DESC="2022-blake3-aes-128-gcm"
+                LOCAL_SS_METHOD="2022-blake3-aes-128-gcm"
+                REALITY_LANDING_COUNT=0
+                LANDING_LINKS=()
+                REALITY_LANDING_UUIDS=()
+                LANDING_LABELS=()
+                LANDING_JSONS=()
+                LANDING_TAGS=()
+                XHTTP_SPLIT_DIRECTION="v6_up_v4_down"
+                XHTTP_SPLIT_DESC="$(get_xhttp_split_direction_desc v6_up_v4_down)"
+                XHTTP_PATH="$(generate_xhttp_path)"
+                XHTTP_SECURITY=""
+                XHTTP_WARNING_TEXT=""
+                XHTTP_MODE_ENABLED="0"
+                XHTTP_REQ_V4=""
+                XHTTP_REQ_V6=""
+
+                echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
+
+                case "$SCENARIO" in
+                    1)
+                        echo -e "${CYAN}  说明：Reality 专用模板支持 0-3 个落地出口。0 代表纯直出；1-3 代表在直出之外，再增加 1-3 个落地入口。${NC}"
+                        echo -e "${CYAN}  这些入口共用同一个 Reality 监听端口，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
+                        REALITY_LANDING_COUNT=$(choose_reality_landing_count)
+                        case "$REALITY_LANDING_COUNT" in
+                            __BACK__)
+                                break
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        if (( REALITY_LANDING_COUNT > 0 )); then
+                            NEED_LANDING="1"
+                            LANDING_EXPECT="any"
+                        fi
+                        ;;
+                    5)
+                        NEED_LANDING="1"
+                        LANDING_EXPECT="ss"
+                        ;;
+                    6)
+                        NEED_LANDING="1"
+                        LANDING_EXPECT="vless"
+                        ;;
+                    7)
+                        XHTTP_MODE_ENABLED="1"
+                        XHTTP_SECURITY="reality"
+                        echo -e "${CYAN}  说明：该模板使用 XHTTP + Reality，并通过 downloadSettings 做去程 / 回程分离。${NC}"
+                        echo -e "${CYAN}  这些入口共用同一个 XHTTP + Reality 监听端口，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
+                        REALITY_LANDING_COUNT=$(choose_reality_landing_count)
+                        case "$REALITY_LANDING_COUNT" in
+                            __BACK__)
+                                break
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        if (( REALITY_LANDING_COUNT > 0 )); then
+                            NEED_LANDING="1"
+                            LANDING_EXPECT="any"
+                        fi
+                        ;;
+                    8)
+                        XHTTP_MODE_ENABLED="1"
+                        XHTTP_SECURITY="none"
+                        ENC_RTT_MODE="1rtt"
+                        ENC_SHAPE_MODE="random"
+                        ENC_AUTH_METHOD="mlkem768"
+                        ENC_PADDING_PROFILE="aggressive"
+                        ENC_PADDING_PROFILE_DESC="$(get_vlessenc_padding_profile_desc aggressive)"
+                        echo -e "${RED}${BOLD}  警告：该模板为 XHTTP + Vless-Enc，无 TLS / 无 Reality，仅适合实验研究，不建议在高风险公网环境使用。${NC}"
+                        ;;
+                esac
+
+                echo -e "${YELLOW}  说明：01 安装为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
+
+                if [[ "$INSTALL_MODE" == "auto" ]]; then
+                    echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
+                    case "$SCENARIO" in
+                        1)
+                            echo -e "${CYAN}    - Reality 端口：${REALITY_PORT}${NC}"
+                            echo -e "${CYAN}    - Reality SNI：自动测速选优${NC}"
+                            if (( REALITY_LANDING_COUNT == 0 )); then
+                                echo -e "${CYAN}    - 架构：纯直出${NC}"
+                            else
+                                echo -e "${CYAN}    - 架构：直出 + ${REALITY_LANDING_COUNT} 个落地出口${NC}"
+                            fi
+                            ;;
+                        2)
+                            echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
+                            echo -e "${CYAN}    - SS2022 端口：随机高位端口${NC}"
+                            ;;
+                        3)
+                            echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
+                            echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
+                            echo -e "${CYAN}    - Vless-Enc 端口：随机高位端口${NC}"
+                            ;;
+                        4)
+                            echo -e "${CYAN}    - Reality 端口：${REALITY_PORT}${NC}"
+                            echo -e "${CYAN}    - Reality SNI：自动测速选优${NC}"
+                            echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
+                            echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
+                            echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
+                            ;;
+                        5)
+                            echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
+                            echo -e "${CYAN}    - 入口：SS 入站${NC}"
+                            echo -e "${CYAN}    - 出口：SS 落地${NC}"
+                            ;;
+                        6)
+                            echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
+                            echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
+                            echo -e "${CYAN}    - 入口：Vless-Enc 入站${NC}"
+                            echo -e "${CYAN}    - 出口：VLESS / Reality / Vless-Enc${NC}"
+                            ;;
+                        7)
+                            echo -e "${CYAN}    - XHTTP + Reality：启用${NC}"
+                            echo -e "${CYAN}    - 分离方向：${XHTTP_SPLIT_DESC}${NC}"
+                            echo -e "${CYAN}    - XHTTP path：${XHTTP_PATH}${NC}"
+                            echo -e "${CYAN}    - Reality 端口：${REALITY_PORT}${NC}"
+                            echo -e "${CYAN}    - Reality SNI：自动测速选优${NC}"
+                            echo -e "${CYAN}    - 客户端：推荐 v2rayN + Xray 内核；其他客户端本脚本不支持自动适配${NC}"
+                            ;;
+                        8)
+                            echo -e "${CYAN}    - XHTTP + Vless-Enc：实验性启用${NC}"
+                            echo -e "${CYAN}    - 分离方向：${XHTTP_SPLIT_DESC}${NC}"
+                            echo -e "${CYAN}    - XHTTP path：${XHTTP_PATH}${NC}"
+                            echo -e "${CYAN}    - Vless-Enc：random / 1rtt / mlkem768 认证${NC}"
+                            echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
+                            echo -e "${CYAN}    - 客户端：推荐 v2rayN + Xray 内核；其他客户端本脚本不支持自动适配${NC}"
+                            ;;
+                    esac
+                fi
+
+                if [[ "$INSTALL_MODE" == "manual" ]]; then
+                    echo ""
+                    if ask_yes_no "  是否手动选择直连出站的 IPv4 策略（y=手动选择，n=使用默认配置：IPv4 优先）"; then
+                        FREEDOM_DOMAIN_STRATEGY=$(choose_freedom_domain_strategy)
+                        case "$FREEDOM_DOMAIN_STRATEGY" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        [[ "$FREEDOM_DOMAIN_STRATEGY" == "ForceIPv4" ]] && FREEDOM_DESC="仅 IPv4"
+                    fi
+
+                    if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" || "$SCENARIO" == "7" ]]; then
+                        echo ""
+                        echo -e "${CYAN}  当前模板包含 Reality 入站，因此需要设置 Reality 端口与 SNI。${NC}"
+                        echo -e "${CYAN}  Reality 端口：${NC}"
+                        REALITY_PORT=$(choose_reality_port)
+                        case "$REALITY_PORT" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        echo ""
+                        if ask_yes_no "  是否手动输入 REALITY SNI（y=手动输入，n=使用默认配置：自动测速选优）"; then
+                            MANUAL_DEST=$(read_manual_sni "请输入 SNI / serverName / dest 域名: ")
+                            SNI_SOURCE="manual"
+                        fi
+                    fi
+
+                    if [[ "$SCENARIO" == "2" || "$SCENARIO" == "4" || "$SCENARIO" == "5" ]]; then
+                        echo ""
+                        echo -e "${YELLOW}  警告！SS 和 Vless-Enc 不适合过墙${NC}"
+                        echo -e "${CYAN}  先定义 SS2022 入站，再决定具体加密方式。${NC}"
+                        echo -e "${CYAN}  SS2022 加密方式：${NC}"
+                        LOCAL_SS_METHOD=$(choose_ss_method)
+                        case "$LOCAL_SS_METHOD" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        SS_METHOD_DESC="$LOCAL_SS_METHOD"
+                        if ask_yes_no "  是否手动指定 SS2022 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
+                            MANUAL_SS_PORT=$(read_manual_ss_port "请输入 SS2022 端口: ")
+                            SS_PORT_SOURCE="manual"
+                        fi
+                    fi
+
+                    if [[ "$SCENARIO" == "3" || "$SCENARIO" == "4" || "$SCENARIO" == "6" || "$SCENARIO" == "8" ]]; then
+                        echo ""
+                        if [[ "$SCENARIO" != "8" ]]; then
+                            echo -e "${YELLOW}  警告！SS 和 Vless-Enc 不适合过墙${NC}"
+                        else
+                            echo -e "${RED}  警告！该模板无 TLS / 无 Reality，仅适合实验研究。${NC}"
+                        fi
+                        echo -e "${CYAN}  先定义 Vless-Enc 入站端口，再配置握手与实验性参数。${NC}"
+                        if ask_yes_no "  是否手动指定 Vless-Enc 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
+                            MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 端口: ")
+                            ENC_PORT_SOURCE="manual"
+                        fi
+                        echo ""
+                        echo -e "${CYAN}  Vless-Enc 握手模式：${NC}"
+                        echo -e "${CYAN}  - 0rtt：更偏性能；1rtt：更偏保守${NC}"
+                        ENC_RTT_MODE=$(choose_vlessenc_rtt_mode)
+                        case "$ENC_RTT_MODE" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        echo ""
+                        echo -e "${CYAN}  Vless-Enc 包形态：${NC}"
+                        echo -e "${CYAN}  - xorpub / native / random：默认推荐 xorpub${NC}"
+                        ENC_SHAPE_MODE=$(choose_vlessenc_shape_mode)
+                        case "$ENC_SHAPE_MODE" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        echo ""
+                        echo -e "${CYAN}  Vless-Enc 认证方式：${NC}"
+                        echo -e "${CYAN}  - x25519 更短；mlkem768 更长且认证也抗量子${NC}"
+                        ENC_AUTH_METHOD=$(choose_vlessenc_auth_method)
+                        case "$ENC_AUTH_METHOD" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        echo ""
+                        echo -e "${CYAN}  Vless-Enc 实验性 padding / delay：${NC}"
+                        echo -e "${CYAN}  - 本质：padding 改单次包长范围，delay 改发包间隔；两端规则可以不同。${NC}"
+                        echo -e "${CYAN}  - 温和档主要做轻量长度 / 节奏扰动；激进档会加入更强抖动，但更容易带来时延、吞吐和兼容性波动。${NC}"
+                        echo -e "${CYAN}  - 手动自定义时：客户端规则写入分享链接 encryption，服务端规则写入入站 decryption。${NC}"
+                        ENC_PADDING_PROFILE=$(choose_vlessenc_padding_profile)
+                        case "$ENC_PADDING_PROFILE" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        ENC_PADDING_PROFILE_DESC=$(get_vlessenc_padding_profile_desc "$ENC_PADDING_PROFILE")
+                        if [[ "$ENC_PADDING_PROFILE" == "custom" ]]; then
+                            echo ""
+                            ENC_PADDING_CLIENT=$(read_manual_vlessenc_padding_profile "客户端")
+                            echo ""
+                            ENC_PADDING_SERVER=$(read_manual_vlessenc_padding_profile "服务端")
+                        fi
+                    fi
+
+                    if [[ "$SCENARIO" == "7" || "$SCENARIO" == "8" ]]; then
+                        echo ""
+                        echo -e "${CYAN}  当前模板包含 XHTTP 分离链路，需要额外指定分离方向与 path。${NC}"
+                        XHTTP_SPLIT_DIRECTION=$(choose_xhttp_split_direction)
+                        case "$XHTTP_SPLIT_DIRECTION" in
+                            __BACK__)
+                                continue
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        XHTTP_SPLIT_DESC=$(get_xhttp_split_direction_desc "$XHTTP_SPLIT_DIRECTION")
+                        echo -e "${CYAN}  客户端建议：v2rayN + Xray 内核。其他客户端本脚本不支持自动适配。${NC}"
+                        if ask_yes_no "  是否手动指定 XHTTP path（y=手动输入，n=使用默认随机 path）"; then
+                            XHTTP_PATH=$(read_manual_xhttp_path "请输入 XHTTP path: ")
+                        fi
+                    fi
+                fi
+
+                break 3
+            done
+        done
+    done
 
     if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" || "$SCENARIO" == "7" ]]; then
         echo -e "${CYAN}  当前 Reality 端口：${REALITY_PORT}${NC}"
@@ -3638,6 +3925,9 @@ function install_xray() {
         local SS_USERINFO
         SS_USERINFO=$(base64_encode_urlsafe_nopad "${LOCAL_SS_METHOD}:${LOCAL_SS_PWD}")
         SS_NODE_LINK="ss://${SS_USERINFO}@${SERVER_IP_URI}:${LOCAL_SS_PORT}#SS-zdd"
+        if [[ -n "$SERVER_IP_URI_V6" ]]; then
+            SS_NODE_LINK_V6="ss://${SS_USERINFO}@${SERVER_IP_URI_V6}:${LOCAL_SS_PORT}#SS-IPv6-zdd"
+        fi
     fi
 
     case "$SCENARIO" in
@@ -3734,14 +4024,14 @@ EOF
   - 落地数量: ${REALITY_LANDING_COUNT}
 
 订阅:
-  REALITY（直出入口）:
+REALITY（直出入口）:
   ${VLESS_LINK}
 EOF
 )
             if [[ -n "$REALITY_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  REALITY（直出入口 / IPv6）:
+REALITY（直出入口 / IPv6）:
   ${REALITY_LINK_V6}
 EOF
 )
@@ -3751,14 +4041,14 @@ EOF
                 for idx in $(seq 1 "$REALITY_LANDING_COUNT"); do
                     SUBS_TEXT+=$(cat <<EOF
 
-  REALITY（落地入口 ${idx}）:
+REALITY（落地入口 ${idx}）:
   ${REALITY_LANDING_LINKS[$((idx-1))]}
 EOF
 )
                     if [[ ${#REALITY_LANDING_LINKS_V6[@]} -ge ${idx} ]]; then
                         SUBS_TEXT+=$(cat <<EOF
 
-  REALITY（落地入口 ${idx} / IPv6）:
+REALITY（落地入口 ${idx} / IPv6）:
   ${REALITY_LANDING_LINKS_V6[$((idx-1))]}
 EOF
 )
@@ -3827,14 +4117,14 @@ EOF
   - 出口: freedom / ${FREEDOM_DESC}
 
 订阅:
-  SS2022（直出）:
+SS2022（直出）:
   ${SS_NODE_LINK}
 EOF
 )
             if [[ -n "$SS_NODE_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  SS2022（直出 / IPv6）:
+SS2022（直出 / IPv6）:
   ${SS_NODE_LINK_V6}
 EOF
 )
@@ -3891,14 +4181,14 @@ EOF
   - 出口: freedom / ${FREEDOM_DESC}
 
 订阅:
-  Vless-Enc（直出）:
+Vless-Enc（直出）:
   ${VLESS_ENC_LINK}
 EOF
 )
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  Vless-Enc（直出 / IPv6）:
+Vless-Enc（直出 / IPv6）:
   ${VLESS_ENC_LINK_V6}
 EOF
 )
@@ -4010,20 +4300,20 @@ EOF
   - 出口: freedom / ${FREEDOM_DESC}
 
 订阅:
-  REALITY（直出）:
+REALITY（直出）:
   ${VLESS_LINK}
 
-  Vless-Enc（直出）:
+Vless-Enc（直出）:
   ${VLESS_ENC_LINK}
 
-  SS2022（直出）:
+SS2022（直出）:
   ${SS_NODE_LINK}
 EOF
 )
             if [[ -n "$REALITY_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  REALITY（直出 / IPv6）:
+REALITY（直出 / IPv6）:
   ${REALITY_LINK_V6}
 EOF
 )
@@ -4031,7 +4321,7 @@ EOF
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  Vless-Enc（直出 / IPv6）:
+Vless-Enc（直出 / IPv6）:
   ${VLESS_ENC_LINK_V6}
 EOF
 )
@@ -4039,7 +4329,7 @@ EOF
             if [[ -n "$SS_NODE_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  SS2022（直出 / IPv6）:
+SS2022（直出 / IPv6）:
   ${SS_NODE_LINK_V6}
 EOF
 )
@@ -4104,14 +4394,14 @@ EOF
   - 出口: SS 传导目标
 
 订阅:
-  SS2022（传导链入口）:
+SS2022（传导链入口）:
   ${SS_NODE_LINK}
 EOF
 )
             if [[ -n "$SS_NODE_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  SS2022（传导链入口 / IPv6）:
+SS2022（传导链入口 / IPv6）:
   ${SS_NODE_LINK_V6}
 EOF
 )
@@ -4182,14 +4472,14 @@ EOF
   - 出口: VLESS / Reality / Vless-Enc
 
 订阅:
-  Vless-Enc（传导链入口）:
+Vless-Enc（传导链入口）:
   ${VLESS_ENC_LINK}
 EOF
 )
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-  Vless-Enc（传导链入口 / IPv6）:
+Vless-Enc（传导链入口 / IPv6）:
   ${VLESS_ENC_LINK_V6}
 EOF
 )
@@ -4242,7 +4532,7 @@ EOF
       },
 EOF
 )
-            XHTTP_ENTRY_LINKS+=("vless://${REALITY_DIRECT_UUID}@${XHTTP_UP_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=xhttp&sni=${DEST}&sid=${SHORT_ID}&path=$(url_encode "$XHTTP_PATH")&mode=auto#XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-直出-zdd")
+            XHTTP_ENTRY_LINKS+=("$(build_xhttp_reality_full_link "${REALITY_DIRECT_UUID}" "${XHTTP_UP_IP_URI}" "${PORT}" "${XHTTP_DOWN_IP_RAW}" "${PORT}" "${DEST}" "firefox" "${PUBLIC_KEY}" "${SHORT_ID}" "${XHTTP_PATH}" "XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-直出-zdd")")
             XHTTP_PATCH_LABELS+=("XHTTP + Reality 直出入口")
             XHTTP_PATCH_FILES+=("${XHTTP_PATCH_DIR}/xhttp_reality_direct_patch.json")
             write_xhttp_client_patch_file "${XHTTP_PATCH_DIR}/xhttp_reality_direct_patch.json" "$XHTTP_DOWN_IP_RAW" "$PORT" "reality" "${DEST}" "firefox" "$PUBLIC_KEY" "$SHORT_ID" "$XHTTP_PATH"
@@ -4269,7 +4559,7 @@ EOF
       },
 EOF
 )
-                    XHTTP_ENTRY_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${XHTTP_UP_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=xhttp&sni=${DEST}&sid=${SHORT_ID}&path=$(url_encode "$XHTTP_PATH")&mode=auto#XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-落地${idx}-zdd")
+                    XHTTP_ENTRY_LINKS+=("$(build_xhttp_reality_full_link "${REALITY_LANDING_UUIDS[$((idx-1))]}" "${XHTTP_UP_IP_URI}" "${PORT}" "${XHTTP_DOWN_IP_RAW}" "${PORT}" "${DEST}" "firefox" "${PUBLIC_KEY}" "${SHORT_ID}" "${XHTTP_PATH}" "XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-落地${idx}-zdd")")
                     XHTTP_PATCH_LABELS+=("XHTTP + Reality 落地入口 ${idx}")
                     XHTTP_PATCH_FILES+=("${XHTTP_PATCH_DIR}/xhttp_reality_landing${idx}_patch.json")
                     write_xhttp_client_patch_file "${XHTTP_PATCH_DIR}/xhttp_reality_landing${idx}_patch.json" "$XHTTP_DOWN_IP_RAW" "$PORT" "reality" "${DEST}" "firefox" "$PUBLIC_KEY" "$SHORT_ID" "$XHTTP_PATH"
@@ -4329,22 +4619,20 @@ EOF
             local idx2
             for idx2 in "${!XHTTP_ENTRY_LINKS[@]}"; do
                 SUBS_TEXT+=$(cat <<EOF
-  ${XHTTP_PATCH_LABELS[$idx2]}:
-  ${XHTTP_ENTRY_LINKS[$idx2]}
-
-对应客户端 JSON（完整复制，顶左粘贴到 v2rayN 的 XHTTP Extra 原始 JSON）:
-${XHTTP_PATCH_JSONS[$idx2]}
+${XHTTP_PATCH_LABELS[$idx2]}:
+${XHTTP_ENTRY_LINKS[$idx2]}
 EOF
 )
                 if [[ $idx2 -lt $((${#XHTTP_ENTRY_LINKS[@]}-1)) ]]; then
-                    SUBS_TEXT+="\n"
+                    SUBS_TEXT+="
+
+"
                 fi
             done
             SUBS_TEXT+=$(cat <<EOF
 
 说明:
-  - 该模板的基础链接仅包含主入口参数，不能单独使用。
-  - 需要将上方完整 JSON 顶左粘贴到 v2rayN 的 XHTTP Extra 原始 JSON。
+  - 现已直接生成可导入的完整链接；extra= 参数内已内嵌 XHTTP downloadSettings。
   - 推荐客户端: v2rayN + Xray 内核。其他客户端本脚本不支持自动适配。
   - 当前 XHTTP path: ${XHTTP_PATH}
 EOF
@@ -4362,13 +4650,13 @@ EOF
 出站说明:
   分离方向:    ${XHTTP_SPLIT_DESC}
   直出出口:    freedom / ${FREEDOM_DESC}
-  客户端 JSON: 见上方订阅区
+  客户端链接:  已内嵌 extra 参数
 EOF
 )
             ;;
         8)
             VLESS_ENC_ENCRYPTION_URI=$(url_encode "$VLESS_ENC_ENCRYPTION")
-            XHTTP_ENTRY_LINKS+=("vless://${UUID}@${XHTTP_UP_IP_URI}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=xhttp&path=$(url_encode "$XHTTP_PATH")&mode=auto#XHTTP-Vless-Enc-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-实验-zdd")
+            XHTTP_ENTRY_LINKS+=("$(build_xhttp_vlessenc_full_link "${UUID}" "${XHTTP_UP_IP_URI}" "${LOCAL_ENC_PORT}" "${XHTTP_DOWN_IP_RAW}" "${LOCAL_ENC_PORT}" "${VLESS_ENC_ENCRYPTION}" "${XHTTP_PATH}" "XHTTP-Vless-Enc-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-实验-zdd")")
             XHTTP_PATCH_LABELS+=("XHTTP + Vless-Enc 实验入口")
             XHTTP_PATCH_FILES+=("${XHTTP_PATCH_DIR}/xhttp_vlessenc_patch.json")
             write_xhttp_client_patch_file "${XHTTP_PATCH_DIR}/xhttp_vlessenc_patch.json" "$XHTTP_DOWN_IP_RAW" "$LOCAL_ENC_PORT" "none" "" "" "" "" "$XHTTP_PATH"
@@ -4424,16 +4712,13 @@ EOF
   - 出口: freedom / ${FREEDOM_DESC}
 
 订阅:
-  XHTTP + Vless-Enc（实验入口）:
-  ${XHTTP_ENTRY_LINKS[0]}
-
-对应客户端 JSON（完整复制，顶左粘贴到 v2rayN 的 XHTTP Extra 原始 JSON）:
-${XHTTP_PATCH_JSONS[0]}
+XHTTP + Vless-Enc（实验入口）:
+${XHTTP_ENTRY_LINKS[0]}
 
 说明:
   - 警告：该模板无 TLS / 无 Reality，仅适合实验研究，不建议在高风险公网环境使用。
+  - 现已直接生成可导入的完整链接；extra= 参数内已内嵌 XHTTP downloadSettings。
   - 推荐客户端: v2rayN + Xray 内核。其他客户端本脚本不支持自动适配。
-  - 上面的 JSON 需要完整复制，并顶左粘贴到对应节点的 XHTTP Extra 原始 JSON；不能只导入基础链接。
   - 当前 XHTTP path: ${XHTTP_PATH}
   - 客户端实验性 padding / delay: ${ENC_PADDING_PROFILE_DESC}
 EOF
@@ -4452,7 +4737,7 @@ EOF
 出站说明:
   分离方向:    ${XHTTP_SPLIT_DESC}
   直出出口:    freedom / ${FREEDOM_DESC}
-  客户端 JSON: 见上方订阅区
+  客户端链接:  已内嵌 extra 参数
 EOF
 )
             ;;
