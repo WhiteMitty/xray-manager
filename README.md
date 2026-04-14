@@ -70,12 +70,12 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
   <img src="main.jpg" alt="主界面" width="900">
 </p>
 
-<h4 align="left">安装界面</h4>
+<h4 align="left">代理安装界面</h4>
 <p align="left">
   <img src="install.jpg" alt="安装界面" width="900">
 </p>
 
-<h4 align="left">粘贴落地链接</h4>
+<h4 align="left">用订阅链接链式代理</h4>
 <p align="left">
   <img src="landing.jpg" alt="端口复用" width="900">
 </p>
