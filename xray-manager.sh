@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================
-#        Xray 一键管理脚本 v 0.1.0 Doudou Zhang 2026-04-13
+#        Xray 一键管理脚本 v 0.1.0 Doudou Zhang 2026-04-15
 # ==============================================================
 
 set -u
@@ -550,6 +550,80 @@ function print_port_listener_details() {
     fi
 }
 
+function stop_alpine_known_service_on_port() {
+    local port="$1"
+    local details=""
+    local pids=""
+    local i=""
+
+    details=$(get_port_listener_details "$port")
+    [[ -n "$details" ]] || return 0
+
+    if printf '%s\n' "$details" | grep -q 'users:(("xray"'; then
+        echo -e "${YELLOW}  检测到端口 ${port} 当前由 xray 占用，正在尝试自动释放...${NC}"
+        rc-service xray stop >/dev/null 2>&1 || true
+        for i in 1 2 3; do
+            sleep 1
+            if ! is_port_in_use "$port"; then
+                return 0
+            fi
+        done
+        pids=$(get_xray_pids_by_port "$port" | tr '\n' ' ' | sed 's/[[:space:]]\+$//')
+        if [[ -n "$pids" ]]; then
+            kill $pids >/dev/null 2>&1 || true
+            for i in 1 2 3; do
+                sleep 1
+                if ! is_port_in_use "$port"; then
+                    return 0
+                fi
+            done
+        fi
+        return 1
+    fi
+
+    if printf '%s\n' "$details" | grep -q 'users:(("ssserver"'; then
+        echo -e "${YELLOW}  检测到端口 ${port} 当前由 ssserver 占用，正在尝试自动释放...${NC}"
+        rc-service ssserver stop >/dev/null 2>&1 || true
+        for i in 1 2 3; do
+            sleep 1
+            if ! is_port_in_use "$port"; then
+                return 0
+            fi
+        done
+        pids=$(printf '%s\n' "$details" | grep -o 'pid=[0-9]\+' | cut -d= -f2 | sort -u | tr '\n' ' ' | sed 's/[[:space:]]\+$//')
+        if [[ -n "$pids" ]]; then
+            kill $pids >/dev/null 2>&1 || true
+            for i in 1 2 3; do
+                sleep 1
+                if ! is_port_in_use "$port"; then
+                    return 0
+                fi
+            done
+        fi
+        return 1
+    fi
+
+    return 1
+}
+
+function ensure_alpine_install_port_available() {
+    local port="$1"
+    local purpose="$2"
+
+    if ! is_port_in_use "$port"; then
+        return 0
+    fi
+
+    if stop_alpine_known_service_on_port "$port" && ! is_port_in_use "$port"; then
+        echo -e "${GREEN}  ✓ 已自动释放端口 ${port}，将用于 ${purpose}${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  ✗ 端口 ${port} 已被占用，无法用于 ${purpose} 安装。${NC}"
+    print_port_listener_details "$port"
+    return 1
+}
+
 function show_reality_alternate_port_hint() {
     local port="$1"
     local alternate_port=""
@@ -692,11 +766,16 @@ function read_manual_sni() {
     while true; do
         read -r -p "$prompt" value
         value=$(echo "$value" | tr -d '[:space:]')
-        if [[ -n "$value" ]]; then
-            echo "$value"
-            return 0
+        if [[ -z "$value" ]]; then
+            echo -e "${RED}  SNI 不能为空。${NC}" >&2
+            continue
         fi
-        echo -e "${RED}  SNI 不能为空。${NC}" >&2
+        if [[ ! "$value" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo -e "${RED}  SNI 仅允许字母、数字、点、下划线和连字符。${NC}" >&2
+            continue
+        fi
+        echo "$value"
+        return 0
     done
 }
 
@@ -1068,7 +1147,21 @@ function url_encode() {
     if command -v jq >/dev/null 2>&1; then
         printf '%s' "$value" | jq -sRr @uri
     else
-        printf '%s' "$value"
+        local i ch encoded=""
+        LC_ALL=C
+        for ((i=0; i<${#value}; i++)); do
+            ch=${value:i:1}
+            case "$ch" in
+                [a-zA-Z0-9.~_-])
+                    encoded+="$ch"
+                    ;;
+                *)
+                    printf -v ch '%%%02X' "'$ch"
+                    encoded+="$ch"
+                    ;;
+            esac
+        done
+        printf '%s' "$encoded"
     fi
 }
 
@@ -1241,7 +1334,7 @@ function check_timesync() {
     if command -v timedatectl &>/dev/null; then
         has_timedatectl=1
         local sync_status
-        sync_status=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || true)
+        sync_status=$(timedatectl show --property=NTPSynchronized 2>/dev/null | cut -d= -f2 || true)
         if [[ "$sync_status" == "yes" ]]; then
             echo -e "${GREEN}  ✓ 时间已同步（NTPSynchronized=yes）${NC}"
             return 0
@@ -1285,7 +1378,7 @@ function check_timesync() {
     for i in {1..8}; do
         sleep 2
         if command -v timedatectl &>/dev/null; then
-            sync_check=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || true)
+            sync_check=$(timedatectl show --property=NTPSynchronized 2>/dev/null | cut -d= -f2 || true)
             if [[ "$sync_check" == "yes" ]]; then
                 echo -e "${GREEN}  ✓ 时间同步已就绪${NC}"
                 return 0
@@ -1919,11 +2012,7 @@ function uninstall_alpine_ss_and_delete_self() {
         fi
     fi
 
-    rc-service ssserver stop >/dev/null 2>&1 || true
-    rc-update del ssserver default >/dev/null 2>&1 || true
-    apk del shadowsocks-rust >/dev/null 2>&1 || true
-    remove_path_quiet "$ALPINE_SS_SERVICE_FILE" "$ALPINE_SS_SERVICE_FILE"
-    remove_path_quiet "$ALPINE_SS_CONFIG_DIR" "$ALPINE_SS_CONFIG_DIR"
+    cleanup_alpine_ss_artifacts
 
     cleanup_doudou_runtime
 
@@ -1962,11 +2051,8 @@ ${CYAN}[Step 3/7] 手动选择 SS2022 参数${NC}"
     esac
     while true; do
         ss_port=$(read_manual_ss_port "请输入 SS2022 监听端口: ") || return 1
-        if is_port_in_use "$ss_port"; then
-            echo -e "${RED}  端口 ${ss_port} 已被占用，请换一个端口。${NC}"
-        else
-            break
-        fi
+        ensure_alpine_install_port_available "$ss_port" "Alpine SS2022" || return 1
+        break
     done
 
     echo -e "
@@ -3622,6 +3708,15 @@ function cleanup_xray_artifacts_alpine() {
     cleanup_xray_artifacts
 }
 
+function cleanup_alpine_ss_artifacts() {
+    echo -e "${YELLOW}  清理 Alpine SS2022 残留...${NC}"
+    rc-service ssserver stop >/dev/null 2>&1 || true
+    rc-update del ssserver default >/dev/null 2>&1 || true
+    apk del shadowsocks-rust mimalloc >/dev/null 2>&1 || true
+    remove_path_quiet "$ALPINE_SS_SERVICE_FILE" "$ALPINE_SS_SERVICE_FILE"
+    remove_path_quiet "$ALPINE_SS_CONFIG_DIR" "$ALPINE_SS_CONFIG_DIR"
+}
+
 function uninstall_alpine_xray_and_delete_self() {
     line
     center_echo "卸载脚本和 Alpine Xray" "${RED}${BOLD}"
@@ -3845,10 +3940,7 @@ function install_alpine_xray_vlessenc() {
     [[ -n "$UUID" ]] || { echo -e "${RED}  ✗ 生成 Vless-Enc UUID 失败，安装已中止。${NC}"; return 1; }
 
     if [[ "$ENC_PORT_SOURCE" == "manual" ]]; then
-        while is_port_in_use_by_non_xray "$MANUAL_ENC_PORT"; do
-            echo -e "${RED}  端口 ${MANUAL_ENC_PORT} 已被占用。${NC}"
-            MANUAL_ENC_PORT=$(read_manual_ss_port "请重新输入 Vless-Enc 端口: ")
-        done
+        ensure_alpine_install_port_available "$MANUAL_ENC_PORT" "Alpine Vless-Enc" || return 1
         LOCAL_ENC_PORT="$MANUAL_ENC_PORT"
     else
         LOCAL_ENC_PORT=$(pick_random_free_port_excluding) || { echo -e "${RED}  ✗ 无法为 Vless-Enc 选出可用的随机高位端口。${NC}"; return 1; }
@@ -5890,20 +5982,44 @@ function should_auto_confirm_uninstall() {
     [[ "$QUICK_UNINSTALL" == "1" ]]
 }
 
+function uninstall_alpine_all_and_delete_self() {
+    line
+    center_echo "卸载脚本和 Alpine Xray / SS2022" "${RED}${BOLD}"
+    line
+    echo -e "${RED}  - 卸载 Alpine Xray 与 shadowsocks-rust${NC}"
+    echo -e "${RED}  - 删除 Xray / SS2022 配置、OpenRC 服务文件与常见残留${NC}"
+    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
+    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    line
+    if should_auto_confirm_uninstall; then
+        echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
+    else
+        read -r -p "输入 yes 继续: " CONFIRM
+        if [[ "$CONFIRM" != "yes" ]]; then
+            echo -e "${YELLOW}已取消。${NC}"
+            return 0
+        fi
+    fi
+
+    cleanup_xray_artifacts_alpine
+    cleanup_alpine_ss_artifacts
+    cleanup_doudou_runtime
+
+    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    line
+    exit 0
+}
+
 function uninstall_current_service_and_delete_self() {
     local runtime_kind=""
     runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
     case "$runtime_kind" in
-        alpine-ss2022)
-            uninstall_alpine_ss_and_delete_self
-            ;;
-        alpine-xray-vlessenc)
-            uninstall_alpine_xray_and_delete_self
+        alpine-ss2022|alpine-xray-vlessenc)
+            uninstall_alpine_all_and_delete_self
             ;;
         xray|"")
             if is_alpine_system; then
-                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
-                return 1
+                uninstall_alpine_all_and_delete_self
             fi
             uninstall_xray_and_delete_self
             ;;
@@ -6384,7 +6500,7 @@ while true; do
     echo -e "  ${CYAN}07.${NC} 环境检测（时间 & BBR）"
     echo -e "  ${CYAN}08.${NC} 修改 Xray 配置（退出后重启服务生效）"
     echo -e "  ${CYAN}09.${NC} 卸载 Xray 脚本等文件（可单独卸载脚本）"
-    echo -e "  ${CYAN}10.${NC} Alpine 专用 Vless-Enc / SS2022"
+    echo -e "  ${CYAN}10.${NC} Alpine 专用 Vless-Enc / SS2022（仅落地）"
     echo -e "  ${CYAN}00.${NC} 退出脚本"
     line
     read -r -p "选择: " CHOICE
