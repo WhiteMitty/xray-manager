@@ -2828,7 +2828,7 @@ function write_dynamic_result_files() {
 
 function get_install_scenario_label() {
     case "$1" in
-        1) printf '%s' '单 Reality（直出 / 多落地）' ;;
+        1) printf '%s' '单 Reality' ;;
         2) printf '%s' '单 SS 直出' ;;
         3) printf '%s' '单 Vless-Enc 直出' ;;
         4) printf '%s' 'Reality Vless-Enc SS 三入站直出' ;;
