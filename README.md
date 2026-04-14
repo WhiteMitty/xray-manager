@@ -43,7 +43,7 @@ zdd uinstall
 
 <br>
 
-## <span style="color:red">慎用！</span>全自动安装，此脚本没有取消选项将会覆盖原先所有配置！
+## ⚠ 慎用！全自动安装，此脚本将覆盖原先所有配置！ ![warning](https://img.shields.io/badge/Warning-无法取消-red)
 
 ## curl
 
