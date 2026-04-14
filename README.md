@@ -37,7 +37,7 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 zdd xray
 ```
 
-## 启动脚本并执行安装
+## 启动脚本并安装
 
 ```bash
 zdd install
