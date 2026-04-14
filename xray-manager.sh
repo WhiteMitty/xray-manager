@@ -5010,7 +5010,7 @@ while true; do
     echo -e "  Reality 默认端口 443 手动模式增加 8443"
     echo -e "  SS 默认加密 2022-blake3-aes-128-gcm 手动模式增加 256-gcm"
     echo -e "  Vless-Enc 默认 xorpub 0rtt x25519 手动模式可换并加 padding"
-    echo -e "  SNI测速 + 时间同步 + 端口复用 + BBR+FQ + Vless-Enc + XHTTP" 
+    echo -e "  SNI 测速池 + 时间同步 + 端口复用 + BBR + Vless-Enc + XHTTP" 
     echo -e "  ${CYAN}快捷指令:${NC}"
     echo -e "    ${CYAN}zdd xray${NC}    | ${CYAN}zdd install${NC}"
     echo -e "    ${CYAN}zdd update${NC}  | ${CYAN}zdd uninstall${NC}"
