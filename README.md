@@ -33,7 +33,7 @@ zxray
 
 #### 其他
 
-#### - xhttp 只做了 v4 v6 分离，刚需双栈机器
+- xhttp 只做了 v4 v6 分离，刚需双栈机器
 <br>
 
 #### License
