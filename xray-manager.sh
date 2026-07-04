@@ -1399,9 +1399,9 @@ function ensure_sni_benchmark_ready() {
     echo -e "${RED}  ✗ 当前环境缺少 SNI 测速所需依赖。${NC}"
     echo -e "${YELLOW}  缺失项: ${missing[*]}${NC}"
     if is_alpine_system; then
-        echo -e "${CYAN}  建议：先执行 01 ，或手动安装：apk add openssl coreutils${NC}"
+        echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装：apk add openssl coreutils${NC}"
     else
-        echo -e "${CYAN}  建议：先执行 01 ，或手动安装 openssl / coreutils 后再测速。${NC}"
+        echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装 openssl / coreutils 后再测速。${NC}"
     fi
     return 1
 }
@@ -5696,7 +5696,7 @@ function get_xray_version_badge() {
 }
 
 function show_main_header() {
-    line
+    center_echo "-------xray-manager-------" "${GREEN}"
     echo -e "  版本       : ${SCRIPT_VERSION}"
     echo -e "  Xray 状态  : $(get_xray_running_badge)"
     echo -e "  Xray 版本  : $(get_xray_version_badge)"
@@ -5716,12 +5716,12 @@ fi
 while true; do
     clear_screen
     show_main_header
-    echo -e "  ${CYAN}01.${NC}         覆盖安装"
-    echo -e "  ${CYAN}02.${NC}         更新 Xray"
-    echo -e "  ${CYAN}03.${NC}         查看订阅链接"
-    echo -e "  ${CYAN}04.${NC}         查看状态 & 日志"
-    echo -e "  ${CYAN}05.${NC}         完整卸载"
-    echo -e "  ${CYAN}00.${NC}         退出脚本"
+    echo -e "  ${CYAN}01.${NC}          覆盖安装"
+    echo -e "  ${CYAN}02.${NC}          更新 Xray"
+    echo -e "  ${CYAN}03.${NC}          查看订阅链接"
+    echo -e "  ${CYAN}04.${NC}          查看状态 & 日志"
+    echo -e "  ${CYAN}05.${NC}          完整卸载"
+    echo -e "  ${CYAN}00.${NC}          退出脚本"
     line
     read -r -p "选择: " CHOICE
 
