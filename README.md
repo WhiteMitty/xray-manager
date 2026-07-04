@@ -21,6 +21,7 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zxray
 ```
+<br>
 
 #### 卸载
 
@@ -28,10 +29,12 @@ zxray
 zxray
 ```
 选择完整卸载选项
+<br>
 
 #### 其他
 
 #### - xhttp 只做了 v4 v6 分离，刚需双栈机器
+<br>
 
 #### License
 MIT
