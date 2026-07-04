@@ -791,32 +791,17 @@ function choose_reality_landing_count() {
     local choice
     local custom_count
     while true; do
-        echo -e "  ${CYAN}1.${NC} 直出（不增加落地）" >&2
-        echo -e "  ${CYAN}2.${NC} 1 个落地出口（直出 + 1 落地）" >&2
-        echo -e "  ${CYAN}3.${NC} 2 个落地出口（直出 + 2 落地）" >&2
-        echo -e "  ${CYAN}4.${NC} 3 个落地出口（直出 + 3 落地）" >&2
-        echo -e "  ${CYAN}5.${NC} 自定义落地数量（总数 1-10 个）" >&2
+        echo -e "  ${CYAN}1.${NC} 直出（0 个落地）" >&2
+        echo -e "  ${CYAN}2.${NC} 输入落地总数（1-10 个）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
-        read -r -p "选择 Reality 落地数量 [1-5/0/b]，默认 1: " choice
+        read -r -p "选择 Reality 落地数量 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' "0"
                 return 0
                 ;;
             2|02)
-                printf '%s' "1"
-                return 0
-                ;;
-            3|03)
-                printf '%s' "2"
-                return 0
-                ;;
-            4|04)
-                printf '%s' "3"
-                return 0
-                ;;
-            5|05)
                 while true; do
                     read -r -p "请输入落地总数 [1-10]: " custom_count
                     if [[ "$custom_count" =~ ^[0-9]+$ ]] && (( custom_count >= 1 && custom_count <= 10 )); then
@@ -835,7 +820,7 @@ function choose_reality_landing_count() {
                 return 0
                 ;;
             *)
-                echo -e "${RED}  请输入 1-5、0 或 b。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -1416,7 +1401,7 @@ function ensure_sni_benchmark_ready() {
     if is_alpine_system; then
         echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装：apk add openssl coreutils${NC}"
     else
-        echo -e "${CYAN}  建议：先执行 01 安装，或手动安装 openssl / coreutils 后再测速。${NC}"
+        echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装 openssl / coreutils 后再测速。${NC}"
     fi
     return 1
 }
@@ -2854,7 +2839,7 @@ function show_alpine_xray_status() {
     if [[ -x /usr/local/bin/xray ]]; then
         echo -e "${CYAN}  版本: $(/usr/local/bin/xray version | head -1)${NC}"
     else
-        echo -e "${YELLOW}  版本: N/A${NC}"
+        echo -e "  版本: N/A"
     fi
 
     if [[ -x "$ALPINE_XRAY_SERVICE_FILE" ]]; then
@@ -2998,7 +2983,7 @@ function uninstall_alpine_xray_and_delete_self() {
     line
     echo -e "${RED}  - 卸载 Xray（Alpine）${NC}"
     echo -e "${RED}  - 删除 Xray 配置与 OpenRC 服务文件${NC}"
-    echo -e "${RED}  - 删除 zxray${NC}"
+    echo -e "${RED}  - 删除快捷指令 zxray${NC}"
     echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
     line
     if should_auto_confirm_uninstall; then
@@ -5697,13 +5682,13 @@ function get_xray_version_badge() {
 
     xray_bin=$(get_xray_binary_path 2>/dev/null || true)
     if [[ -z "$xray_bin" ]]; then
-        printf '%bN/A%b' "$YELLOW" "$NC"
+        printf 'N/A'
         return 0
     fi
 
     version_line=$("$xray_bin" version 2>/dev/null | awk 'NR==1 {print $1, $2; exit}')
     if [[ -z "$version_line" ]]; then
-        printf '%bN/A%b' "$YELLOW" "$NC"
+        printf 'N/A'
         return 0
     fi
 
@@ -5712,7 +5697,7 @@ function get_xray_version_badge() {
 
 function show_main_header() {
     line
-    center_echo "xray-manager" "${YELLOW}${BOLD}"
+    center_echo "====xray-manager====" "${YELLOW}${BOLD}"
     line
     echo -e "  版本       : ${SCRIPT_VERSION}"
     echo -e "  Xray 状态  : $(get_xray_running_badge)"
@@ -5733,12 +5718,12 @@ fi
 while true; do
     clear_screen
     show_main_header
-    echo -e "  ${CYAN}01.${NC} 覆盖安装"
-    echo -e "  ${CYAN}02.${NC} 更新 Xray"
-    echo -e "  ${CYAN}03.${NC} 查看订阅链接"
-    echo -e "  ${CYAN}04.${NC} 查看状态 & 日志"
-    echo -e "  ${CYAN}05.${NC} 完整卸载"
-    echo -e "  ${CYAN}00.${NC} 退出脚本"
+    echo -e "  ${CYAN}01.${NC} ------ 覆盖安装"
+    echo -e "  ${CYAN}02.${NC} ------ 更新 Xray"
+    echo -e "  ${CYAN}03.${NC} ------ 查看订阅链接"
+    echo -e "  ${CYAN}04.${NC} ------ 查看状态 & 日志"
+    echo -e "  ${CYAN}05.${NC} ------ 完整卸载"
+    echo -e "  ${CYAN}00.${NC} ------ 退出脚本"
     line
     read -r -p "选择: " CHOICE
 
