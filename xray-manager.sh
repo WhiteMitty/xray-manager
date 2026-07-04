@@ -2998,7 +2998,7 @@ function uninstall_alpine_xray_and_delete_self() {
     line
     echo -e "${RED}  - 卸载 Xray（Alpine）${NC}"
     echo -e "${RED}  - 删除 Xray 配置与 OpenRC 服务文件${NC}"
-    echo -e "${RED}  - 删除快捷指令 zxray${NC}"
+    echo -e "${RED}  - 删除 zxray${NC}"
     echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
     line
     if should_auto_confirm_uninstall; then
@@ -5717,7 +5717,7 @@ function show_main_header() {
     echo -e "  版本       : ${SCRIPT_VERSION}"
     echo -e "  Xray 状态  : $(get_xray_running_badge)"
     echo -e "  Xray 版本  : $(get_xray_version_badge)"
-    echo -e "  快捷指令  : ${YELLOW}zxray${NC}"
+    echo -e "  快捷指令   : ${YELLOW}zxray${NC}"
     line
 }
 if [[ "$QUICK_UNINSTALL" == "1" ]]; then
