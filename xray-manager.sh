@@ -5716,12 +5716,12 @@ fi
 while true; do
     clear_screen
     show_main_header
-    echo -e "  ${CYAN}01.${NC} │ 覆盖安装"
-    echo -e "  ${CYAN}02.${NC} │ 更新 Xray"
-    echo -e "  ${CYAN}03.${NC} │ 查看订阅链接"
-    echo -e "  ${CYAN}04.${NC} │ 查看状态 & 日志"
-    echo -e "  ${CYAN}05.${NC} │ 完整卸载"
-    echo -e "  ${CYAN}00.${NC} │ 退出脚本"
+    echo -e "  ${CYAN}01.${NC}     │ 覆盖安装"
+    echo -e "  ${CYAN}02.${NC}     │ 更新 Xray"
+    echo -e "  ${CYAN}03.${NC}     │ 查看订阅链接"
+    echo -e "  ${CYAN}04.${NC}     │ 查看状态 & 日志"
+    echo -e "  ${CYAN}05.${NC}     │ 完整卸载"
+    echo -e "  ${CYAN}00.${NC}     │ 退出脚本"
     line
     read -r -p "选择: " CHOICE
 
