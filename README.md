@@ -33,6 +33,7 @@ zxray
 
 #### 其他
 
+- 过墙部分务必使用 Reality 
 - xhttp 只做了 v4 v6 分离，刚需双栈机器
 <br>
 
