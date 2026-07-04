@@ -1399,9 +1399,9 @@ function ensure_sni_benchmark_ready() {
     echo -e "${RED}  ✗ 当前环境缺少 SNI 测速所需依赖。${NC}"
     echo -e "${YELLOW}  缺失项: ${missing[*]}${NC}"
     if is_alpine_system; then
-        echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装：apk add openssl coreutils${NC}"
+        echo -e "${CYAN}  建议：先执行 01 ，或手动安装：apk add openssl coreutils${NC}"
     else
-        echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装 openssl / coreutils 后再测速。${NC}"
+        echo -e "${CYAN}  建议：先执行 01 ，或手动安装 openssl / coreutils 后再测速。${NC}"
     fi
     return 1
 }
@@ -3074,7 +3074,7 @@ function install_alpine_xray_vlessenc() {
 
                 echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
                 echo -e "${YELLOW}  说明：该 Alpine Xray 流程仅提供 Vless-Enc，不包含 Reality，也不提供 padding / delay 选项。${NC}"
-                echo -e "${YELLOW}  覆盖安装会备份旧配置，再写入新的完整配置。${NC}"
+                echo -e "${YELLOW}  会备份旧配置，再写入新的完整配置。${NC}"
 
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
@@ -3722,7 +3722,7 @@ ${CYAN}[3/7] 模板选择${NC}"
                         ;;
                 esac
 
-                echo -e "${YELLOW}  覆盖安装会备份旧配置，再写入新的完整配置。${NC}"
+                echo -e "${YELLOW}  会备份旧配置，再写入新的完整配置。${NC}"
 
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
@@ -5169,7 +5169,7 @@ JSONEOF
 
 function install_default_flow() {
     if is_alpine_system; then
-        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC，自动进入 Alpine Xray 覆盖安装流程。${NC}"
+        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC，自动进入 Alpine Xray 流程。${NC}"
         install_alpine_xray_vlessenc
         return $?
     fi
@@ -5186,7 +5186,7 @@ function update_current_service() {
             update_alpine_xray_service
             ;;
         legacy-alpine-ss2022)
-            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；请完整卸载后重新覆盖安装。${NC}"
+            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；请完整卸载后重新。${NC}"
             return 1
             ;;
         xray|"")
@@ -5206,7 +5206,7 @@ function restart_current_service() {
             restart_alpine_xray_service
             ;;
         legacy-alpine-ss2022)
-            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；请完整卸载后重新覆盖安装。${NC}"
+            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；请完整卸载后重新。${NC}"
             return 1
             ;;
         xray|"")
@@ -5226,7 +5226,7 @@ function show_runtime_status() {
             show_alpine_xray_status
             ;;
         legacy-alpine-ss2022)
-            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；建议完整卸载后重新覆盖安装。${NC}"
+            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；建议完整卸载后重新。${NC}"
             ;;
         xray|"")
             if is_alpine_system; then
@@ -5245,7 +5245,7 @@ function edit_runtime_config() {
             edit_alpine_xray_config
             ;;
         legacy-alpine-ss2022)
-            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；建议完整卸载后重新覆盖安装。${NC}"
+            echo -e "${YELLOW}检测到旧版 Alpine SS-Rust 残留；建议完整卸载后重新。${NC}"
             return 1
             ;;
         xray|"")
@@ -5716,12 +5716,12 @@ fi
 while true; do
     clear_screen
     show_main_header
-    echo -e "  ${CYAN}01.${NC}        覆盖安装"
-    echo -e "  ${CYAN}02.${NC}        更新 Xray"
-    echo -e "  ${CYAN}03.${NC}        查看订阅链接"
-    echo -e "  ${CYAN}04.${NC}        查看状态 & 日志"
-    echo -e "  ${CYAN}05.${NC}        完整卸载"
-    echo -e "  ${CYAN}00.${NC}        退出脚本"
+    echo -e "  ${CYAN}01.${NC}         覆盖安装"
+    echo -e "  ${CYAN}02.${NC}         更新 Xray"
+    echo -e "  ${CYAN}03.${NC}         查看订阅链接"
+    echo -e "  ${CYAN}04.${NC}         查看状态 & 日志"
+    echo -e "  ${CYAN}05.${NC}         完整卸载"
+    echo -e "  ${CYAN}00.${NC}         退出脚本"
     line
     read -r -p "选择: " CHOICE
 
