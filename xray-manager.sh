@@ -789,14 +789,16 @@ function choose_ss_method() {
 
 function choose_reality_landing_count() {
     local choice
+    local custom_count
     while true; do
         echo -e "  ${CYAN}1.${NC} 直出（不增加落地）" >&2
         echo -e "  ${CYAN}2.${NC} 1 个落地出口（直出 + 1 落地）" >&2
         echo -e "  ${CYAN}3.${NC} 2 个落地出口（直出 + 2 落地）" >&2
         echo -e "  ${CYAN}4.${NC} 3 个落地出口（直出 + 3 落地）" >&2
+        echo -e "  ${CYAN}5.${NC} 自定义落地数量（总数 1-10 个）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
-        read -r -p "选择 Reality 落地数量 [1-4/0/b]，默认 1: " choice
+        read -r -p "选择 Reality 落地数量 [1-5/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' "0"
@@ -814,6 +816,16 @@ function choose_reality_landing_count() {
                 printf '%s' "3"
                 return 0
                 ;;
+            5|05)
+                while true; do
+                    read -r -p "请输入落地总数 [1-10]: " custom_count
+                    if [[ "$custom_count" =~ ^[0-9]+$ ]] && (( custom_count >= 1 && custom_count <= 10 )); then
+                        printf '%s' "$custom_count"
+                        return 0
+                    fi
+                    echo -e "${RED}  请输入 1-10 之间的数字。${NC}" >&2
+                done
+                ;;
             0|00)
                 printf '%s' '__BACK__'
                 return 0
@@ -823,7 +835,7 @@ function choose_reality_landing_count() {
                 return 0
                 ;;
             *)
-                echo -e "${RED}  请输入 1-4、0 或 b。${NC}" >&2
+                echo -e "${RED}  请输入 1-5、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -1402,7 +1414,7 @@ function ensure_sni_benchmark_ready() {
     echo -e "${RED}  ✗ 当前环境缺少 SNI 测速所需依赖。${NC}"
     echo -e "${YELLOW}  缺失项: ${missing[*]}${NC}"
     if is_alpine_system; then
-        echo -e "${CYAN}  建议：先执行 10 号 Alpine 专用 SS2022 安装，或手动安装：apk add openssl coreutils${NC}"
+        echo -e "${CYAN}  建议：先执行 01 覆盖安装，或手动安装：apk add openssl coreutils${NC}"
     else
         echo -e "${CYAN}  建议：先执行 01 安装，或手动安装 openssl / coreutils 后再测速。${NC}"
     fi
@@ -1747,9 +1759,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  快捷指令:${NC}"
-    echo -e "${CYAN}    zxray    | zxray${NC}"
-    echo -e "${CYAN}    zxray  | zxray${NC}"
+    echo -e "${CYAN}  快捷指令:${NC} ${YELLOW}zxray${NC}"
 }
 
 function render_saved_meta_block() {
@@ -2314,8 +2324,8 @@ function get_install_scenario_label() {
         2) printf '%s' 'SS2022 入站直出' ;;
         3) printf '%s' 'Vless-Enc 入站直出' ;;
         4) printf '%s' 'Reality Vless-Enc SS2022 三入站直出' ;;
-        5) printf '%s' '统一传导链' ;;
-        6) printf '%s' '统一传导链' ;;
+        5) printf '%s' '传导链' ;;
+        6) printf '%s' '传导链' ;;
         7) printf '%s' 'XHTTP + Reality 上下行分离' ;;
         8) printf '%s' 'XHTTP + Vless-Enc 上下行分离' ;;
         *) printf '%s' '未知模板' ;;
@@ -2325,11 +2335,11 @@ function get_install_scenario_label() {
 function choose_unified_chain_entry() {
     local choice
     while true; do
-        echo -e "  ${CYAN}1.${NC} SS2022 入站 -> 自定义 ss:// 或 vless:// 出站" >&2
-        echo -e "  ${CYAN}2.${NC} Vless-Enc 入站 -> 自定义 ss:// 或 vless:// 出站" >&2
+        echo -e "  ${CYAN}1.${NC} SS2022 入站，自定义出站" >&2
+        echo -e "  ${CYAN}2.${NC} Vless-Enc 入站，自定义出站" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
-        read -r -p "选择统一传导入口 [1-2/0/b]，默认 1: " choice
+        read -r -p "选择传导入口 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01) printf '%s' 'ss'; return 0 ;;
             2|02) printf '%s' 'vlessenc'; return 0 ;;
@@ -2366,9 +2376,9 @@ function choose_install_scenario() {
         echo -e "  ${CYAN}4.${NC} Reality + Vless-Enc + SS2022 三入站直出" >&2
         echo -e "" >&2
         echo -e "${CYAN}  进阶链路：${NC}" >&2
-        echo -e "  ${CYAN}5.${NC} 统一传导链（SS2022 或 Vless-Enc 入站 -> 自定义 ss:// 或 vless:// 出站）" >&2
+        echo -e "  ${CYAN}5.${NC} 传导链（SS2022 或 Vless-Enc 入站，自定义出站）" >&2
         echo -e "  ${CYAN}6.${NC} XHTTP + Reality 上下行分离" >&2
-        echo -e "  ${CYAN}7.${NC} XHTTP + Vless-Enc 上下行分离（实验性）" >&2
+        echo -e "  ${YELLOW}7. XHTTP + Vless-Enc 上下行分离（实验性，可能被墙）${NC}" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         line >&2
@@ -2487,7 +2497,8 @@ function build_xhttp_client_patch_json() {
 "serverName": "$(json_escape "$server_name")",
 "fingerprint": "$(json_escape "$fingerprint")",
 "publicKey": "$(json_escape "$public_key")",
-"shortId": "$(json_escape "$short_id")"
+"shortId": "$(json_escape "$short_id")",
+"spiderX": "/"
 },
 "xhttpSettings": {
 "path": "$(json_escape "$path")"
@@ -2554,7 +2565,7 @@ function build_xhttp_reality_full_link() {
     extra_json=$(build_xhttp_client_patch_json "$down_address" "$down_port" "reality" "$server_name" "$fingerprint" "$public_key" "$short_id" "$path") || return 1
     extra_compact=$(compact_json_inline "$extra_json")
     extra_uri=$(url_encode "$extra_compact")
-    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$server_name" "$fingerprint" "$public_key" "$short_id" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
+    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%%2F&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$server_name" "$fingerprint" "$public_key" "$short_id" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
 }
 
 function build_xhttp_vlessenc_full_link() {
@@ -3218,7 +3229,7 @@ function install_alpine_xray_vlessenc() {
     VLESS_ENC_ENCRYPTION=$(rewrite_vlessenc_block2_block3 "$VLESS_ENC_ENCRYPTION_BASE" "$ENC_SHAPE_MODE" "$ENC_RTT_MODE") || { echo -e "${RED}  ✗ 重写客户端 Vless-Enc 参数失败。${NC}"; return 1; }
 
     if [[ "$SCENARIO" == "6" ]]; then
-        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析落地 / 传导链接失败，请检查格式。${NC}"; return 1; }
+        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析自定义出站链接失败，请检查格式。${NC}"; return 1; }
         print_parsed_outbound_preview
         LANDING_JSONS=("$PARSED_OUTBOUND_JSON")
         LANDING_LABELS=("$PARSED_LINK_LABEL")
@@ -3654,7 +3665,7 @@ ${CYAN}[3/7] 模板选择${NC}"
 
                 case "$SCENARIO" in
                     1)
-                        echo -e "${CYAN}  Reality 模板支持直出，并可额外添加 1-3 个落地出口。${NC}"
+                        echo -e "${CYAN}  Reality 模板支持直出，并可额外添加 1-10 个落地出口。${NC}"
                         echo -e "${CYAN}  同端口多 UUID 区分直出与落地。${NC}"
                         REALITY_LANDING_COUNT=$(choose_reality_landing_count)
                         case "$REALITY_LANDING_COUNT" in
@@ -3722,7 +3733,7 @@ ${CYAN}[3/7] 模板选择${NC}"
                         ENC_AUTH_METHOD="mlkem768"
                         ENC_PADDING_PROFILE="aggressive"
                         ENC_PADDING_PROFILE_DESC="$(get_vlessenc_padding_profile_desc aggressive)"
-                        echo -e "${RED}${BOLD}  警告：该模板为 XHTTP + Vless-Enc，无 TLS / 无 Reality，仅适合实验研究，不建议在高风险公网环境使用。${NC}"
+                        echo -e "${YELLOW}${BOLD}  警告：该实验性节点无 TLS / Reality，可能会被墙，仅建议测试。${NC}"
                         ;;
                 esac
 
@@ -3847,7 +3858,7 @@ ${CYAN}[3/7] 模板选择${NC}"
                         if [[ "$SCENARIO" != "8" ]]; then
                             echo -e "${YELLOW}  提醒：SS2022 / Vless-Enc 建议仅作传导入口，不建议直接跨高风险网络。${NC}"
                         else
-                            echo -e "${RED}  警告：该模板无 TLS / Reality，仅适合实验研究。${NC}"
+                            echo -e "${YELLOW}  警告：该实验性节点无 TLS / Reality，可能会被墙，仅建议测试。${NC}"
                         fi
                         echo -e "${CYAN}  先定义 Vless-Enc 入站端口，再配置握手与实验性参数。${NC}"
                         if ask_yes_no "  是否手动指定 Vless-Enc 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
@@ -3961,7 +3972,7 @@ ${CYAN}[3/7] 模板选择${NC}"
     if [[ "$SCENARIO" == "1" && "$REALITY_LANDING_COUNT" -gt 0 ]] || [[ "$SCENARIO" == "7" && "$REALITY_LANDING_COUNT" -gt 0 ]]; then
         echo ""
         echo -e "${CYAN}  当前模板为 Reality 多出口模式，需要依次输入 ${REALITY_LANDING_COUNT} 个落地目标链接。${NC}"
-        echo -e "${CYAN}  支持输入 ss:// 或 vless:// 链接；每个链接会绑定到一个独立的用户入口。${NC}"
+        echo -e "${CYAN}  支持输入 ss:// 或 vless:// 链接（含 Reality / Vless-Enc）；每个链接会绑定到一个独立的用户入口。${NC}"
         local idx
         for idx in $(seq 1 "$REALITY_LANDING_COUNT"); do
             while true; do
@@ -3976,13 +3987,14 @@ ${CYAN}[3/7] 模板选择${NC}"
         done
     elif [[ "$NEED_LANDING" == "1" ]]; then
         echo ""
-        echo -e "${CYAN}  当前模板需要输入一个落地 / 传导目标链接。${NC}"
+        echo -e "${CYAN}  当前模板需要输入一个自定义出站链接。${NC}"
         case "$LANDING_EXPECT" in
             ss) echo -e "${CYAN}  原因：当前模板为 SS 传导链，因此需要一个 ss:// 出站目标。${NC}" ;;
             vless) echo -e "${CYAN}  原因：当前模板为 Vless-Enc 传导链，因此需要一个 vless:// 出站目标。${NC}" ;;
         esac
+        echo -e "${CYAN}  支持输入 ss:// 或 vless:// 链接（含 Reality / Vless-Enc）。${NC}"
         while true; do
-            read -r -p "请输入落地 / 传导链接: " LANDING_LINK
+            read -r -p "请输入自定义出站链接: " LANDING_LINK
             LANDING_LINK=$(normalize_share_link "$LANDING_LINK")
             [[ -n "$LANDING_LINK" ]] || { echo -e "${RED}  链接不能为空。${NC}"; continue; }
             case "$LANDING_EXPECT" in
@@ -4139,7 +4151,7 @@ ${CYAN}[3/7] 模板选择${NC}"
             LANDING_TAGS+=("landing${idx}")
         done
     elif [[ "$SCENARIO" == "5" || "$SCENARIO" == "6" ]]; then
-        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析落地 / 传导链接失败，请检查格式。${NC}"; return 1; }
+        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析自定义出站链接失败，请检查格式。${NC}"; return 1; }
         print_parsed_outbound_preview
         LANDING_JSONS=("$PARSED_OUTBOUND_JSON")
         LANDING_LABELS=("$PARSED_LINK_LABEL")
@@ -4219,14 +4231,14 @@ ${CYAN}[3/7] 模板选择${NC}"
 
     if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" ]]; then
         if [[ "$SCENARIO" == "1" ]]; then
-            VLESS_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-zxray"
+            VLESS_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-直出-zxray"
             if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                REALITY_LINK_V6="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-IPv6-zxray"
+                REALITY_LINK_V6="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-直出-IPv6-zxray"
             fi
         else
-            VLESS_LINK="vless://${UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-zxray"
+            VLESS_LINK="vless://${UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-zxray"
             if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                REALITY_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-IPv6-zxray"
+                REALITY_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-IPv6-zxray"
             fi
         fi
     fi
@@ -4292,9 +4304,9 @@ EOF
       },
 EOF
 )
-                    REALITY_LANDING_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-zxray")
+                    REALITY_LANDING_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-落地${idx}-zxray")
                     if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                        REALITY_LANDING_LINKS_V6+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-IPv6-zxray")
+                        REALITY_LANDING_LINKS_V6+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-落地${idx}-IPv6-zxray")
                     fi
                 done
             fi
@@ -5065,7 +5077,7 @@ XHTTP + Vless-Enc（实验入口）:
 ${XHTTP_ENTRY_LINKS[0]}
 
 说明:
-  - 警告：该模板无 TLS / 无 Reality，仅适合实验研究，不建议在高风险公网环境使用。
+  - 警告：该实验性节点无 TLS / Reality，可能会被墙，仅建议测试。
   - 现已直接生成可导入的完整链接；extra= 参数内已内嵌 XHTTP downloadSettings。
   - 推荐客户端: v2rayN + Xray 内核。其他客户端本脚本不支持自动适配。
   - 当前 XHTTP path: ${XHTTP_PATH}
@@ -5586,9 +5598,20 @@ function cleanup_zxray_runtime() {
     remove_path_quiet "/root/xray-manager(13).sh" "/root/xray-manager(13).sh"
     remove_path_quiet "/root/zxray.sh" "/root/zxray.sh"
     remove_path_quiet "/root/zxray-manager.sh" "/root/zxray-manager.sh"
+    remove_path_quiet "/root/zxray" "/root/zxray"
+    remove_path_quiet "/root/xray-manager" "/root/xray-manager"
+    remove_path_quiet "/root/bin/zxray" "/root/bin/zxray"
+    remove_path_quiet "/root/bin/zdd" "/root/bin/zdd"
+    remove_path_quiet "/root/bin/doudou" "/root/bin/doudou"
+    remove_path_quiet "/root/bin/xray-manager" "/root/bin/xray-manager"
+    remove_path_quiet "/root/.local/bin/zxray" "/root/.local/bin/zxray"
+    remove_path_quiet "/root/.local/bin/zdd" "/root/.local/bin/zdd"
+    remove_path_quiet "/root/.local/bin/doudou" "/root/.local/bin/doudou"
+    remove_path_quiet "/root/.local/bin/xray-manager" "/root/.local/bin/xray-manager"
     for root_file in /root/xray-manager*.sh /root/zxray*.sh /root/zdd-xray*.sh /root/doudou-xray*.sh; do
         [[ -e "$root_file" ]] && remove_path_quiet "$root_file" "$root_file"
     done
+    rmdir --ignore-fail-on-non-empty /root/bin /root/.local/bin 2>/dev/null || true
     remove_path_quiet "$SELF_DIR" "$SELF_DIR"
     remove_path_quiet "$DATA_DIR" "$DATA_DIR"
 }
@@ -5662,9 +5685,9 @@ function is_xray_running_now() {
 
 function get_xray_running_badge() {
     if is_xray_running_now; then
-        printf '%b运行中%b' "$GREEN" "$NC"
+        printf '%b运行中%b' "$YELLOW" "$NC"
     else
-        printf '%b未运行%b' "$RED" "$NC"
+        printf '未运行'
     fi
 }
 
@@ -5689,12 +5712,12 @@ function get_xray_version_badge() {
 
 function show_main_header() {
     line
-    echo -e "  ${GREEN}${BOLD}ZXray Manager ${SCRIPT_VERSION}${NC}"
-    echo -e "  ${GREEN}${BRAND_HEADER}${NC}"
-    echo -e "  ${YELLOW}内置 Reality 防偷限速；SS2022 / Vless-Enc 均由 Xray 承载。${NC}"
-    echo -e "  Xray 状态 : $(get_xray_running_badge)"
-    echo -e "  Xray 版本 : $(get_xray_version_badge)"
-    echo -e "  ${CYAN}快捷指令:${NC} ${CYAN}zxray${NC}"
+    center_echo "xray-manager" "${YELLOW}${BOLD}"
+    line
+    echo -e "  版本       : ${SCRIPT_VERSION}"
+    echo -e "  Xray 状态  : $(get_xray_running_badge)"
+    echo -e "  Xray 版本  : $(get_xray_version_badge)"
+    echo -e "  快捷指令  : ${YELLOW}zxray${NC}"
     line
 }
 if [[ "$QUICK_UNINSTALL" == "1" ]]; then
