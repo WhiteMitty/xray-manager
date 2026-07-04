@@ -16,6 +16,9 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zxray
 ```
+- 自动模式去程 v6 回程 v4，手动可更改
+- 自动模式 Reality 端口默认 443，手动可更改
+- 自动模式出站优先 IPv4，手动可更改为强制 IPv4
 <br>
 
 ### 卸载
