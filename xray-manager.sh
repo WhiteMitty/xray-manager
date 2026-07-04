@@ -5692,12 +5692,10 @@ function get_xray_version_badge() {
         return 0
     fi
 
-    printf '%b%s%b' "$CYAN" "$version_line" "$NC"
+    printf '%s' "$version_line"
 }
 
 function show_main_header() {
-    line
-    center_echo "xray-manager" "${YELLOW}${BOLD}"
     line
     echo -e "  版本       : ${SCRIPT_VERSION}"
     echo -e "  Xray 状态  : $(get_xray_running_badge)"
@@ -5718,12 +5716,12 @@ fi
 while true; do
     clear_screen
     show_main_header
-    echo -e "  ${CYAN}01.${NC} ------ 覆盖安装"
-    echo -e "  ${CYAN}02.${NC} ------ 更新 Xray"
-    echo -e "  ${CYAN}03.${NC} ------ 查看订阅链接"
-    echo -e "  ${CYAN}04.${NC} ------ 查看状态 & 日志"
-    echo -e "  ${CYAN}05.${NC} ------ 完整卸载"
-    echo -e "  ${CYAN}00.${NC} ------ 退出脚本"
+    echo -e "  ${CYAN}01.${NC} │ 覆盖安装"
+    echo -e "  ${CYAN}02.${NC} │ 更新 Xray"
+    echo -e "  ${CYAN}03.${NC} │ 查看订阅链接"
+    echo -e "  ${CYAN}04.${NC} │ 查看状态 & 日志"
+    echo -e "  ${CYAN}05.${NC} │ 完整卸载"
+    echo -e "  ${CYAN}00.${NC} │ 退出脚本"
     line
     read -r -p "选择: " CHOICE
 
