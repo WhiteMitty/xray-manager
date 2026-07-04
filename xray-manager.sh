@@ -5696,7 +5696,7 @@ function get_xray_version_badge() {
 }
 
 function show_main_header() {
-    center_echo "------------------------${YELLOW}xray-manager${NC}------------------------" "${GREEN}"
+    center_echo "------------------------xray-manager------------------------" "${GREEN}"
     echo -e "  版本       : ${SCRIPT_VERSION}"
     echo -e "  Xray 状态  : $(get_xray_running_badge)"
     echo -e "  Xray 版本  : $(get_xray_version_badge)"
