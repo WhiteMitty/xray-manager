@@ -248,14 +248,15 @@ EOF
 }
 function download_latest_script_to() {
     local target_path="$1"
+    local remote_url="${SCRIPT_REMOTE_URL}?t=$(date +%s)"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$target_path" "$SCRIPT_REMOTE_URL" || return 1
+        curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' -o "$target_path" "$remote_url" || return 1
         return 0
     fi
 
     if command -v wget >/dev/null 2>&1; then
-        wget -qO "$target_path" "$SCRIPT_REMOTE_URL" || return 1
+        wget --header='Cache-Control: no-cache' --header='Pragma: no-cache' -qO "$target_path" "$remote_url" || return 1
         return 0
     fi
 
@@ -2998,6 +2999,8 @@ function uninstall_alpine_xray_and_delete_self() {
 
     cleanup_xray_artifacts_alpine
     cleanup_zxray_runtime
+    verify_xray_artifacts_cleanup_result
+    verify_zxray_runtime_cleanup_result
 
     echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
     line
@@ -5281,6 +5284,8 @@ function uninstall_alpine_all_and_delete_self() {
     cleanup_xray_artifacts_alpine
     cleanup_alpine_ss_artifacts
     cleanup_zxray_runtime
+    verify_xray_artifacts_cleanup_result
+    verify_zxray_runtime_cleanup_result
 
     echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
     line
@@ -5419,10 +5424,34 @@ function show_info() {
 
 
 function show_status() {
-    ensure_systemd_supported || return 1
     line
     center_echo "Xray 服务状态" "${CYAN}${BOLD}"
     line
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo -e "${YELLOW}  当前环境未检测到 systemctl，无法读取 systemd 服务状态。${NC}"
+        if pgrep -x xray >/dev/null 2>&1; then
+            echo -e "${YELLOW}  但检测到 xray 进程正在运行：${NC}"
+            pgrep -ax xray || true
+        else
+            echo -e "${YELLOW}  未检测到 xray 进程。${NC}"
+        fi
+        line
+        return 0
+    fi
+
+    if [[ ! -d /run/systemd/system ]]; then
+        echo -e "${YELLOW}  当前环境未运行 systemd，无法读取 systemd 服务状态。${NC}"
+        if pgrep -x xray >/dev/null 2>&1; then
+            echo -e "${YELLOW}  但检测到 xray 进程正在运行：${NC}"
+            pgrep -ax xray || true
+        else
+            echo -e "${YELLOW}  未检测到 xray 进程。${NC}"
+        fi
+        line
+        return 0
+    fi
+
     systemctl status xray --no-pager -l || true
     echo ""
     center_echo "最新日志（最近 30 行）" "${CYAN}${BOLD}"
@@ -5544,6 +5573,111 @@ function remove_path_quiet() {
     fi
 }
 
+function canonicalize_path() {
+    local path="$1"
+    local dir base
+
+    if command -v readlink >/dev/null 2>&1; then
+        readlink -f -- "$path" 2>/dev/null && return 0
+    fi
+
+    dir=$(dirname -- "$path" 2>/dev/null || true)
+    base=$(basename -- "$path" 2>/dev/null || true)
+    [[ -n "$dir" && -n "$base" ]] || return 1
+    (
+        cd -- "$dir" 2>/dev/null && printf '%s/%s
+' "$(pwd -P)" "$base"
+    ) && return 0
+    return 1
+}
+
+function remove_current_script_source_if_safe() {
+    local source_path=""
+    local real_path=""
+
+    source_path=$(resolve_self_source_path 2>/dev/null || true)
+    [[ -n "$source_path" ]] || return 0
+
+    case "$source_path" in
+        /proc/*|/dev/*)
+            return 0
+            ;;
+    esac
+
+    real_path=$(canonicalize_path "$source_path" 2>/dev/null || true)
+    [[ -n "$real_path" ]] || real_path="$source_path"
+
+    case "$real_path" in
+        "$SELF_SCRIPT_PATH"|/usr/local/lib/zxray/*|/tmp/zxray-entry.*.sh|/root/xray-manager*.sh|/root/zxray*.sh|/root/zdd-xray*.sh|/root/doudou-xray*.sh)
+            remove_path_quiet "$real_path" "$real_path"
+            ;;
+    esac
+}
+
+function verify_zxray_runtime_cleanup_result() {
+    local path
+    local leftover=0
+    local -a paths=(
+        "$QUICK_BIN"
+        "$LEGACY_QUICK_BIN"
+        "$OLD_LEGACY_QUICK_BIN"
+        "/usr/local/bin/xray-manager"
+        "/usr/bin/zxray"
+        "/usr/bin/zdd"
+        "/usr/bin/doudou"
+        "/usr/bin/xray-manager"
+        "/usr/sbin/zxray"
+        "/usr/sbin/zdd"
+        "/usr/sbin/doudou"
+        "/usr/sbin/xray-manager"
+        "$SELF_DIR"
+        "$DATA_DIR"
+    )
+
+    for path in "${paths[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then
+            echo -e "${YELLOW}  ⚠ 仍存在: ${path}${NC}"
+            leftover=1
+        fi
+    done
+
+    if [[ $leftover -eq 0 ]]; then
+        echo -e "${GREEN}  ✓ 脚本残留检查通过${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ 检测到残留，请按上方路径手动复核。${NC}"
+    fi
+}
+
+function verify_xray_artifacts_cleanup_result() {
+    local path
+    local leftover=0
+    local -a paths=(
+        "/usr/local/bin/xray"
+        "/usr/local/share/xray"
+        "/usr/local/etc/xray"
+        "/var/log/xray"
+        "/var/lib/xray"
+        "/run/xray"
+        "/etc/systemd/system/xray.service"
+        "/etc/systemd/system/xray@.service"
+        "/etc/systemd/system/xray.service.d"
+        "/etc/systemd/system/xray@.service.d"
+    )
+
+    for path in "${paths[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then
+            echo -e "${YELLOW}  ⚠ Xray 残留: ${path}${NC}"
+            leftover=1
+        fi
+    done
+
+    if [[ $leftover -eq 0 ]]; then
+        echo -e "${GREEN}  ✓ Xray 残留检查通过${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ 检测到 Xray 残留，请按上方路径手动复核。${NC}"
+    fi
+}
+
 function cleanup_xray_artifacts() {
     echo -e "${YELLOW}  清理 Xray 残留...${NC}"
 
@@ -5577,6 +5711,15 @@ function cleanup_zxray_runtime() {
     remove_path_quiet "$QUICK_BIN" "$QUICK_BIN"
     remove_path_quiet "$LEGACY_QUICK_BIN" "$LEGACY_QUICK_BIN"
     remove_path_quiet "$OLD_LEGACY_QUICK_BIN" "$OLD_LEGACY_QUICK_BIN"
+    remove_path_quiet "/usr/local/bin/xray-manager" "/usr/local/bin/xray-manager"
+    remove_path_quiet "/usr/bin/zxray" "/usr/bin/zxray"
+    remove_path_quiet "/usr/bin/zdd" "/usr/bin/zdd"
+    remove_path_quiet "/usr/bin/doudou" "/usr/bin/doudou"
+    remove_path_quiet "/usr/bin/xray-manager" "/usr/bin/xray-manager"
+    remove_path_quiet "/usr/sbin/zxray" "/usr/sbin/zxray"
+    remove_path_quiet "/usr/sbin/zdd" "/usr/sbin/zdd"
+    remove_path_quiet "/usr/sbin/doudou" "/usr/sbin/doudou"
+    remove_path_quiet "/usr/sbin/xray-manager" "/usr/sbin/xray-manager"
     remove_path_quiet "/root/xray-manager.sh" "/root/xray-manager.sh"
     remove_path_quiet "/root/xray-manager(11).sh" "/root/xray-manager(11).sh"
     remove_path_quiet "/root/xray-manager(12).sh" "/root/xray-manager(12).sh"
@@ -5593,9 +5736,10 @@ function cleanup_zxray_runtime() {
     remove_path_quiet "/root/.local/bin/zdd" "/root/.local/bin/zdd"
     remove_path_quiet "/root/.local/bin/doudou" "/root/.local/bin/doudou"
     remove_path_quiet "/root/.local/bin/xray-manager" "/root/.local/bin/xray-manager"
-    for root_file in /root/xray-manager*.sh /root/zxray*.sh /root/zdd-xray*.sh /root/doudou-xray*.sh; do
+    for root_file in /root/xray-manager*.sh /root/zxray*.sh /root/zdd-xray*.sh /root/doudou-xray*.sh /tmp/zxray-entry.*.sh /tmp/xray-install.*.sh /tmp/xray-install-curl.*.log /tmp/xray-update.*.log; do
         [[ -e "$root_file" ]] && remove_path_quiet "$root_file" "$root_file"
     done
+    remove_current_script_source_if_safe
     rmdir --ignore-fail-on-non-empty /root/bin /root/.local/bin 2>/dev/null || true
     remove_path_quiet "$SELF_DIR" "$SELF_DIR"
     remove_path_quiet "$DATA_DIR" "$DATA_DIR"
@@ -5605,6 +5749,7 @@ function cleanup_script_only_runtime() {
 }
 function uninstall_script_only() {
     cleanup_zxray_runtime
+    verify_zxray_runtime_cleanup_result
     echo -e "${GREEN}  ✓ 脚本已卸载，当前服务已保留。${NC}"
     line
     exit 0
@@ -5638,6 +5783,8 @@ function uninstall_xray_and_delete_self() {
     cleanup_xray_artifacts
     cleanup_alpine_ss_artifacts
     cleanup_zxray_runtime
+    verify_xray_artifacts_cleanup_result
+    verify_zxray_runtime_cleanup_result
 
     echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
     line
@@ -5696,7 +5843,7 @@ function get_xray_version_badge() {
 }
 
 function show_main_header() {
-    center_echo "------------------------xray-manager------------------------" "${GREEN}"
+    center_echo "━━━━━  xray-manager  ━━━━━" "${YELLOW}${BOLD}"
     echo -e "  版本       : ${SCRIPT_VERSION}"
     echo -e "  Xray 状态  : $(get_xray_running_badge)"
     echo -e "  Xray 版本  : $(get_xray_version_badge)"
