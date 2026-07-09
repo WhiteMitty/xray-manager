@@ -522,6 +522,49 @@ function ensure_systemd_supported() {
     return 0
 }
 
+function fix_xray_config_permissions() {
+    local service_user=""
+    local service_group=""
+
+    [[ -f "$CONFIG_FILE" ]] || return 1
+
+    service_user=$(systemctl show xray -p User --value 2>/dev/null || true)
+    service_group=$(systemctl show xray -p Group --value 2>/dev/null || true)
+
+    if [[ -z "$service_user" ]]; then
+        service_user=$(systemctl cat xray 2>/dev/null | awk -F= '/^[[:space:]]*User[[:space:]]*=/{gsub(/[[:space:]]/, "", $2); user=$2} END{print user}' || true)
+    fi
+    [[ -n "$service_user" ]] || service_user="root"
+
+    if [[ "$service_user" == "root" ]]; then
+        chmod 700 "$CONFIG_DIR" >/dev/null 2>&1 || return 1
+        chown root:root "$CONFIG_FILE" >/dev/null 2>&1 || return 1
+        chmod 600 "$CONFIG_FILE" || return 1
+        return 0
+    fi
+
+    if ! id "$service_user" >/dev/null 2>&1; then
+        echo -e "${RED}  ✗ Xray 服务账户不存在：${service_user}${NC}"
+        return 1
+    fi
+
+    if [[ -z "$service_group" ]]; then
+        service_group=$(id -gn "$service_user" 2>/dev/null || true)
+    fi
+    [[ -n "$service_group" ]] || {
+        echo -e "${RED}  ✗ 无法确定 Xray 服务账户的用户组：${service_user}${NC}"
+        return 1
+    }
+
+    chown "root:${service_group}" "$CONFIG_DIR" "$CONFIG_FILE" >/dev/null 2>&1 || {
+        echo -e "${RED}  ✗ 无法设置 Xray 配置的服务账户访问权限。${NC}"
+        return 1
+    }
+    chmod 750 "$CONFIG_DIR" || return 1
+    chmod 640 "$CONFIG_FILE" || return 1
+    echo -e "${GREEN}  ✓ 已设置 Xray 配置权限：root:${service_group} / 640${NC}"
+}
+
 function json_escape() {
     if command -v jq >/dev/null 2>&1; then
         printf '%s' "$1" | jq -R -s -c '.' | sed 's/^"//; s/"$//'
@@ -6150,7 +6193,7 @@ JSONEOF
     echo -e "${GREEN}  ✓ 配置文件语法验证通过${NC}"
 
     cp -f -- "$TEMP_CONFIG" "$CONFIG_FILE" || return 1
-    chmod 600 "$CONFIG_FILE" || return 1
+    fix_xray_config_permissions || return 1
 
     systemctl enable xray >/dev/null 2>&1 || true
     systemctl restart xray
@@ -6383,16 +6426,22 @@ function update_xray() {
         return 1
     fi
 
-    if grep -Fqi "No new version" "$update_log"; then
-        echo -e "${GREEN}  ✓ 当前已是最新版本：$(/usr/local/bin/xray version | head -1)${NC}"
-        echo -e "${YELLOW}  未检测到新版本，本次不执行重启。${NC}"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo -e "${YELLOW}  未找到配置文件，跳过服务重启。${NC}"
+        echo -e "${GREEN}  ✓ 核心已更新。当前版本: $(/usr/local/bin/xray version | head -1)${NC}"
         line
         return 0
     fi
 
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo -e "${YELLOW}  未找到配置文件，跳过服务重启。${NC}"
-        echo -e "${GREEN}  ✓ 核心已更新。当前版本: $(/usr/local/bin/xray version | head -1)${NC}"
+    fix_xray_config_permissions || {
+        echo -e "${RED}更新失败：无法修复 Xray 配置读取权限。${NC}"
+        line
+        return 1
+    }
+
+    if grep -Fqi "No new version" "$update_log"; then
+        echo -e "${GREEN}  ✓ 当前已是最新版本：$(/usr/local/bin/xray version | head -1)${NC}"
+        echo -e "${YELLOW}  未检测到新版本，本次不执行重启。${NC}"
         line
         return 0
     fi
@@ -6428,6 +6477,12 @@ function restart_xray() {
         line
         return 1
     fi
+
+    fix_xray_config_permissions || {
+        echo -e "${RED}  ✗ 无法修复 Xray 配置读取权限，已取消重启。${NC}"
+        line
+        return 1
+    }
 
     echo -e "${YELLOW}  先验证当前配置文件...${NC}"
     if ! /usr/local/bin/xray run -test -config "$CONFIG_FILE"; then
@@ -6970,7 +7025,7 @@ function get_xray_version_badge() {
 function show_main_header() {
     line
     center_echo "Xray Manager ${SCRIPT_VERSION}" "${BRIGHT_YELLOW}${BOLD}"
-    center_echo "命令: zxray"
+    center_echo "启动命令: zxray"
     line
 }
 
