@@ -7354,8 +7354,7 @@ function get_xray_version_badge() {
 function show_main_header() {
     line
     center_echo "X R A Y  M A N A G E R" "${BRIGHT_YELLOW}${BOLD}"
-    center_echo "${SCRIPT_VERSION}" "${BLUE}${BOLD}"
-    center_echo "命令: zxray" "${BLUE}${BOLD}"
+    center_echo "命令:  zxray" "${BLUE}${BOLD}"
     line
 }
 
