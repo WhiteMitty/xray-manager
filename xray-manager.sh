@@ -50,6 +50,8 @@ ALPINE_XRAY_SERVICE_FILE="/etc/init.d/xray"
 ALPINE_RESOLV_BACKUP="${DATA_DIR}/alpine_resolv.conf.bak"
 
 DEFAULT_DEST_OPTIONS=(
+    "c.6sc.co"
+    "www.aws.com"
     "www.amd.com"
     "www.sony.com"
     "www.tesla.com"
@@ -58,15 +60,16 @@ DEFAULT_DEST_OPTIONS=(
     "www.amazon.com"
     "drivers.amd.com"
     "a0.awsstatic.com"
-    "d1.awsstatic.com"    
-    "s0.awsstatic.com"    
+    "d1.awsstatic.com"
+    "s0.awsstatic.com"
     "gateway.icloud.com"
     "m.media-amazon.com"
     "addons.mozilla.org"
-    "tag.demandbase.com"    
+    "tag.demandbase.com"
     "t0.m.awsstatic.com"
     "s.company-target.com"
     "images-na.ssl-images-amazon.com"
+    "i7158c100-ds-aksb-a.akamaihd.net"
 )
 
 function line() {
@@ -2399,6 +2402,63 @@ function print_download_error_reason() {
     fi
 }
 
+function patch_xray_installer_missing_stop() {
+    local installer="$1"
+
+    if ! sed -i \
+        -e '/^stop_xray()/,/^}/ s/error: Stopping the Xray service failed./warning: Xray service was not loaded; continuing installation./' \
+        -e '/^stop_xray()/,/^}/ s/exit 1/return 0/' \
+        "$installer"; then
+        echo -e "${RED}  ✗ 无法修补 Xray 安装器的旧服务停止处理。${NC}"
+        return 1
+    fi
+
+    if ! sed -n '/^stop_xray()/,/^}/p' "$installer" | grep -F 'return 0' >/dev/null 2>&1; then
+        echo -e "${RED}  ✗ Xray 安装器结构与预期不符，未执行修补。${NC}"
+        return 1
+    fi
+    return 0
+}
+
+function run_xray_official_install_with_recovery() {
+    local runner="$1"
+    local installer="$2"
+    local run_log=""
+    local installer_ret=1
+    local retry_ret=1
+
+    run_log=$(mktemp /tmp/xray-installer-run.XXXXXX.log 2>/dev/null) || true
+    if [[ -z "$run_log" ]]; then
+        echo -e "${YELLOW}  ⚠ 无法创建安装日志，将直接执行官方安装器。${NC}"
+        "$runner" "$installer" install
+        return $?
+    fi
+    add_tmp_file "$run_log"
+
+    set +o pipefail
+    "$runner" "$installer" install 2>&1 | tee "$run_log"
+    installer_ret=${PIPESTATUS[0]}
+    set -o pipefail
+    [[ "$installer_ret" -eq 0 ]] && return 0
+
+    if ! grep -Fq 'Unit xray.service not loaded' "$run_log"; then
+        return "$installer_ret"
+    fi
+
+    echo -e "${YELLOW}  ⚠ 检测到旧版安装器停止未加载的 xray.service，准备兼容重试。${NC}"
+    if ! patch_xray_installer_missing_stop "$installer"; then
+        return "$installer_ret"
+    fi
+
+    : > "$run_log"
+    echo -e "${CYAN}  正在跳过不存在的旧服务并重试安装...${NC}"
+    set +o pipefail
+    "$runner" "$installer" install 2>&1 | tee "$run_log"
+    retry_ret=${PIPESTATUS[0]}
+    set -o pipefail
+    return "$retry_ret"
+}
+
 function download_and_run_xray_installer() {
     local action="$1"
     local installer curl_err url max_retry retry sleep_seconds curl_ret runner
@@ -2462,7 +2522,7 @@ function download_and_run_xray_installer() {
 
     case "$action" in
         install)
-            "$runner" "$installer" install
+            run_xray_official_install_with_recovery "$runner" "$installer"
             ;;
         remove)
             "$runner" "$installer" remove --purge
@@ -2605,7 +2665,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  启动命令: ${BRIGHT_YELLOW}zxray${NC}"
+    center_echo "启动命令: zxray"
 }
 
 function render_saved_meta_block() {
@@ -6910,7 +6970,7 @@ function get_xray_version_badge() {
 function show_main_header() {
     line
     center_echo "Xray Manager ${SCRIPT_VERSION}" "${BRIGHT_YELLOW}${BOLD}"
-    echo -e "  ${CYAN}启动命令: ${BRIGHT_YELLOW}zxray${NC}"
+    center_echo "启动命令: zxray"
     line
 }
 
