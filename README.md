@@ -16,9 +16,6 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zxray
 ```
-- 自动模式去程 v6 回程 v4，手动可更改
-- 自动模式 Reality 端口默认 443，手动可更改
-- 自动模式出站优先 IPv4，手动可更改为强制 IPv4
 <br>
 
 ### 卸载
@@ -29,8 +26,6 @@ zxray
 <br>
 
 ### 其他
-- 过墙部分务必使用 Reality
-- Xray 配置部分做了防被偷处理，鉴权失败限速
 - xhttp 只做了 v4 v6 分离，刚需双栈机器，此脚本不支持 CDN 分离方案
 <br>
 
