@@ -7,6 +7,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BRIGHT_YELLOW='\033[1;93m'
+BLUE='\033[1;94m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -958,7 +959,7 @@ function choose_reality_landing_count() {
         echo -e "  ${CYAN}2.${NC} 输入落地总数（1-10 个）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
-        read -r -p "选择 Reality 落地数量 [1-2/0/b]，默认 1: " choice
+        read -r -p "选择落地数量 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' "0"
@@ -2594,6 +2595,18 @@ function detect_xray_bind_warnings() {
     fi
 }
 
+function detect_port_bind_warning() {
+    local label="$1"
+    local port="$2"
+
+    [[ -n "$port" ]] || return 0
+    if is_port_in_use "$port"; then
+        echo -e "${GREEN}  ✓ 已检测到 ${label} 端口监听：${port}${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ 未明确检测到 ${label} 端口监听，请手动检查：ss -ltnup | grep :${port}${NC}"
+    fi
+}
+
 
 
 function write_subscription_files() {
@@ -2708,7 +2721,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    center_echo "启动命令: zxray"
+    center_echo "命令: zxray" "${BLUE}${BOLD}"
 }
 
 function render_saved_meta_block() {
@@ -3273,8 +3286,8 @@ function get_install_scenario_label() {
         2) printf '%s' '单 SS 直出' ;;
         3) printf '%s' '单 Vless-Enc 直出' ;;
         4) printf '%s' 'Reality Vless-Enc SS 三入站直出' ;;
-        5) printf '%s' '无 TLS 链式（SS 入站）' ;;
-        6) printf '%s' '无 TLS 链式（Vless-Enc 入站）' ;;
+        5) printf '%s' 'SS 入站 + 多出口（0-10 个落地）' ;;
+        6) printf '%s' 'Vless-Enc 入站 + 多出口（0-10 个落地）' ;;
         7) printf '%s' 'XHTTP + Reality 直出 / 多落地' ;;
         8) printf '%s' 'XHTTP + Vless-Enc 上下行分离（高风险慎用）' ;;
         *) printf '%s' '未知模板' ;;
@@ -3288,7 +3301,7 @@ function choose_unified_chain_entry() {
         echo -e "  ${CYAN}2.${NC} Vless-Enc 入站" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
-        read -r -p "选择无 TLS 链式入口 [1-2/0/b]，默认 1: " choice
+        read -r -p "选择入站协议 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01) printf '%s' 'ss'; return 0 ;;
             2|02) printf '%s' 'vlessenc'; return 0 ;;
@@ -3327,7 +3340,7 @@ function choose_install_scenario() {
         echo -e "${CYAN}  进阶链路:${NC}" >&2
         echo -e "  ${CYAN}5.${NC} XHTTP + Reality 直出 / 多落地（0-10 个）" >&2
         echo -e "  ${CYAN}6.${NC} XHTTP + Vless-Enc 上下行分离（${YELLOW}高风险慎用${NC}）" >&2
-        echo -e "  ${CYAN}7.${NC} 无 TLS 链式（SS / Vless-Enc 入站 -> 任意支持的出站，保留直出）" >&2
+        echo -e "  ${CYAN}7.${NC} SS / Vless-Enc 入站 + 多出口（0-10 个落地）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         line >&2
@@ -3719,7 +3732,7 @@ function choose_alpine_vlessenc_scenario() {
         echo -e "${CYAN}${BOLD}  第三层：选择 Alpine Vless-Enc 模板${NC}" >&2
         line >&2
         echo -e "  ${CYAN}1.${NC} 单 Vless-Enc 直出" >&2
-        echo -e "  ${CYAN}2.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
+        echo -e "  ${CYAN}2.${NC} Vless-Enc 入站 + VLESS 出站" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         line >&2
@@ -4160,7 +4173,7 @@ function install_alpine_xray_vlessenc() {
 
                 if [[ "$SCENARIO" == "6" ]]; then
                     echo ""
-                    echo -e "${CYAN}  当前模板为 Vless-Enc 传导链，需要输入 1 个落地目标链接。${NC}"
+                    echo -e "${CYAN}  当前模板为 Vless-Enc 入站 + 出站配置，需要输入 1 个出站链接。${NC}"
                     while true; do
                         local one_link=""
                         read -r -p "请输入落地链接: " one_link
@@ -4197,7 +4210,7 @@ function install_alpine_xray_vlessenc() {
     fi
     echo -e "${GREEN}  ✓ 安装成功：$(/usr/local/bin/xray version | head -1)${NC}"
 
-    echo -e "\n${CYAN}[Step 5/6] 生成密钥、端口与传导参数${NC}"
+    echo -e "\n${CYAN}[Step 5/6] 生成密钥、端口与出站参数${NC}"
     render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
 
     local PORT=""
@@ -4225,7 +4238,7 @@ function install_alpine_xray_vlessenc() {
     VLESS_ENC_ENCRYPTION=$(rewrite_vlessenc_block2_block3 "$VLESS_ENC_ENCRYPTION_BASE" "$ENC_SHAPE_MODE" "$ENC_RTT_MODE") || { echo -e "${RED}  ✗ 重写客户端 Vless-Enc 参数失败。${NC}"; return 1; }
 
     if [[ "$SCENARIO" == "6" ]]; then
-        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析落地 / 传导链接失败，请检查格式。${NC}"; return 1; }
+        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析出站链接失败，请检查格式。${NC}"; return 1; }
         print_parsed_outbound_preview
         LANDING_JSONS=("$PARSED_OUTBOUND_JSON")
         LANDING_LABELS=("$PARSED_LINK_LABEL")
@@ -4398,7 +4411,7 @@ EOF
   - 入口: Vless-Enc
   - 出口: VLESS / Reality / Vless-Enc
 订阅:
-Vless-Enc（传导链入口）:
+Vless-Enc（入站）:
   ${VLESS_ENC_LINK}
 提示:
   - 若当前为 NAT / 内网转发环境，请确认入口端口已放通，或已正确配置端口转发。
@@ -4406,7 +4419,7 @@ EOF
 )
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
-Vless-Enc（传导链入口 / IPv6）:
+Vless-Enc（入站 / IPv6）:
   ${VLESS_ENC_LINK_V6}
 EOF
 )
@@ -4415,16 +4428,16 @@ EOF
 说明:
   - 入口协议: Vless-Enc 入站
   - 出口协议: VLESS / Reality / Vless-Enc 出站（按你输入的链接决定）
-  - 当前传导目标: ${LANDING_LABELS[0]}
-  - 传导原始链接: ${LANDING_LINKS[0]}
+  - 当前出站目标: ${LANDING_LABELS[0]}
+  - 原始出站链接: ${LANDING_LINKS[0]}
 EOF
 )
             PORTS_TEXT=$(cat <<EOF
 端口:
   Vless-Enc:   ${LOCAL_ENC_PORT}
 出站说明:
-  传导方向:    Vless-Enc 入站 -> VLESS / Reality / Vless-Enc 出站
-  传导目标:    ${LANDING_LABELS[0]}
+  出站方向:    Vless-Enc 入站 -> VLESS / Reality / Vless-Enc 出站
+  出站目标:    ${LANDING_LABELS[0]}
 EOF
 )
             ;;
@@ -4578,14 +4591,27 @@ function install_xray() {
     local ENC_PADDING_CLIENT=""
     local ENC_PADDING_SERVER=""
     local NEED_LANDING="0"
+    local route_idx=""
+    local route_port=""
+    local existing_port=""
+    local duplicate_port=0
     local LANDING_LINK=""
     local LANDING_EXPECT="any"
     local FREEDOM_DESC="IPv4 优先"
     local SS_METHOD_DESC="2022-blake3-aes-128-gcm"
     local LOCAL_SS_METHOD="2022-blake3-aes-128-gcm"
     local REALITY_LANDING_COUNT=0
+    local MULTI_ROUTE_COUNT=0
     local -a LANDING_LINKS=()
     local -a REALITY_LANDING_UUIDS=()
+    local -a MULTI_ROUTE_PORTS=()
+    local -a MULTI_ROUTE_MANUAL_PORTS=()
+    local -a MULTI_ROUTE_UUIDS=()
+    local -a MULTI_ROUTE_SS_PASSWORDS=()
+    local -a MULTI_ROUTE_SS_LINKS=()
+    local -a MULTI_ROUTE_SS_LINKS_V6=()
+    local -a MULTI_ROUTE_VLESS_LINKS=()
+    local -a MULTI_ROUTE_VLESS_LINKS_V6=()
     local -a LANDING_LABELS=()
     local -a LANDING_JSONS=()
     local -a LANDING_TAGS=()
@@ -4597,7 +4623,6 @@ function install_xray() {
     local XHTTP_WARNING_TEXT=""
     local XHTTP_REQ_V4=""
     local XHTTP_REQ_V6=""
-    local CHAIN_UNIFIED="0"
     REALITY_GATE_RULES_JSON=""
 
     while true; do
@@ -4643,11 +4668,9 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         ;;
                     __CHAIN_SS__)
                         SCENARIO="5"
-                        CHAIN_UNIFIED="1"
                         ;;
                     __CHAIN_VLESSENC__)
                         SCENARIO="6"
-                        CHAIN_UNIFIED="1"
                         ;;
                 esac
             fi
@@ -4678,8 +4701,17 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                 SS_METHOD_DESC="2022-blake3-aes-128-gcm"
                 LOCAL_SS_METHOD="2022-blake3-aes-128-gcm"
                 REALITY_LANDING_COUNT=0
+                MULTI_ROUTE_COUNT=0
                 LANDING_LINKS=()
                 REALITY_LANDING_UUIDS=()
+                MULTI_ROUTE_PORTS=()
+                MULTI_ROUTE_MANUAL_PORTS=()
+                MULTI_ROUTE_UUIDS=()
+                MULTI_ROUTE_SS_PASSWORDS=()
+                MULTI_ROUTE_SS_LINKS=()
+                MULTI_ROUTE_SS_LINKS_V6=()
+                MULTI_ROUTE_VLESS_LINKS=()
+                MULTI_ROUTE_VLESS_LINKS_V6=()
                 LANDING_LABELS=()
                 LANDING_JSONS=()
                 LANDING_TAGS=()
@@ -4692,10 +4724,6 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                 XHTTP_REQ_V4=""
                 XHTTP_REQ_V6=""
                 REALITY_GATE_RULES_JSON=""
-                if [[ "$SCENARIO" != "5" && "$SCENARIO" != "6" ]]; then
-                    CHAIN_UNIFIED="0"
-                fi
-
                 echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
 
                 case "$SCENARIO" in
@@ -4722,19 +4750,45 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         fi
                         ;;
                     5)
-                        NEED_LANDING="1"
-                        if [[ "$CHAIN_UNIFIED" == "1" ]]; then
-                            LANDING_EXPECT="any"
+                        echo -e "${CYAN}  这是 SS 入站 + 多出口模式：直出和每个落地各使用一个独立高位端口。支持 0-10 个落地。${NC}"
+                        if is_quick_install_noninteractive; then
+                            MULTI_ROUTE_COUNT="0"
+                            echo -e "${YELLOW}  非交互快速安装默认使用 0 个落地，仅保留 SS 直出。${NC}"
                         else
-                            LANDING_EXPECT="ss"
+                            MULTI_ROUTE_COUNT=$(choose_reality_landing_count)
+                        fi
+                        case "$MULTI_ROUTE_COUNT" in
+                            __BACK__)
+                                break
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        if (( MULTI_ROUTE_COUNT > 0 )); then
+                            NEED_LANDING="1"
+                            LANDING_EXPECT="any"
                         fi
                         ;;
                     6)
-                        NEED_LANDING="1"
-                        if [[ "$CHAIN_UNIFIED" == "1" ]]; then
-                            LANDING_EXPECT="any"
+                        echo -e "${CYAN}  这是 Vless-Enc 入站 + 多出口模式：直出和每个落地各使用一个独立高位端口。支持 0-10 个落地。${NC}"
+                        if is_quick_install_noninteractive; then
+                            MULTI_ROUTE_COUNT="0"
+                            echo -e "${YELLOW}  非交互快速安装默认使用 0 个落地，仅保留 Vless-Enc 直出。${NC}"
                         else
-                            LANDING_EXPECT="vless"
+                            MULTI_ROUTE_COUNT=$(choose_reality_landing_count)
+                        fi
+                        case "$MULTI_ROUTE_COUNT" in
+                            __BACK__)
+                                break
+                                ;;
+                            __MAIN__)
+                                return 0
+                                ;;
+                        esac
+                        if (( MULTI_ROUTE_COUNT > 0 )); then
+                            NEED_LANDING="1"
+                            LANDING_EXPECT="any"
                         fi
                         ;;
                     7)
@@ -4805,15 +4859,17 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                             ;;
                         5)
                             echo -e "${CYAN}    - 入口：SS 入站${NC}"
-                            echo -e "${CYAN}    - 出口：任意支持的 SS / VLESS / Reality 出站${NC}"
-                            echo -e "${CYAN}    - 保留 direct 直出出站${NC}"
+                            echo -e "${CYAN}    - 路由：直出 + ${MULTI_ROUTE_COUNT} 个落地${NC}"
+                            echo -e "${CYAN}    - 每条路由：独立高位端口${NC}"
+                            echo -e "${CYAN}    - 落地出站：按输入的 SS / VLESS / Reality 链接生成${NC}"
                             ;;
                         6)
                             echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
                             echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
                             echo -e "${CYAN}    - 入口：Vless-Enc 入站${NC}"
-                            echo -e "${CYAN}    - 出口：任意支持的 SS / VLESS / Reality 出站${NC}"
-                            echo -e "${CYAN}    - 保留 direct 直出出站${NC}"
+                            echo -e "${CYAN}    - 路由：直出 + ${MULTI_ROUTE_COUNT} 个落地${NC}"
+                            echo -e "${CYAN}    - 每条路由：独立高位端口${NC}"
+                            echo -e "${CYAN}    - 落地出站：按输入的 SS / VLESS / Reality 链接生成${NC}"
                             ;;
                         7)
                             echo -e "${CYAN}    - XHTTP + Reality：启用${NC}"
@@ -4961,6 +5017,32 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         fi
                     fi
 
+                    if [[ ("$SCENARIO" == "5" || "$SCENARIO" == "6") && "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                        echo ""
+                        echo -e "${CYAN}  每个落地入口都会使用独立高位端口；可手动指定，也可让脚本随机分配。${NC}"
+                        for route_idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                            route_port="auto"
+                            if ask_yes_no "  是否手动指定落地${route_idx}端口（y=手动指定，n=随机高位端口）"; then
+                                while true; do
+                                    route_port=$(read_manual_ss_port "请输入落地${route_idx}端口: ")
+                                    duplicate_port=0
+                                    if [[ "$route_port" == "$PORT" || "$route_port" == "$LOCAL_SS_PORT" || "$route_port" == "$LOCAL_ENC_PORT" || "$route_port" == "$MANUAL_SS_PORT" || "$route_port" == "$MANUAL_ENC_PORT" ]]; then
+                                        duplicate_port=1
+                                    fi
+                                    for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                                        [[ "$existing_port" == "$route_port" ]] && duplicate_port=1
+                                    done
+                                    if is_port_in_use_by_non_xray "$route_port" || [[ "$duplicate_port" -eq 1 ]]; then
+                                        echo -e "${RED}  端口 ${route_port} 已被占用或与现有入口冲突，请重新输入。${NC}"
+                                        continue
+                                    fi
+                                    break
+                                done
+                            fi
+                            MULTI_ROUTE_MANUAL_PORTS+=("$route_port")
+                        done
+                    fi
+
                     if [[ "$SCENARIO" == "7" || "$SCENARIO" == "8" ]]; then
                         echo ""
                         echo -e "${CYAN}  当前模板包含 XHTTP 分离链路，需要额外指定分离方向与 path。${NC}"
@@ -4989,6 +5071,9 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
     if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" || "$SCENARIO" == "7" ]]; then
         echo -e "${CYAN}  当前 Reality 端口：${REALITY_PORT}${NC}"
     fi
+    if [[ "$SCENARIO" == "5" || "$SCENARIO" == "6" ]]; then
+        echo -e "${CYAN}  当前多出口数量：${MULTI_ROUTE_COUNT} 个落地；直出与每个落地分别使用独立高位端口${NC}"
+    fi
     if [[ "$SCENARIO" == "2" || "$SCENARIO" == "4" || "$SCENARIO" == "5" ]]; then
         echo -e "${CYAN}  当前 SS2022 加密方式：${SS_METHOD_DESC}${NC}"
     fi
@@ -5006,7 +5091,22 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
         echo -e "${CYAN}  当前 XHTTP path：${XHTTP_PATH}${NC}"
     fi
 
-    if [[ "$SCENARIO" == "1" && "$REALITY_LANDING_COUNT" -gt 0 ]] || [[ "$SCENARIO" == "7" && "$REALITY_LANDING_COUNT" -gt 0 ]]; then
+    if [[ "$SCENARIO" == "5" || "$SCENARIO" == "6" ]] && [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+        echo ""
+        echo -e "${CYAN}  当前模板需要输入 ${MULTI_ROUTE_COUNT} 个落地出站链接（ss:// 或 vless://）。${NC}"
+        local idx
+        for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+            while true; do
+                read -r -p "请输入落地${idx}出站链接: " LANDING_LINK
+                LANDING_LINK=$(normalize_share_link "$LANDING_LINK")
+                [[ -n "$LANDING_LINK" ]] || { echo -e "${RED}  链接不能为空。${NC}"; continue; }
+                case "$LANDING_LINK" in
+                    ss://*|vless://*) LANDING_LINKS+=("$LANDING_LINK"); break ;;
+                    *) echo -e "${RED}  仅支持 ss:// 或 vless:// 链接。${NC}" ;;
+                esac
+            done
+        done
+    elif [[ "$SCENARIO" == "1" && "$REALITY_LANDING_COUNT" -gt 0 ]] || [[ "$SCENARIO" == "7" && "$REALITY_LANDING_COUNT" -gt 0 ]]; then
         echo ""
         echo -e "${CYAN}  当前模板为 Reality 多出口模式，需要依次输入 ${REALITY_LANDING_COUNT} 个落地目标链接。${NC}"
         echo -e "${CYAN}  支持输入 ss:// 或 vless:// 链接；每个链接会绑定到一个独立的用户入口。${NC}"
@@ -5024,14 +5124,14 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
         done
     elif [[ "$NEED_LANDING" == "1" ]]; then
         echo ""
-        echo -e "${CYAN}  当前模板需要输入一个落地 / 传导目标链接。${NC}"
+        echo -e "${CYAN}  当前模板需要输入一个出站目标链接。${NC}"
         case "$LANDING_EXPECT" in
-            ss) echo -e "${CYAN}  原因：当前模板为 SS 传导链，因此需要一个 ss:// 出站目标。${NC}" ;;
-            vless) echo -e "${CYAN}  原因：当前模板为 Vless-Enc 传导链，因此需要一个 vless:// 出站目标。${NC}" ;;
-            any) echo -e "${CYAN}  原因：无 TLS 链式允许 ss:// 或 vless:// 出站目标（包含 Vless-Enc / Reality 参数）。${NC}" ;;
+            ss) echo -e "${CYAN}  原因：当前模板需要一个 ss:// 出站目标。${NC}" ;;
+            vless) echo -e "${CYAN}  原因：当前模板需要一个 vless:// 出站目标。${NC}" ;;
+            any) echo -e "${CYAN}  原因：当前模板允许 ss:// 或 vless:// 出站目标（包含 Vless-Enc / Reality 参数）。${NC}" ;;
         esac
         while true; do
-            read -r -p "请输入落地 / 传导链接: " LANDING_LINK
+            read -r -p "请输入出站目标链接: " LANDING_LINK
             LANDING_LINK=$(normalize_share_link "$LANDING_LINK")
             [[ -n "$LANDING_LINK" ]] || { echo -e "${RED}  链接不能为空。${NC}"; continue; }
             case "$LANDING_EXPECT" in
@@ -5146,7 +5246,14 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
             done
             LOCAL_SS_PORT="$MANUAL_SS_PORT"
         else
-            LOCAL_SS_PORT=$(pick_random_free_port_excluding "$PORT") || { echo -e "${RED}  ✗ 无法选出可用的随机高位 SS2022 端口。${NC}"; return 1; }
+            while true; do
+                LOCAL_SS_PORT=$(pick_random_free_port_excluding "$PORT" "$LOCAL_ENC_PORT") || { echo -e "${RED}  ✗ 无法选出可用的随机高位 SS2022 端口。${NC}"; return 1; }
+                duplicate_port=0
+                for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                    [[ "$existing_port" != "auto" && "$existing_port" == "$LOCAL_SS_PORT" ]] && duplicate_port=1
+                done
+                [[ "$duplicate_port" -eq 0 ]] && break
+            done
         fi
         if [[ "$LOCAL_SS_METHOD" == *"256"* ]]; then
             LOCAL_SS_PWD=$(openssl rand -base64 32 | tr -d '\n')
@@ -5163,7 +5270,14 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
             done
             LOCAL_ENC_PORT="$MANUAL_ENC_PORT"
         else
-            LOCAL_ENC_PORT=$(pick_random_free_port_excluding "$PORT" "$LOCAL_SS_PORT") || { echo -e "${RED}  ✗ 无法为 Vless-Enc 选出可用的随机高位端口。${NC}"; return 1; }
+            while true; do
+                LOCAL_ENC_PORT=$(pick_random_free_port_excluding "$PORT" "$LOCAL_SS_PORT") || { echo -e "${RED}  ✗ 无法为 Vless-Enc 选出可用的随机高位端口。${NC}"; return 1; }
+                duplicate_port=0
+                for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                    [[ "$existing_port" != "auto" && "$existing_port" == "$LOCAL_ENC_PORT" ]] && duplicate_port=1
+                done
+                [[ "$duplicate_port" -eq 0 ]] && break
+            done
         fi
         VLESSENC_PAIR_RAW=$(get_vlessenc_pair_from_xray "$ENC_AUTH_METHOD" || true)
         [[ -n "$VLESSENC_PAIR_RAW" ]] || { echo -e "${RED}  ✗ 调用 xray vlessenc 生成 Vless-Enc 参数失败。${NC}"; return 1; }
@@ -5184,6 +5298,43 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
         fi
     fi
 
+    if [[ ("$SCENARIO" == "5" || "$SCENARIO" == "6") && "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+        local idx route_port existing_port duplicate_port one_uuid one_password
+        for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+            route_port="${MULTI_ROUTE_MANUAL_PORTS[$((idx-1))]:-auto}"
+            if [[ "$route_port" == "auto" ]]; then
+                while true; do
+                    route_port=$(pick_random_free_port_excluding "$PORT" "$LOCAL_SS_PORT" "$LOCAL_ENC_PORT") || {
+                        echo -e "${RED}  ✗ 无法为落地${idx}选出随机高位端口。${NC}"
+                        return 1
+                    }
+                    duplicate_port=0
+                    for existing_port in "${MULTI_ROUTE_PORTS[@]}"; do
+                        [[ "$existing_port" == "$route_port" ]] && duplicate_port=1
+                    done
+                    for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                        [[ "$existing_port" != "auto" && "$existing_port" == "$route_port" ]] && duplicate_port=1
+                    done
+                    [[ "$duplicate_port" -eq 0 ]] && break
+                done
+            fi
+            MULTI_ROUTE_PORTS+=("$route_port")
+
+            if [[ "$SCENARIO" == "5" ]]; then
+                if [[ "$LOCAL_SS_METHOD" == *"256"* ]]; then
+                    one_password=$(openssl rand -base64 32 | tr -d '\n')
+                else
+                    one_password=$(openssl rand -base64 16 | tr -d '\n')
+                fi
+                MULTI_ROUTE_SS_PASSWORDS+=("$one_password")
+            else
+                one_uuid=$(/usr/local/bin/xray uuid 2>/dev/null || true)
+                [[ -n "$one_uuid" ]] || { echo -e "${RED}  ✗ 生成落地${idx} Vless-Enc UUID 失败，安装已中止。${NC}"; return 1; }
+                MULTI_ROUTE_UUIDS+=("$one_uuid")
+            fi
+        done
+    fi
+
     if [[ "$SCENARIO" == "1" && "$REALITY_LANDING_COUNT" -gt 0 ]] || [[ "$SCENARIO" == "7" && "$REALITY_LANDING_COUNT" -gt 0 ]]; then
         local idx
         for idx in $(seq 1 "$REALITY_LANDING_COUNT"); do
@@ -5193,12 +5344,15 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
             LANDING_LABELS+=("$PARSED_LINK_LABEL")
             LANDING_TAGS+=("landing${idx}")
         done
-    elif [[ "$SCENARIO" == "5" || "$SCENARIO" == "6" ]]; then
-        build_outbound_from_link "${LANDING_LINKS[0]}" "landing" || { echo -e "${RED}  ✗ 解析落地 / 传导链接失败，请检查格式。${NC}"; return 1; }
-        print_parsed_outbound_preview
-        LANDING_JSONS=("$PARSED_OUTBOUND_JSON")
-        LANDING_LABELS=("$PARSED_LINK_LABEL")
-        LANDING_TAGS=("landing")
+    elif [[ ("$SCENARIO" == "5" || "$SCENARIO" == "6") && "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+        local idx
+        for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+            build_outbound_from_link "${LANDING_LINKS[$((idx-1))]}" "landing${idx}" || { echo -e "${RED}  ✗ 解析落地${idx}出站链接失败，请检查格式。${NC}"; return 1; }
+            print_parsed_outbound_preview
+            LANDING_JSONS+=("$PARSED_OUTBOUND_JSON")
+            LANDING_LABELS+=("$PARSED_LINK_LABEL")
+            LANDING_TAGS+=("landing${idx}")
+        done
     fi
 
     echo -e "${GREEN}  ✓ 端口、密钥与模板参数已准备完成${NC}"
@@ -5206,6 +5360,12 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
     precheck_reality_port_before_apply "$SCENARIO" "$PORT" || return 1
     precheck_reusable_xray_port_before_apply "$LOCAL_SS_PORT" "SS2022" || return 1
     precheck_reusable_xray_port_before_apply "$LOCAL_ENC_PORT" "Vless-Enc" || return 1
+    if [[ "$SCENARIO" == "5" || "$SCENARIO" == "6" ]]; then
+        local idx
+        for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+            precheck_reusable_xray_port_before_apply "${MULTI_ROUTE_PORTS[$((idx-1))]}" "落地${idx}" || return 1
+        done
+    fi
 
     echo -e "\n${CYAN}[Step 7/7] 写入配置并启动服务${NC}"
     render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
@@ -5299,6 +5459,27 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
         if [[ -n "$SERVER_IP_URI_V6" ]]; then
             SS_NODE_LINK_V6="ss://${SS_USERINFO}@${SERVER_IP_URI_V6}:${LOCAL_SS_PORT}#SS-IPv6-zxray"
         fi
+    fi
+
+    if [[ "$SCENARIO" == "5" && "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+        local idx route_userinfo
+        for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+            route_userinfo=$(base64_encode_urlsafe_nopad "${LOCAL_SS_METHOD}:${MULTI_ROUTE_SS_PASSWORDS[$((idx-1))]}")
+            MULTI_ROUTE_SS_LINKS+=("ss://${route_userinfo}@${SERVER_IP_URI}:${MULTI_ROUTE_PORTS[$((idx-1))]}#SS-落地${idx}-zxray")
+            if [[ -n "$SERVER_IP_URI_V6" ]]; then
+                MULTI_ROUTE_SS_LINKS_V6+=("ss://${route_userinfo}@${SERVER_IP_URI_V6}:${MULTI_ROUTE_PORTS[$((idx-1))]}#SS-落地${idx}-IPv6-zxray")
+            fi
+        done
+    fi
+
+    if [[ "$SCENARIO" == "6" && "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+        local idx
+        for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+            MULTI_ROUTE_VLESS_LINKS+=("vless://${MULTI_ROUTE_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${MULTI_ROUTE_PORTS[$((idx-1))]}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-落地${idx}-zxray")
+            if [[ -n "$SERVER_IP_URI_V6" ]]; then
+                MULTI_ROUTE_VLESS_LINKS_V6+=("vless://${MULTI_ROUTE_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${MULTI_ROUTE_PORTS[$((idx-1))]}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-落地${idx}-IPv6-zxray")
+            fi
+        done
     fi
 
     case "$SCENARIO" in
@@ -5750,7 +5931,10 @@ EOF
 )
             ;;
         5)
-            INBOUNDS_JSON=$(cat <<EOF
+            local MULTI_SS_INBOUNDS_JSON=""
+            local MULTI_SS_RULES_JSON=""
+            local MULTI_SS_OUTBOUNDS_JSON=""
+            MULTI_SS_INBOUNDS_JSON=$(cat <<EOF
     {
       "tag": "in-ss",
       "listen": "::",
@@ -5764,63 +5948,127 @@ EOF
     }
 EOF
 )
+            MULTI_SS_RULES_JSON=$(cat <<'EOF'
+      {
+        "type": "field",
+        "inboundTag": ["in-ss"],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+EOF
+)
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                local idx
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    MULTI_SS_INBOUNDS_JSON+=$(cat <<EOF
+,
+    {
+      "tag": "in-ss-landing${idx}",
+      "listen": "::",
+      "port": ${MULTI_ROUTE_PORTS[$((idx-1))]},
+      "protocol": "shadowsocks",
+      "settings": {
+        "method": "${LOCAL_SS_METHOD}",
+        "password": "${MULTI_ROUTE_SS_PASSWORDS[$((idx-1))]}",
+        "network": "tcp,udp"
+      }
+    }
+EOF
+)
+                    MULTI_SS_RULES_JSON+=$(cat <<EOF
+      {
+        "type": "field",
+        "inboundTag": ["in-ss-landing${idx}"],
+        "network": "tcp,udp",
+        "outboundTag": "landing${idx}"
+      },
+EOF
+)
+                    MULTI_SS_OUTBOUNDS_JSON+=$(printf '%s,\n' "${LANDING_JSONS[$((idx-1))]}")
+                done
+            fi
+            INBOUNDS_JSON="$MULTI_SS_INBOUNDS_JSON"
             OUTBOUNDS_JSON=$(cat <<EOF
     ${OUTBOUND_JSON},
-${LANDING_JSONS[0]},
-    {
+${MULTI_SS_OUTBOUNDS_JSON}    {
       "tag": "blocked",
       "protocol": "blackhole"
     }
 EOF
 )
-            ALLOW_RULES_JSON=$(cat <<'EOF'
-      {
-        "type": "field",
-        "inboundTag": ["in-ss"],
-        "network": "tcp,udp",
-        "outboundTag": "landing"
-      },
-EOF
-)
+            ALLOW_RULES_JSON="$MULTI_SS_RULES_JSON"
             SUBS_TEXT=$(cat <<EOF
 当前架构:
-  - 入口: SS2022
-  - 出口: SS 传导目标
+  - 入口协议: SS2022
+  - 路由数量: 直出 + ${MULTI_ROUTE_COUNT} 个落地
 
 订阅:
-SS2022（传导链入口）:
+SS2022（直出）:
   ${SS_NODE_LINK}
 EOF
 )
             if [[ -n "$SS_NODE_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-SS2022（传导链入口 / IPv6）:
+SS2022（直出 / IPv6）:
   ${SS_NODE_LINK_V6}
 EOF
 )
             fi
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    SUBS_TEXT+=$(cat <<EOF
+
+SS2022（落地${idx}）:
+  ${MULTI_ROUTE_SS_LINKS[$((idx-1))]}
+EOF
+)
+                    if [[ ${#MULTI_ROUTE_SS_LINKS_V6[@]} -ge ${idx} ]]; then
+                        SUBS_TEXT+=$(cat <<EOF
+
+SS2022（落地${idx} / IPv6）:
+  ${MULTI_ROUTE_SS_LINKS_V6[$((idx-1))]}
+EOF
+)
+                    fi
+                done
+            fi
             SUBS_TEXT+=$(cat <<EOF
 
 说明:
-  - 入口协议: SS 入站
-  - 出口协议: SS 出站
-  - 当前传导目标: ${LANDING_LABELS[0]}
-  - 传导原始链接: ${LANDING_LINKS[0]}
+  - 直出入口：SS 入站 -> freedom
+  - 每个落地入口：SS 入站 -> 对应的 SS / VLESS / Reality 出站
+  - 直出和每个落地使用不同端口，避免无 TLS 模式下的入口混淆
 EOF
 )
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    SUBS_TEXT+=$(cat <<EOF
+  - 落地${idx}出站：${LANDING_LABELS[$((idx-1))]}
+    原始链接：${LANDING_LINKS[$((idx-1))]}
+EOF
+)
+                done
+            fi
             PORTS_TEXT=$(cat <<EOF
 端口:
-  SS2022:      ${LOCAL_SS_PORT}
-
-出站说明:
-  传导方向:    SS 入站 -> SS 出站
-  传导目标:    ${LANDING_LABELS[0]}
+  SS2022 直出: ${LOCAL_SS_PORT}
 EOF
 )
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    PORTS_TEXT+=$(cat <<EOF
+  SS2022 落地${idx}: ${MULTI_ROUTE_PORTS[$((idx-1))]}
+EOF
+)
+                done
+            fi
             ;;
         6)
-            INBOUNDS_JSON=$(cat <<EOF
+            local MULTI_ENC_INBOUNDS_JSON=""
+            local MULTI_ENC_RULES_JSON=""
+            local MULTI_ENC_OUTBOUNDS_JSON=""
+            MULTI_ENC_INBOUNDS_JSON=$(cat <<EOF
     {
       "tag": "in-enc",
       "listen": "::",
@@ -5842,49 +6090,105 @@ EOF
     }
 EOF
 )
+            MULTI_ENC_RULES_JSON=$(cat <<'EOF'
+      {
+        "type": "field",
+        "inboundTag": ["in-enc"],
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+EOF
+)
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                local idx
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    MULTI_ENC_INBOUNDS_JSON+=$(cat <<EOF
+,
+    {
+      "tag": "in-enc-landing${idx}",
+      "listen": "::",
+      "port": ${MULTI_ROUTE_PORTS[$((idx-1))]},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "${MULTI_ROUTE_UUIDS[$((idx-1))]}",
+            "flow": "xtls-rprx-vision",
+            "email": "enc_landing_${idx}"
+          }
+        ],
+        "decryption": "${VLESS_ENC_DECRYPTION}"
+      },
+      "streamSettings": {
+        "network": "tcp"
+      }
+    }
+EOF
+)
+                    MULTI_ENC_RULES_JSON+=$(cat <<EOF
+      {
+        "type": "field",
+        "inboundTag": ["in-enc-landing${idx}"],
+        "network": "tcp,udp",
+        "outboundTag": "landing${idx}"
+      },
+EOF
+)
+                    MULTI_ENC_OUTBOUNDS_JSON+=$(printf '%s,\n' "${LANDING_JSONS[$((idx-1))]}")
+                done
+            fi
+            INBOUNDS_JSON="$MULTI_ENC_INBOUNDS_JSON"
             OUTBOUNDS_JSON=$(cat <<EOF
     ${OUTBOUND_JSON},
-${LANDING_JSONS[0]},
-    {
+${MULTI_ENC_OUTBOUNDS_JSON}    {
       "tag": "blocked",
       "protocol": "blackhole"
     }
 EOF
 )
-            ALLOW_RULES_JSON=$(cat <<'EOF'
-      {
-        "type": "field",
-        "inboundTag": ["in-enc"],
-        "network": "tcp,udp",
-        "outboundTag": "landing"
-      },
-EOF
-)
+            ALLOW_RULES_JSON="$MULTI_ENC_RULES_JSON"
             SUBS_TEXT=$(cat <<EOF
 当前架构:
-  - 入口: Vless-Enc
-  - 出口: VLESS / Reality / Vless-Enc
+  - 入口协议: Vless-Enc
+  - 路由数量: 直出 + ${MULTI_ROUTE_COUNT} 个落地
 
 订阅:
-Vless-Enc（传导链入口）:
+Vless-Enc（直出）:
   ${VLESS_ENC_LINK}
 EOF
 )
             if [[ -n "$VLESS_ENC_LINK_V6" ]]; then
                 SUBS_TEXT+=$(cat <<EOF
 
-Vless-Enc（传导链入口 / IPv6）:
+Vless-Enc（直出 / IPv6）:
   ${VLESS_ENC_LINK_V6}
 EOF
 )
             fi
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    SUBS_TEXT+=$(cat <<EOF
+
+Vless-Enc（落地${idx}）:
+  ${MULTI_ROUTE_VLESS_LINKS[$((idx-1))]}
+EOF
+)
+                    if [[ ${#MULTI_ROUTE_VLESS_LINKS_V6[@]} -ge ${idx} ]]; then
+                        SUBS_TEXT+=$(cat <<EOF
+
+Vless-Enc（落地${idx} / IPv6）:
+  ${MULTI_ROUTE_VLESS_LINKS_V6[$((idx-1))]}
+EOF
+)
+                    fi
+                done
+            fi
             SUBS_TEXT+=$(cat <<EOF
 
 说明:
-  - 入口协议: Vless-Enc 入站
-  - 出口协议: VLESS / Reality / Vless-Enc 出站（按你输入的链接决定）
-  - 当前传导目标: ${LANDING_LABELS[0]}
-  - 传导原始链接: ${LANDING_LINKS[0]}
+  - 直出入口：Vless-Enc 入站 -> freedom
+  - 每个落地入口：Vless-Enc 入站 -> 对应的 SS / VLESS / Reality 出站
+  - 直出和每个落地使用不同端口，避免无 TLS 模式下的入口混淆
   - 客户端实验性 padding / delay: ${ENC_PADDING_PROFILE_DESC}
 EOF
 )
@@ -5895,15 +6199,28 @@ EOF
 EOF
 )
             fi
-            PORTS_TEXT=$(cat <<EOF
-端口:
-  Vless-Enc:   ${LOCAL_ENC_PORT}
-
-出站说明:
-  传导方向:    Vless-Enc 入站 -> VLESS / Reality / Vless-Enc 出站
-  传导目标:    ${LANDING_LABELS[0]}
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    SUBS_TEXT+=$(cat <<EOF
+  - 落地${idx}出站：${LANDING_LABELS[$((idx-1))]}
+    原始链接：${LANDING_LINKS[$((idx-1))]}
 EOF
 )
+                done
+            fi
+            PORTS_TEXT=$(cat <<EOF
+端口:
+  Vless-Enc 直出: ${LOCAL_ENC_PORT}
+EOF
+)
+            if [[ "$MULTI_ROUTE_COUNT" -gt 0 ]]; then
+                for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                    PORTS_TEXT+=$(cat <<EOF
+  Vless-Enc 落地${idx}: ${MULTI_ROUTE_PORTS[$((idx-1))]}
+EOF
+)
+                done
+            fi
             ;;
         7)
             local XHTTP_REALITY_CLIENTS_JSON=""
@@ -6219,9 +6536,21 @@ JSONEOF
 
     case "$SCENARIO" in
         1|4) detect_xray_bind_warnings "$PORT" "$LOCAL_SS_PORT"; [[ -n "$LOCAL_ENC_PORT" ]] && { ss -ltnup | grep -q ":${LOCAL_ENC_PORT}" && echo -e "${GREEN}  ✓ 已检测到 ${LOCAL_ENC_PORT} 端口监听${NC}" || echo -e "${YELLOW}  ⚠ 请手动检查：ss -ltnup | grep :${LOCAL_ENC_PORT}${NC}"; } ;;
-        2|5) detect_xray_bind_warnings "$LOCAL_SS_PORT" "$LOCAL_SS_PORT" ;;
-        3|6|8) ss -ltnup | grep -q ":${LOCAL_ENC_PORT}" && echo -e "${GREEN}  ✓ 已检测到 ${LOCAL_ENC_PORT} 端口监听${NC}" || echo -e "${YELLOW}  ⚠ 请手动检查：ss -ltnup | grep :${LOCAL_ENC_PORT}${NC}" ;;
-        7) ss -ltnup | grep -q ":${PORT}" && echo -e "${GREEN}  ✓ 已检测到 ${PORT} 端口监听${NC}" || echo -e "${YELLOW}  ⚠ 请手动检查：ss -ltnup | grep :${PORT}${NC}" ;;
+        2) detect_xray_bind_warnings "$LOCAL_SS_PORT" "$LOCAL_SS_PORT" ;;
+        3|8) detect_port_bind_warning "Vless-Enc" "$LOCAL_ENC_PORT" ;;
+        5)
+            detect_port_bind_warning "SS2022 直出" "$LOCAL_SS_PORT"
+            for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                detect_port_bind_warning "SS2022 落地${idx}" "${MULTI_ROUTE_PORTS[$((idx-1))]}"
+            done
+            ;;
+        6)
+            detect_port_bind_warning "Vless-Enc 直出" "$LOCAL_ENC_PORT"
+            for idx in $(seq 1 "$MULTI_ROUTE_COUNT"); do
+                detect_port_bind_warning "Vless-Enc 落地${idx}" "${MULTI_ROUTE_PORTS[$((idx-1))]}"
+            done
+            ;;
+        7) detect_port_bind_warning "XHTTP + Reality" "$PORT" ;;
     esac
 
     write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT"
@@ -7024,8 +7353,9 @@ function get_xray_version_badge() {
 
 function show_main_header() {
     line
-    center_echo "Xray Manager ${SCRIPT_VERSION}" "${BRIGHT_YELLOW}${BOLD}"
-    center_echo "启动命令: zxray"
+    center_echo "X R A Y  M A N A G E R" "${BRIGHT_YELLOW}${BOLD}"
+    center_echo "${SCRIPT_VERSION}" "${BRIGHT_YELLOW}"
+    center_echo "命令: zxray" "${BLUE}${BOLD}"
     line
 }
 
