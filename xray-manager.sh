@@ -6,6 +6,7 @@ set -o pipefail
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
+BRIGHT_YELLOW='\033[1;93m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -17,17 +18,21 @@ UI_WIDTH=60
 DATA_DIR="/usr/local/share/doudou-xray"
 SELF_DIR="/usr/local/lib/doudou"
 SELF_SCRIPT_PATH="${SELF_DIR}/xray_manager.sh"
+SOURCE_RECORD_FILE="${SELF_DIR}/source-record"
 SCRIPT_REMOTE_URL="https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh"
-QUICK_BIN="/usr/local/bin/zdd"
-LEGACY_QUICK_BIN="/usr/local/bin/doudou"
+QUICK_BIN="/usr/local/bin/zxray"
+LEGACY_QUICK_BIN="/usr/local/bin/zdd"
 INFO_FILE="${DATA_DIR}/xray_node_info.txt"
 SUB_FILE="${DATA_DIR}/xray_subscription.txt"
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 CONFIG_DIR="/usr/local/etc/xray"
 SNI_POOL_FILE="${DATA_DIR}/.xray_sni_pool"
 SYSCTL_BBR_FILE="/etc/sysctl.d/99-bbr.conf"
+SYSCTL_BBR_BACKUP_FILE="${DATA_DIR}/sysctl_99-bbr.conf.original"
 XHTTP_PATCH_DIR="${DATA_DIR}/xhttp_patches"
 DEFAULT_PORT=443
+REALITY_GATE_PORT=4431
+REALITY_GATE_RULES_JSON=""
 TMP_FILES=()
 BEST_DEST=""
 BEST_DEST_POOL_SIG=""
@@ -51,17 +56,17 @@ DEFAULT_DEST_OPTIONS=(
     "www.intel.com"
     "www.adobe.com"
     "www.amazon.com"
+    "drivers.amd.com"
     "a0.awsstatic.com"
-    "d1.awsstatic.com"
-    "s0.awsstatic.com"
-    "cdn.jsdelivr.net"
+    "d1.awsstatic.com"    
+    "s0.awsstatic.com"    
     "gateway.icloud.com"
     "m.media-amazon.com"
     "addons.mozilla.org"
+    "tag.demandbase.com"    
     "t0.m.awsstatic.com"
-    "cdn77.api.userway.org"
+    "s.company-target.com"
     "images-na.ssl-images-amazon.com"
-    "download-installer.cdn.mozilla.net"
 )
 
 function line() {
@@ -172,6 +177,48 @@ function materialize_self_source() {
     return 1
 }
 
+function record_source_file() {
+    local source_path="${1:-}"
+    local source_dir=""
+    local source_base=""
+    local source_sha=""
+    local record_tmp=""
+
+    [[ -n "$source_path" ]] || return 0
+    case "$source_path" in
+        /proc/*|/dev/*|/tmp/doudou-entry.*.sh)
+            return 0
+            ;;
+    esac
+    [[ -f "$source_path" && ! -L "$source_path" ]] || return 0
+
+    if [[ "$source_path" != /* ]]; then
+        source_dir=$(cd -- "$(dirname -- "$source_path")" 2>/dev/null && pwd -P) || return 0
+        source_base=$(basename -- "$source_path" 2>/dev/null || true)
+        [[ -n "$source_base" ]] || return 0
+        source_path="${source_dir}/${source_base}"
+    fi
+
+    [[ "$source_path" != "$SELF_SCRIPT_PATH" ]] || return 0
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    source_sha=$(sha256sum -- "$source_path" 2>/dev/null | awk 'NR==1 {print $1}')
+    [[ "$source_sha" =~ ^[0-9a-fA-F]{64}$ ]] || return 0
+
+    record_tmp="${SOURCE_RECORD_FILE}.new.$$"
+    if ! (
+        umask 077
+        printf '%s\n%s\n' "$source_path" "${source_sha,,}" > "$record_tmp"
+    ); then
+        rm -f -- "$record_tmp" >/dev/null 2>&1 || true
+        return 1
+    fi
+    chmod 600 "$record_tmp" >/dev/null 2>&1 || true
+    mv -f -- "$record_tmp" "$SOURCE_RECORD_FILE" 2>/dev/null || {
+        rm -f -- "$record_tmp" >/dev/null 2>&1 || true
+        return 1
+    }
+}
+
 function reexec_with_root() {
     if [[ $EUID -eq 0 ]]; then
         if [[ -n "${DOUDOU_ENTRY_TEMP:-}" && -f "${DOUDOU_ENTRY_TEMP}" ]]; then
@@ -238,36 +285,31 @@ function install_quick_launcher() {
             materialize_self_source "$current_path" "$SELF_SCRIPT_PATH" || return 1
         fi
         chmod 755 "$SELF_SCRIPT_PATH" >/dev/null 2>&1 || true
+        if [[ "$current_path" != "$SELF_SCRIPT_PATH" ]]; then
+            record_source_file "$current_path" >/dev/null 2>&1 || true
+        fi
     fi
 
-    rm -f -- "$LEGACY_QUICK_BIN" >/dev/null 2>&1 || true
+    local legacy_path
+    for legacy_path in \
+        "$LEGACY_QUICK_BIN" "/usr/local/bin/doudou" "/usr/local/bin/xray-manager" \
+        "/usr/bin/zxray" "/usr/bin/zdd" "/usr/bin/doudou" "/usr/bin/xray-manager" \
+        "/usr/sbin/zxray" "/usr/sbin/zdd" "/usr/sbin/doudou" "/usr/sbin/xray-manager" \
+        "/root/bin/zxray" "/root/bin/zdd" "/root/bin/doudou" "/root/bin/xray-manager" \
+        "/root/.local/bin/zxray" "/root/.local/bin/zdd" "/root/.local/bin/doudou" "/root/.local/bin/xray-manager"; do
+        rm -f -- "$legacy_path" >/dev/null 2>&1 || true
+    done
 
     cat > "$QUICK_BIN" <<EOF
 #!/bin/bash
 set -u
 
-case "\${1:-}" in
-    xray)
-        shift
-        exec "$SELF_SCRIPT_PATH" "\$@"
-        ;;
-    install)
-        shift
-        exec "$SELF_SCRIPT_PATH" --quick-install --quick-scenario 4 "\$@"
-        ;;
-    update)
-        shift
-        exec "$SELF_SCRIPT_PATH" --quick-update "\$@"
-        ;;
-    uninstall)
-        shift
-        exec "$SELF_SCRIPT_PATH" --quick-uninstall "\$@"
-        ;;
-    *)
-        echo "用法: zdd xray | zdd install | zdd update | zdd uninstall"
-        exit 1
-        ;;
-esac
+    if [[ \$# -eq 0 ]]; then
+        exec "$SELF_SCRIPT_PATH"
+    fi
+
+    echo "用法: zxray"
+    exit 1
 EOF
     chmod 755 "$QUICK_BIN" >/dev/null 2>&1 || true
 }
@@ -396,9 +438,28 @@ function write_install_runtime_kind() {
 }
 
 function get_install_runtime_kind() {
+    local recorded_kind=""
     if [[ -f "$SERVICE_KIND_FILE" ]]; then
-        head -n 1 "$SERVICE_KIND_FILE" 2>/dev/null || true
-        return 0
+        recorded_kind=$(head -n 1 "$SERVICE_KIND_FILE" 2>/dev/null || true)
+        case "$recorded_kind" in
+            alpine-ss2022|alpine-xray-vlessenc)
+                if is_alpine_system; then
+                    printf '%s\n' "$recorded_kind"
+                    return 0
+                fi
+                echo -e "${YELLOW}警告：记录的 Alpine 安装类型与当前系统不匹配，将改用实际文件和服务探测。${NC}" >&2
+                ;;
+            xray)
+                if ! is_alpine_system; then
+                    printf '%s\n' "$recorded_kind"
+                    return 0
+                fi
+                echo -e "${YELLOW}警告：记录的 systemd Xray 类型与当前 Alpine / OpenRC 系统不匹配，将改用实际文件和服务探测。${NC}" >&2
+                ;;
+            *)
+                echo -e "${YELLOW}警告：检测到无效的安装类型记录，将改用实际文件和服务探测。${NC}" >&2
+                ;;
+        esac
     fi
 
     if is_alpine_system && [[ -x "$ALPINE_XRAY_SERVICE_FILE" || ( -x /usr/local/bin/xray && -f "$CONFIG_FILE" ) ]]; then
@@ -622,27 +683,7 @@ function ensure_alpine_install_port_available() {
 
 function show_reality_alternate_port_hint() {
     local port="$1"
-    local alternate_port=""
-
-    case "$port" in
-        443)
-            alternate_port="8443"
-            ;;
-        8443)
-            alternate_port="443"
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-
-    if is_port_in_use "$alternate_port"; then
-        echo -e "${RED}  另外端口 ${alternate_port} 也已被占用。${NC}"
-        print_port_listener_details "$alternate_port"
-        echo -e "${RED}  当前 443 和 8443 都不可用于 Reality。${NC}"
-    else
-        echo -e "${YELLOW}  提示：备用端口 ${alternate_port} 当前空闲，如需继续可改用 ${alternate_port}。${NC}"
-    fi
+    echo -e "${YELLOW}  提示：手动模式可选择任意 1-65535 的未占用 Reality 端口（${REALITY_GATE_PORT} 除外）。当前冲突端口：${port}${NC}"
 }
 
 function stop_xray_occupying_port() {
@@ -795,9 +836,10 @@ function read_manual_ss_port() {
 
 function choose_reality_port() {
     local choice
+    local port
     while true; do
         echo -e "  ${CYAN}1.${NC} 443（默认）" >&2
-        echo -e "  ${CYAN}2.${NC} 8443" >&2
+        echo -e "  ${CYAN}2.${NC} 自定义端口（1-65535）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         read -r -p "选择 Reality 端口 [1-2/0/b]，默认 1: " choice
@@ -807,7 +849,12 @@ function choose_reality_port() {
                 return 0
                 ;;
             2|02)
-                echo "8443"
+                port=$(read_manual_ss_port "请输入 Reality 端口: ")
+                if [[ "$port" == "$REALITY_GATE_PORT" ]]; then
+                    echo -e "${RED}  ${REALITY_GATE_PORT} 端口保留给 Reality fallback gate，请换一个端口。${NC}" >&2
+                    continue
+                fi
+                echo "$port"
                 return 0
                 ;;
             0|00)
@@ -859,30 +906,27 @@ function choose_ss_method() {
 
 function choose_reality_landing_count() {
     local choice
+    local custom_count
     while true; do
-        echo -e "  ${CYAN}1.${NC} 直出（不增加落地）" >&2
-        echo -e "  ${CYAN}2.${NC} 1 个落地出口（直出 + 1 落地）" >&2
-        echo -e "  ${CYAN}3.${NC} 2 个落地出口（直出 + 2 落地）" >&2
-        echo -e "  ${CYAN}4.${NC} 3 个落地出口（直出 + 3 落地）" >&2
+        echo -e "  ${CYAN}1.${NC} 直出（0 个落地）" >&2
+        echo -e "  ${CYAN}2.${NC} 输入落地总数（1-10 个）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
-        read -r -p "选择 Reality 落地数量 [1-4/0/b]，默认 1: " choice
+        read -r -p "选择 Reality 落地数量 [1-2/0/b]，默认 1: " choice
         case "${choice:-1}" in
             1|01)
                 printf '%s' "0"
                 return 0
                 ;;
             2|02)
-                printf '%s' "1"
-                return 0
-                ;;
-            3|03)
-                printf '%s' "2"
-                return 0
-                ;;
-            4|04)
-                printf '%s' "3"
-                return 0
+                while true; do
+                    read -r -p "请输入落地总数 [1-10]: " custom_count
+                    if [[ "$custom_count" =~ ^[0-9]+$ ]] && (( custom_count >= 1 && custom_count <= 10 )); then
+                        printf '%s' "$custom_count"
+                        return 0
+                    fi
+                    echo -e "${RED}  请输入 1-10 之间的数字。${NC}" >&2
+                done
                 ;;
             0|00)
                 printf '%s' '__BACK__'
@@ -893,7 +937,7 @@ function choose_reality_landing_count() {
                 return 0
                 ;;
             *)
-                echo -e "${RED}  请输入 1-4、0 或 b。${NC}" >&2
+                echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2
                 ;;
         esac
     done
@@ -1436,11 +1480,25 @@ function check_bbr() {
     fi
 
     echo -e "${YELLOW}  BBR 或 FQ 未完全启用，正在写入配置...${NC}"
-    cat > "$SYSCTL_BBR_FILE" <<EOF2
+    if [[ -f "$SYSCTL_BBR_FILE" ]] && ! grep -q '^# BBR + FQ' "$SYSCTL_BBR_FILE"; then
+        if [[ ! -f "$SYSCTL_BBR_BACKUP_FILE" ]]; then
+            cp -a -- "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_BACKUP_FILE" || {
+                echo -e "${RED}  ✗ 无法备份已有 ${SYSCTL_BBR_FILE}，为避免覆盖用户配置，已跳过写入。${NC}"
+                return 1
+            }
+            echo -e "${CYAN}  已备份原有 BBR 配置，卸载时会尝试恢复。${NC}"
+        fi
+    fi
+
+    if ! cat > "$SYSCTL_BBR_FILE" <<EOF2
 # BBR + FQ — 由 Xray 管理脚本自动写入
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF2
+    then
+        echo -e "${RED}  ✗ 写入 ${SYSCTL_BBR_FILE} 失败。${NC}"
+        return 1
+    fi
 
     sysctl -p "$SYSCTL_BBR_FILE" >/dev/null 2>&1 || true
 
@@ -1522,7 +1580,7 @@ function ensure_alpine_ss_runtime_ready() {
 function install_alpine_runtime_deps() {
     echo -e "${YELLOW}  安装 Alpine 运行依赖...${NC}"
     apk update || return 1
-    apk add chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+    apk add curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
 
     if is_alpine_ss_runtime_ready; then
         echo -e "${GREEN}  ✓ 已检测到 shadowsocks-rust 运行组件${NC}"
@@ -1715,7 +1773,7 @@ function write_alpine_ssserver_config() {
 
     mkdir -p "$ALPINE_SS_CONFIG_DIR" || return 1
     backup_file_if_exists "$ALPINE_SS_CONFIG_FILE" || return 1
-    cat > "$ALPINE_SS_CONFIG_FILE" <<CFG_EOF
+    cat > "$ALPINE_SS_CONFIG_FILE" <<CFG_EOF || return 1
 {
   "server": "::",
   "server_port": ${port},
@@ -1725,11 +1783,12 @@ function write_alpine_ssserver_config() {
   "timeout": 300
 }
 CFG_EOF
+    chmod 600 "$ALPINE_SS_CONFIG_FILE" || return 1
 }
 
 function write_alpine_openrc_service() {
     backup_file_if_exists "$ALPINE_SS_SERVICE_FILE" || return 1
-    cat > "$ALPINE_SS_SERVICE_FILE" <<'SERVICE_EOF'
+    cat > "$ALPINE_SS_SERVICE_FILE" <<'SERVICE_EOF' || return 1
 #!/sbin/openrc-run
 
 name="shadowsocks-rust server"
@@ -1744,7 +1803,8 @@ depend() {
     need net
 }
 SERVICE_EOF
-    chmod +x "$ALPINE_SS_SERVICE_FILE" >/dev/null 2>&1 || true
+    chmod +x "$ALPINE_SS_SERVICE_FILE" >/dev/null 2>&1 || return 1
+    validate_alpine_openrc_service_script "$ALPINE_SS_SERVICE_FILE" "SS2022"
 }
 
 function validate_alpine_ss_config() {
@@ -1808,10 +1868,9 @@ function restart_alpine_ssservice() {
     ensure_alpine_supported || return 1
     validate_alpine_ss_config || { line; return 1; }
 
-    if [[ ! -x "$ALPINE_SS_SERVICE_FILE" ]]; then
-        echo -e "${RED}  ✗ 未找到 OpenRC 服务文件：${ALPINE_SS_SERVICE_FILE}${NC}"
-        line
-        return 1
+    if ! validate_alpine_openrc_service_script "$ALPINE_SS_SERVICE_FILE" "SS2022"; then
+        echo -e "${YELLOW}  正在重新生成 SS2022 OpenRC 服务文件...${NC}"
+        write_alpine_openrc_service || { line; return 1; }
     fi
 
     rc-service ssserver restart >/dev/null 2>&1 || rc-service ssserver start >/dev/null 2>&1 || {
@@ -1849,7 +1908,7 @@ function update_alpine_ssservice() {
     ensure_alpine_community_repo || { line; return 1; }
 
     apk update || { line; return 1; }
-    apk add --upgrade shadowsocks-rust mimalloc chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || {
+    apk add --upgrade shadowsocks-rust mimalloc curl wget jq openssl coreutils procps ca-certificates iproute2 || {
         echo -e "${RED}  ✗ 更新失败，请检查网络或仓库状态。${NC}"
         line
         return 1
@@ -1991,17 +2050,17 @@ function edit_alpine_ss_config() {
 
 function uninstall_alpine_ss_and_delete_self() {
     line
-    center_echo "卸载脚本和 SS2022" "${RED}${BOLD}"
+    center_echo "完整卸载 SS2022" "${RED}${BOLD}"
     line
     echo -e "${RED}  - 卸载 shadowsocks-rust（Alpine）${NC}"
-    echo -e "${RED}  - 删除 SS2022 配置与 OpenRC 服务文件${NC}"
-    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
-    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    echo -e "${RED}  - 删除 SS2022 配置、服务文件与生成目录${NC}"
+    echo -e "${RED}  - 删除 zxray 启动命令${NC}"
+    echo -e "${RED}  - 删除脚本源文件、临时文件、日志与 txt 文件${NC}"
     line
     if should_auto_confirm_uninstall; then
         echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
     else
-        read -r -p "输入 yes 继续: " CONFIRM
+        read -r -p "输入 yes 确认完整卸载: " CONFIRM
         if [[ "$CONFIRM" != "yes" ]]; then
             echo -e "${YELLOW}已取消。${NC}"
             return 0
@@ -2009,6 +2068,7 @@ function uninstall_alpine_ss_and_delete_self() {
     fi
 
     cleanup_alpine_ss_artifacts
+    cleanup_alpine_service_backups
 
     cleanup_doudou_runtime
 
@@ -2027,11 +2087,8 @@ ${CYAN}[Step 1/7] 系统环境预检${NC}"
     ensure_alpine_supported || return 1
 
     echo -e "
-${CYAN}[Step 2/7] 检查 Alpine 仓库、时间同步与依赖${NC}"
+${CYAN}[Step 2/7] 检查 Alpine 仓库与依赖${NC}"
     ensure_alpine_community_repo || return 1
-    if ! check_timesync_alpine; then
-        handle_timesync_failure "  警告：时间同步未完成，这可能导致 apk、证书校验、TLS 握手或后续网络请求异常。" || return 1
-    fi
     install_alpine_runtime_deps || return 1
     check_bbr || true
 
@@ -2196,7 +2253,7 @@ function ensure_sni_benchmark_ready() {
     echo -e "${RED}  ✗ 当前环境缺少 SNI 测速所需依赖。${NC}"
     echo -e "${YELLOW}  缺失项: ${missing[*]}${NC}"
     if is_alpine_system; then
-        echo -e "${CYAN}  建议：先执行 10 号 Alpine 专用 SS2022 安装，或手动安装：apk add openssl coreutils${NC}"
+        echo -e "${CYAN}  建议：先执行覆盖安装选择 Alpine SS2022，或手动安装：apk add openssl coreutils${NC}"
     else
         echo -e "${CYAN}  建议：先执行 01 安装，或手动安装 openssl / coreutils 后再测速。${NC}"
     fi
@@ -2345,8 +2402,15 @@ function print_download_error_reason() {
 function download_and_run_xray_installer() {
     local action="$1"
     local installer curl_err url max_retry retry sleep_seconds curl_ret runner
-    installer=$(mktemp /tmp/xray-install.XXXXXX.sh)
-    curl_err=$(mktemp /tmp/xray-install-curl.XXXXXX.log)
+    installer=$(mktemp /tmp/xray-install.XXXXXX.sh) || {
+        echo -e "${RED}  ✗ 无法创建 Xray 安装临时文件。${NC}"
+        return 1
+    }
+    curl_err=$(mktemp /tmp/xray-install-curl.XXXXXX.log) || {
+        rm -f -- "$installer" >/dev/null 2>&1 || true
+        echo -e "${RED}  ✗ 无法创建 Xray 安装错误日志临时文件。${NC}"
+        return 1
+    }
     add_tmp_file "$installer"
     add_tmp_file "$curl_err"
 
@@ -2541,9 +2605,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    echo -e "${CYAN}  快捷指令:${NC}"
-    echo -e "${CYAN}    zdd xray    | zdd install${NC}"
-    echo -e "${CYAN}    zdd update  | zdd uninstall${NC}"
+    echo -e "${CYAN}  启动命令: ${BRIGHT_YELLOW}zxray${NC}"
 }
 
 function render_saved_meta_block() {
@@ -3104,16 +3166,34 @@ function write_dynamic_result_files() {
 
 function get_install_scenario_label() {
     case "$1" in
-        1) printf '%s' '单 Reality' ;;
+        1) printf '%s' 'Reality 直出 / 多落地' ;;
         2) printf '%s' '单 SS 直出' ;;
         3) printf '%s' '单 Vless-Enc 直出' ;;
         4) printf '%s' 'Reality Vless-Enc SS 三入站直出' ;;
-        5) printf '%s' 'SS 传导链' ;;
-        6) printf '%s' 'Vless-Enc 传导链' ;;
-        7) printf '%s' 'XHTTP + Reality 上下行分离' ;;
-        8) printf '%s' 'XHTTP + Vless-Enc 上下行分离（实验性）' ;;
+        5) printf '%s' '无 TLS 链式（SS 入站）' ;;
+        6) printf '%s' '无 TLS 链式（Vless-Enc 入站）' ;;
+        7) printf '%s' 'XHTTP + Reality 直出 / 多落地' ;;
+        8) printf '%s' 'XHTTP + Vless-Enc 上下行分离（高风险慎用）' ;;
         *) printf '%s' '未知模板' ;;
     esac
+}
+
+function choose_unified_chain_entry() {
+    local choice
+    while true; do
+        echo -e "  ${CYAN}1.${NC} SS 入站" >&2
+        echo -e "  ${CYAN}2.${NC} Vless-Enc 入站" >&2
+        echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
+        echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
+        read -r -p "选择无 TLS 链式入口 [1-2/0/b]，默认 1: " choice
+        case "${choice:-1}" in
+            1|01) printf '%s' 'ss'; return 0 ;;
+            2|02) printf '%s' 'vlessenc'; return 0 ;;
+            0|00) printf '%s' '__BACK__'; return 0 ;;
+            b|B) printf '%s' '__MAIN__'; return 0 ;;
+            *) echo -e "${RED}  请输入 1、2、0 或 b。${NC}" >&2 ;;
+        esac
+    done
 }
 
 function render_install_context() {
@@ -3136,25 +3216,36 @@ function choose_install_scenario() {
         echo -e "${CYAN}${BOLD}  第三层：选择安装模板${NC}" >&2
         line >&2
         echo -e "${CYAN}  基础直出:${NC}" >&2
-        echo -e "  ${CYAN}1.${NC} 单 Reality" >&2
+        echo -e "  ${CYAN}1.${NC} Reality 直出 / 多落地（0-10 个）" >&2
         echo -e "  ${CYAN}2.${NC} 单 SS 直出" >&2
         echo -e "  ${CYAN}3.${NC} 单 Vless-Enc 直出" >&2
         echo -e "  ${CYAN}4.${NC} Reality Vless-Enc SS 三入站直出" >&2
         echo -e "" >&2
         echo -e "${CYAN}  进阶链路:${NC}" >&2
-        echo -e "  ${CYAN}5.${NC} SS 传导链（SS 入站 -> SS 出站）" >&2
-        echo -e "  ${CYAN}6.${NC} Vless-Enc 传导链（Vless-Enc 入站 -> VLESS 系出站）" >&2
-        echo -e "  ${CYAN}7.${NC} XHTTP + Reality 上下行分离（须双栈 / 直出 / 多落地）" >&2
-        echo -e "  ${CYAN}8.${NC} XHTTP + Vless-Enc 上下行分离（须双栈 / 直出 / ${YELLOW}高风险慎用${NC}）" >&2
+        echo -e "  ${CYAN}5.${NC} XHTTP + Reality 直出 / 多落地（0-10 个）" >&2
+        echo -e "  ${CYAN}6.${NC} XHTTP + Vless-Enc 上下行分离（${YELLOW}高风险慎用${NC}）" >&2
+        echo -e "  ${CYAN}7.${NC} 无 TLS 链式（SS / Vless-Enc 入站 -> 任意支持的出站，保留直出）" >&2
         echo -e "  ${CYAN}0.${NC} 返回上一步" >&2
         echo -e "  ${CYAN}b.${NC} 返回主菜单" >&2
         line >&2
-        read -r -p "选择 [1-8/0/b]: " choice
+        read -r -p "选择 [1-7/0/b]: " choice
         case "$choice" in
-            1|2|3|4|5|6|7|8) printf '%s' "$choice"; return 0 ;;
+            1|2|3|4) printf '%s' "$choice"; return 0 ;;
+            5|05) printf '%s' '7'; return 0 ;;
+            6|06) printf '%s' '8'; return 0 ;;
+            7|07)
+                local chain_entry=""
+                chain_entry=$(choose_unified_chain_entry)
+                case "$chain_entry" in
+                    ss) printf '%s' '__CHAIN_SS__'; return 0 ;;
+                    vlessenc) printf '%s' '__CHAIN_VLESSENC__'; return 0 ;;
+                    __BACK__) printf '%s' '__BACK__'; return 0 ;;
+                    __MAIN__) printf '%s' '__MAIN__'; return 0 ;;
+                esac
+                ;;
             0|00) printf '%s' '__BACK__'; return 0 ;;
             b|B) printf '%s' '__MAIN__'; return 0 ;;
-            *) echo -e "${RED}  请输入 1-8、0 或 b。${NC}" >&2 ;;
+            *) echo -e "${RED}  请输入 1-7、0 或 b。${NC}" >&2 ;;
         esac
     done
 }
@@ -3351,12 +3442,60 @@ function build_xhttp_vlessenc_full_link() {
     extra_uri=$(url_encode "$extra_compact")
     printf 'vless://%s@%s:%s?encryption=%s&flow=xtls-rprx-vision&security=none&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$(url_encode "$enc_value")" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
 }
+
+function build_reality_gate_inbound_json() {
+    local dest="$1"
+    cat <<EOF
+    {
+      "tag": "reality-target-gate",
+      "listen": "127.0.0.1",
+      "port": ${REALITY_GATE_PORT},
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "$(json_escape "$dest")",
+        "port": 443,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["tls"],
+        "routeOnly": true
+      }
+    },
+EOF
+}
+
+function build_reality_gate_rules_json() {
+    local dest="$1"
+    cat <<EOF
+      {
+        "type": "field",
+        "inboundTag": ["reality-target-gate"],
+        "domain": ["full:$(json_escape "$dest")"],
+        "network": "tcp",
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "inboundTag": ["reality-target-gate"],
+        "network": "tcp",
+        "outboundTag": "blocked"
+      },
+EOF
+}
+
 function precheck_reality_port_before_apply() {
     local scenario="$1"
     local port="$2"
 
+    if [[ "$port" == "$REALITY_GATE_PORT" ]]; then
+        echo -e "${RED}  端口 ${port} 已保留给 Reality 防偷 gate，不能作为对外监听端口。${NC}"
+        return 1
+    fi
+
     case "$scenario" in
         1|4|7)
+            precheck_reusable_xray_port_before_apply "$REALITY_GATE_PORT" "Reality fallback gate" || return 1
             echo -e "${YELLOW}  端口预检...${NC}"
 
             if ! is_port_in_use "$port"; then
@@ -3412,7 +3551,7 @@ function precheck_reusable_xray_port_before_apply() {
 function install_alpine_base_deps() {
     echo -e "${YELLOW}  安装 Alpine 基础依赖...${NC}"
     apk update || return 1
-    apk add chrony curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
+    apk add curl wget jq openssl coreutils procps ca-certificates iproute2 || return 1
 }
 
 function get_alpine_xray_enc_port_from_config() {
@@ -3425,9 +3564,33 @@ function get_alpine_xray_enc_port_from_config() {
     fi
 }
 
+function validate_alpine_openrc_service_script() {
+    local service_file="$1"
+    local service_label="$2"
+    local first_line=""
+
+    if [[ ! -f "$service_file" ]]; then
+        echo -e "${RED}  ✗ 未找到 ${service_label} OpenRC 服务文件：${service_file}${NC}"
+        return 1
+    fi
+
+    if [[ ! -x "$service_file" ]]; then
+        echo -e "${RED}  ✗ ${service_label} OpenRC 服务文件不可执行：${service_file}${NC}"
+        return 1
+    fi
+
+    first_line=$(head -n 1 "$service_file" 2>/dev/null || true)
+    if [[ "$first_line" != "#!/sbin/openrc-run" ]]; then
+        echo -e "${RED}  ✗ ${service_label} OpenRC 服务文件首行无效，必须是 #!/sbin/openrc-run：${service_file}${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
 function write_alpine_xray_openrc_service() {
     backup_file_if_exists "$ALPINE_XRAY_SERVICE_FILE" || return 1
-    cat > "$ALPINE_XRAY_SERVICE_FILE" <<'SERVICE_EOF'
+    cat > "$ALPINE_XRAY_SERVICE_FILE" <<'SERVICE_EOF' || return 1
 #!/sbin/openrc-run
 
 name="xray"
@@ -3442,7 +3605,8 @@ depend() {
     need net
 }
 SERVICE_EOF
-    chmod +x "$ALPINE_XRAY_SERVICE_FILE" >/dev/null 2>&1 || true
+    chmod +x "$ALPINE_XRAY_SERVICE_FILE" >/dev/null 2>&1 || return 1
+    validate_alpine_openrc_service_script "$ALPINE_XRAY_SERVICE_FILE" "Xray"
 }
 
 function choose_alpine_vlessenc_scenario() {
@@ -3490,10 +3654,9 @@ function restart_alpine_xray_service() {
         return 1
     fi
 
-    if [[ ! -x "$ALPINE_XRAY_SERVICE_FILE" ]]; then
-        echo -e "${RED}  ✗ 未找到 OpenRC 服务文件：${ALPINE_XRAY_SERVICE_FILE}${NC}"
-        line
-        return 1
+    if ! validate_alpine_openrc_service_script "$ALPINE_XRAY_SERVICE_FILE" "Xray"; then
+        echo -e "${YELLOW}  正在重新生成 Xray OpenRC 服务文件...${NC}"
+        write_alpine_xray_openrc_service || { line; return 1; }
     fi
 
     rc-update add xray default >/dev/null 2>&1 || true
@@ -3696,6 +3859,16 @@ function edit_alpine_xray_config() {
     done
 }
 
+function cleanup_alpine_service_backups() {
+    local backup_path
+    for backup_path in \
+        "${ALPINE_XRAY_SERVICE_FILE}.bak."* \
+        "${ALPINE_SS_SERVICE_FILE}.bak."*; do
+        [[ -e "$backup_path" || -L "$backup_path" ]] || continue
+        remove_path_quiet "$backup_path" "$backup_path"
+    done
+}
+
 function cleanup_xray_artifacts_alpine() {
     echo -e "${YELLOW}  清理 Alpine Xray 残留...${NC}"
     rc-service xray stop >/dev/null 2>&1 || true
@@ -3715,17 +3888,17 @@ function cleanup_alpine_ss_artifacts() {
 
 function uninstall_alpine_xray_and_delete_self() {
     line
-    center_echo "卸载脚本和 Alpine Xray" "${RED}${BOLD}"
+    center_echo "完整卸载 Alpine Xray" "${RED}${BOLD}"
     line
     echo -e "${RED}  - 卸载 Xray（Alpine）${NC}"
-    echo -e "${RED}  - 删除 Xray 配置与 OpenRC 服务文件${NC}"
-    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
-    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    echo -e "${RED}  - 删除 Xray 配置、服务文件与生成目录${NC}"
+    echo -e "${RED}  - 删除 zxray 启动命令${NC}"
+    echo -e "${RED}  - 删除脚本源文件、临时文件、日志与 txt 文件${NC}"
     line
     if should_auto_confirm_uninstall; then
         echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
     else
-        read -r -p "输入 yes 继续: " CONFIRM
+        read -r -p "输入 yes 确认完整卸载: " CONFIRM
         if [[ "$CONFIRM" != "yes" ]]; then
             echo -e "${YELLOW}已取消。${NC}"
             return 0
@@ -3733,6 +3906,7 @@ function uninstall_alpine_xray_and_delete_self() {
     fi
 
     cleanup_xray_artifacts_alpine
+    cleanup_alpine_service_backups
     cleanup_doudou_runtime
 
     echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
@@ -3746,11 +3920,8 @@ function install_alpine_xray_vlessenc() {
     line
     ensure_alpine_supported || return 1
 
-    echo -e "\n${CYAN}[Step 1/6] 时间同步与基础环境${NC}"
+    echo -e "\n${CYAN}[Step 1/6] 基础环境${NC}"
     ensure_alpine_community_repo || return 1
-    if ! check_timesync_alpine; then
-        handle_timesync_failure "  警告：时间同步未完成，这可能导致 apk、证书校验、TLS 握手或后续网络请求异常。" || return 1
-    fi
     check_bbr || true
 
     local INSTALL_MODE="auto"
@@ -3818,14 +3989,12 @@ function install_alpine_xray_vlessenc() {
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
                     echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
-                    echo -e "${CYAN}    - Vless-Enc 端口：手动输入${NC}"
+                    echo -e "${CYAN}    - Vless-Enc 端口：随机高位端口${NC}"
                     if [[ "$SCENARIO" == "3" ]]; then
                         echo -e "${CYAN}    - 出口：freedom / ${FREEDOM_DESC}${NC}"
                     else
                         echo -e "${CYAN}    - 出口：VLESS / Reality / Vless-Enc${NC}"
                     fi
-                    MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 端口: ")
-                    ENC_PORT_SOURCE="manual"
                 fi
 
                 if [[ "$INSTALL_MODE" == "manual" ]]; then
@@ -4008,9 +4177,9 @@ function install_alpine_xray_vlessenc() {
     fi
 
     VLESS_ENC_ENCRYPTION_URI=$(url_encode "$VLESS_ENC_ENCRYPTION")
-    VLESS_ENC_LINK="vless://${UUID}@${SERVER_IP_URI}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-zdd"
+    VLESS_ENC_LINK="vless://${UUID}@${SERVER_IP_URI}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-zxray"
     if [[ -n "$SERVER_IP_URI_V6" ]]; then
-        VLESS_ENC_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-IPv6-zdd"
+        VLESS_ENC_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-IPv6-zxray"
     fi
 
     case "$SCENARIO" in
@@ -4206,6 +4375,7 @@ JSONEOF
     echo -e "${GREEN}  ✓ 配置文件语法验证通过${NC}"
 
     cp -f -- "$TEMP_CONFIG" "$CONFIG_FILE" || return 1
+    chmod 600 "$CONFIG_FILE" || return 1
     write_alpine_xray_openrc_service || return 1
     rc-update add xray default >/dev/null 2>&1 || true
 
@@ -4248,7 +4418,7 @@ function install_alpine_service_entry() {
     ensure_alpine_supported || return 1
     while true; do
         line
-        center_echo "Alpine 专用入口" "${CYAN}${BOLD}"
+        center_echo "Alpine 覆盖安装" "${CYAN}${BOLD}"
         line
         echo -e "  ${CYAN}1.${NC} Alpine 专用 Xray（仅 Vless-Enc，无 Reality，无 padding）"
         echo -e "  ${CYAN}2.${NC} Alpine 专用 SS2022（shadowsocks-rust）"
@@ -4277,14 +4447,11 @@ function install_alpine_service_entry() {
 
 function install_xray() {
     line
-    echo -e "${GREEN}${BOLD}  多方式安装${NC}"
+    echo -e "${GREEN}${BOLD}  Xray 覆盖安装${NC}"
     line
 
     echo -e "\n${CYAN}[Step 1/7] 系统环境预检${NC}"
     ensure_systemd_supported || return 1
-    if ! check_timesync; then
-        handle_timesync_failure "  警告：时间同步未完成，这可能导致下载、证书校验、TLS 握手或 Reality 相关流程异常。" || return 1
-    fi
     check_bbr || true
 
     local INSTALL_MODE="auto"
@@ -4327,6 +4494,8 @@ function install_xray() {
     local XHTTP_WARNING_TEXT=""
     local XHTTP_REQ_V4=""
     local XHTTP_REQ_V6=""
+    local CHAIN_UNIFIED="0"
+    REALITY_GATE_RULES_JSON=""
 
     while true; do
         echo -e "
@@ -4358,7 +4527,7 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                     echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用指定值（$(printf '%02d' "$SCENARIO") $(get_install_scenario_label "$SCENARIO")）。${NC}"
                 else
                     SCENARIO="1"
-                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 单 Reality）。${NC}"
+                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 Reality 直出 / 多落地，非交互模式默认 0 个落地）。${NC}"
                 fi
             else
                 SCENARIO=$(choose_install_scenario)
@@ -4368,6 +4537,14 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         ;;
                     __MAIN__)
                         return 0
+                        ;;
+                    __CHAIN_SS__)
+                        SCENARIO="5"
+                        CHAIN_UNIFIED="1"
+                        ;;
+                    __CHAIN_VLESSENC__)
+                        SCENARIO="6"
+                        CHAIN_UNIFIED="1"
                         ;;
                 esac
             fi
@@ -4411,14 +4588,23 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                 XHTTP_MODE_ENABLED="0"
                 XHTTP_REQ_V4=""
                 XHTTP_REQ_V6=""
+                REALITY_GATE_RULES_JSON=""
+                if [[ "$SCENARIO" != "5" && "$SCENARIO" != "6" ]]; then
+                    CHAIN_UNIFIED="0"
+                fi
 
                 echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
 
                 case "$SCENARIO" in
                     1)
-                        echo -e "${CYAN}  说明：Reality 专用模板支持 0-3 个落地出口。0 代表纯直出；1-3 代表在直出之外，再增加 1-3 个落地入口。${NC}"
+                        echo -e "${CYAN}  说明：Reality 专用模板支持 0-10 个落地出口。0 代表纯直出；1-10 代表在直出之外增加对应数量的落地入口。${NC}"
                         echo -e "${CYAN}  这些入口共用同一个 Reality 监听端口，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
-                        REALITY_LANDING_COUNT=$(choose_reality_landing_count)
+                        if is_quick_install_noninteractive; then
+                            REALITY_LANDING_COUNT="0"
+                            echo -e "${YELLOW}  非交互快速安装默认使用纯直出，不添加 Reality 落地。${NC}"
+                        else
+                            REALITY_LANDING_COUNT=$(choose_reality_landing_count)
+                        fi
                         case "$REALITY_LANDING_COUNT" in
                             __BACK__)
                                 break
@@ -4434,18 +4620,31 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         ;;
                     5)
                         NEED_LANDING="1"
-                        LANDING_EXPECT="ss"
+                        if [[ "$CHAIN_UNIFIED" == "1" ]]; then
+                            LANDING_EXPECT="any"
+                        else
+                            LANDING_EXPECT="ss"
+                        fi
                         ;;
                     6)
                         NEED_LANDING="1"
-                        LANDING_EXPECT="vless"
+                        if [[ "$CHAIN_UNIFIED" == "1" ]]; then
+                            LANDING_EXPECT="any"
+                        else
+                            LANDING_EXPECT="vless"
+                        fi
                         ;;
                     7)
                         XHTTP_MODE_ENABLED="1"
                         XHTTP_SECURITY="reality"
                         echo -e "${CYAN}  说明：该模板使用 XHTTP + Reality，并通过 downloadSettings 做去程 / 回程分离。${NC}"
-                        echo -e "${CYAN}  这些入口共用同一个 XHTTP + Reality 监听端口，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
-                        REALITY_LANDING_COUNT=$(choose_reality_landing_count)
+                        echo -e "${CYAN}  这些入口共用同一个 XHTTP + Reality 监听端口，支持 0-10 个落地，通过不同用户 / UUID 区分直出与各个落地出口。${NC}"
+                        if is_quick_install_noninteractive; then
+                            REALITY_LANDING_COUNT="0"
+                            echo -e "${YELLOW}  非交互快速安装默认使用纯直出，不添加 XHTTP + Reality 落地。${NC}"
+                        else
+                            REALITY_LANDING_COUNT=$(choose_reality_landing_count)
+                        fi
                         case "$REALITY_LANDING_COUNT" in
                             __BACK__)
                                 break
@@ -4502,15 +4701,16 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                             echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
                             ;;
                         5)
-                            echo -e "${CYAN}    - SS2022 加密：${SS_METHOD_DESC}${NC}"
                             echo -e "${CYAN}    - 入口：SS 入站${NC}"
-                            echo -e "${CYAN}    - 出口：SS 落地${NC}"
+                            echo -e "${CYAN}    - 出口：任意支持的 SS / VLESS / Reality 出站${NC}"
+                            echo -e "${CYAN}    - 保留 direct 直出出站${NC}"
                             ;;
                         6)
                             echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
                             echo -e "${CYAN}    - Vless-Enc padding / delay：${ENC_PADDING_PROFILE_DESC}${NC}"
                             echo -e "${CYAN}    - 入口：Vless-Enc 入站${NC}"
-                            echo -e "${CYAN}    - 出口：VLESS / Reality / Vless-Enc${NC}"
+                            echo -e "${CYAN}    - 出口：任意支持的 SS / VLESS / Reality 出站${NC}"
+                            echo -e "${CYAN}    - 保留 direct 直出出站${NC}"
                             ;;
                         7)
                             echo -e "${CYAN}    - XHTTP + Reality：启用${NC}"
@@ -4725,6 +4925,7 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
         case "$LANDING_EXPECT" in
             ss) echo -e "${CYAN}  原因：当前模板为 SS 传导链，因此需要一个 ss:// 出站目标。${NC}" ;;
             vless) echo -e "${CYAN}  原因：当前模板为 Vless-Enc 传导链，因此需要一个 vless:// 出站目标。${NC}" ;;
+            any) echo -e "${CYAN}  原因：无 TLS 链式允许 ss:// 或 vless:// 出站目标（包含 Vless-Enc / Reality 参数）。${NC}" ;;
         esac
         while true; do
             read -r -p "请输入落地 / 传导链接: " LANDING_LINK
@@ -4736,6 +4937,12 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                     ;;
                 vless)
                     [[ "$LANDING_LINK" == vless://* ]] || { echo -e "${RED}  该模板只接受 vless:// 链接。${NC}"; continue; }
+                    ;;
+                any)
+                    case "$LANDING_LINK" in
+                        ss://*|vless://*) ;;
+                        *) echo -e "${RED}  请输入 ss:// 或 vless:// 链接。${NC}"; continue ;;
+                    esac
                     ;;
             esac
             LANDING_LINKS=("$LANDING_LINK")
@@ -4964,30 +5171,30 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
 
     if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" ]]; then
         if [[ "$SCENARIO" == "1" ]]; then
-            VLESS_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-zdd"
+            VLESS_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-zxray"
             if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                REALITY_LINK_V6="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-IPv6-zdd"
+                REALITY_LINK_V6="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-IPv6-zxray"
             fi
         else
-            VLESS_LINK="vless://${UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-zdd"
+            VLESS_LINK="vless://${UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-zxray"
             if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                REALITY_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-IPv6-zdd"
+                REALITY_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-IPv6-zxray"
             fi
         fi
     fi
     if [[ "$SCENARIO" == "3" || "$SCENARIO" == "4" || "$SCENARIO" == "6" ]]; then
         VLESS_ENC_ENCRYPTION_URI=$(url_encode "$VLESS_ENC_ENCRYPTION")
-        VLESS_ENC_LINK="vless://${UUID}@${SERVER_IP_URI}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-zdd"
+        VLESS_ENC_LINK="vless://${UUID}@${SERVER_IP_URI}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-zxray"
         if [[ -n "$SERVER_IP_URI_V6" ]]; then
-            VLESS_ENC_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-IPv6-zdd"
+            VLESS_ENC_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${LOCAL_ENC_PORT}?encryption=${VLESS_ENC_ENCRYPTION_URI}&flow=xtls-rprx-vision&headerType=none&type=tcp#Vless-Enc-IPv6-zxray"
         fi
     fi
     if [[ "$SCENARIO" == "2" || "$SCENARIO" == "4" || "$SCENARIO" == "5" ]]; then
         local SS_USERINFO
         SS_USERINFO=$(base64_encode_urlsafe_nopad "${LOCAL_SS_METHOD}:${LOCAL_SS_PWD}")
-        SS_NODE_LINK="ss://${SS_USERINFO}@${SERVER_IP_URI}:${LOCAL_SS_PORT}#SS-zdd"
+        SS_NODE_LINK="ss://${SS_USERINFO}@${SERVER_IP_URI}:${LOCAL_SS_PORT}#SS-zxray"
         if [[ -n "$SERVER_IP_URI_V6" ]]; then
-            SS_NODE_LINK_V6="ss://${SS_USERINFO}@${SERVER_IP_URI_V6}:${LOCAL_SS_PORT}#SS-IPv6-zdd"
+            SS_NODE_LINK_V6="ss://${SS_USERINFO}@${SERVER_IP_URI_V6}:${LOCAL_SS_PORT}#SS-IPv6-zxray"
         fi
     fi
 
@@ -5014,6 +5221,7 @@ EOF
       },
 EOF
 )
+            REALITY_GATE_RULES_JSON=$(build_reality_gate_rules_json "$DEST")
             if [[ "$REALITY_LANDING_COUNT" -gt 0 ]]; then
                 local idx
                 for idx in $(seq 1 "$REALITY_LANDING_COUNT"); do
@@ -5037,14 +5245,14 @@ EOF
       },
 EOF
 )
-                    REALITY_LANDING_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-zdd")
+                    REALITY_LANDING_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-zxray")
                     if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                        REALITY_LANDING_LINKS_V6+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-IPv6-zdd")
+                        REALITY_LANDING_LINKS_V6+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-IPv6-zxray")
                     fi
                 done
             fi
             INBOUNDS_JSON=$(cat <<EOF
-    {
+$(build_reality_gate_inbound_json "$DEST")    {
       "tag": "in-reality",
       "listen": "::",
       "port": ${PORT},
@@ -5060,10 +5268,20 @@ ${REALITY_CLIENTS_JSON}
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "${DEST}:443",
+          "dest": "127.0.0.1:${REALITY_GATE_PORT}",
           "serverNames": ["${DEST}"],
           "privateKey": "${PRIVATE_KEY}",
-          "shortIds": ["${SHORT_ID}"]
+          "shortIds": ["${SHORT_ID}"],
+          "limitFallbackUpload": {
+            "afterBytes": 8192,
+            "bytesPerSec": 1024,
+            "burstBytesPerSec": 0
+          },
+          "limitFallbackDownload": {
+            "afterBytes": 32768,
+            "bytesPerSec": 2048,
+            "burstBytesPerSec": 0
+          }
         }
       }
     }
@@ -5077,7 +5295,7 @@ ${REALITY_OUTBOUNDS_JSON}    {
     }
 EOF
 )
-            ALLOW_RULES_JSON="$REALITY_RULES_JSON"
+            ALLOW_RULES_JSON="${REALITY_GATE_RULES_JSON}${REALITY_RULES_JSON}"
             SUBS_TEXT=$(cat <<EOF
 当前架构:
   - 入口: Reality
@@ -5274,8 +5492,9 @@ EOF
 )
             ;;
         4)
+            REALITY_GATE_RULES_JSON=$(build_reality_gate_rules_json "$DEST")
             INBOUNDS_JSON=$(cat <<EOF
-    {
+$(build_reality_gate_inbound_json "$DEST")    {
       "tag": "in-reality",
       "listen": "::",
       "port": ${PORT},
@@ -5295,10 +5514,20 @@ EOF
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "${DEST}:443",
+          "dest": "127.0.0.1:${REALITY_GATE_PORT}",
           "serverNames": ["${DEST}"],
           "privateKey": "${PRIVATE_KEY}",
-          "shortIds": ["${SHORT_ID}"]
+          "shortIds": ["${SHORT_ID}"],
+          "limitFallbackUpload": {
+            "afterBytes": 8192,
+            "bytesPerSec": 1024,
+            "burstBytesPerSec": 0
+          },
+          "limitFallbackDownload": {
+            "afterBytes": 32768,
+            "bytesPerSec": 2048,
+            "burstBytesPerSec": 0
+          }
         }
       }
     },
@@ -5342,7 +5571,8 @@ EOF
     }
 EOF
 )
-            ALLOW_RULES_JSON=$(cat <<'EOF'
+            ALLOW_RULES_JSON=$(cat <<EOF
+${REALITY_GATE_RULES_JSON}
       {
         "type": "field",
         "inboundTag": [
@@ -5593,7 +5823,7 @@ EOF
       },
 EOF
 )
-            XHTTP_ENTRY_LINKS+=("$(build_xhttp_reality_full_link "${REALITY_DIRECT_UUID}" "${XHTTP_UP_IP_URI}" "${PORT}" "${XHTTP_DOWN_IP_RAW}" "${PORT}" "${DEST}" "firefox" "${PUBLIC_KEY}" "${SHORT_ID}" "${XHTTP_PATH}" "XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-直出-zdd")")
+            XHTTP_ENTRY_LINKS+=("$(build_xhttp_reality_full_link "${REALITY_DIRECT_UUID}" "${XHTTP_UP_IP_URI}" "${PORT}" "${XHTTP_DOWN_IP_RAW}" "${PORT}" "${DEST}" "firefox" "${PUBLIC_KEY}" "${SHORT_ID}" "${XHTTP_PATH}" "XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-直出-zxray")")
             XHTTP_PATCH_LABELS+=("XHTTP + Reality 直出入口")
             XHTTP_PATCH_FILES+=("${XHTTP_PATCH_DIR}/xhttp_reality_direct_patch.json")
             write_xhttp_client_patch_file "${XHTTP_PATCH_DIR}/xhttp_reality_direct_patch.json" "$XHTTP_DOWN_IP_RAW" "$PORT" "reality" "${DEST}" "firefox" "$PUBLIC_KEY" "$SHORT_ID" "$XHTTP_PATH"
@@ -5620,15 +5850,16 @@ EOF
       },
 EOF
 )
-                    XHTTP_ENTRY_LINKS+=("$(build_xhttp_reality_full_link "${REALITY_LANDING_UUIDS[$((idx-1))]}" "${XHTTP_UP_IP_URI}" "${PORT}" "${XHTTP_DOWN_IP_RAW}" "${PORT}" "${DEST}" "firefox" "${PUBLIC_KEY}" "${SHORT_ID}" "${XHTTP_PATH}" "XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-落地${idx}-zdd")")
+                    XHTTP_ENTRY_LINKS+=("$(build_xhttp_reality_full_link "${REALITY_LANDING_UUIDS[$((idx-1))]}" "${XHTTP_UP_IP_URI}" "${PORT}" "${XHTTP_DOWN_IP_RAW}" "${PORT}" "${DEST}" "firefox" "${PUBLIC_KEY}" "${SHORT_ID}" "${XHTTP_PATH}" "XHTTP-Reality-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-落地${idx}-zxray")")
                     XHTTP_PATCH_LABELS+=("XHTTP + Reality 落地入口 ${idx}")
                     XHTTP_PATCH_FILES+=("${XHTTP_PATCH_DIR}/xhttp_reality_landing${idx}_patch.json")
                     write_xhttp_client_patch_file "${XHTTP_PATCH_DIR}/xhttp_reality_landing${idx}_patch.json" "$XHTTP_DOWN_IP_RAW" "$PORT" "reality" "${DEST}" "firefox" "$PUBLIC_KEY" "$SHORT_ID" "$XHTTP_PATH"
                     XHTTP_PATCH_JSONS+=("$XHTTP_PATCH_LAST_JSON")
                 done
             fi
+            REALITY_GATE_RULES_JSON=$(build_reality_gate_rules_json "$DEST")
             INBOUNDS_JSON=$(cat <<EOF
-    {
+$(build_reality_gate_inbound_json "$DEST")    {
       "tag": "in-xhttp-reality",
       "listen": "::",
       "port": ${PORT},
@@ -5644,10 +5875,20 @@ ${XHTTP_REALITY_CLIENTS_JSON}
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "${DEST}:443",
+          "dest": "127.0.0.1:${REALITY_GATE_PORT}",
           "serverNames": ["${DEST}"],
           "privateKey": "${PRIVATE_KEY}",
-          "shortIds": ["${SHORT_ID}"]
+          "shortIds": ["${SHORT_ID}"],
+          "limitFallbackUpload": {
+            "afterBytes": 8192,
+            "bytesPerSec": 1024,
+            "burstBytesPerSec": 0
+          },
+          "limitFallbackDownload": {
+            "afterBytes": 32768,
+            "bytesPerSec": 2048,
+            "burstBytesPerSec": 0
+          }
         },
         "xhttpSettings": {
           "host": "",
@@ -5666,7 +5907,7 @@ ${XHTTP_REALITY_OUTBOUNDS_JSON}    {
     }
 EOF
 )
-            ALLOW_RULES_JSON="$XHTTP_REALITY_RULES_JSON"
+            ALLOW_RULES_JSON="${REALITY_GATE_RULES_JSON}${XHTTP_REALITY_RULES_JSON}"
             SUBS_TEXT=$(cat <<EOF
 当前架构:
   - 入口: XHTTP + Reality
@@ -5717,7 +5958,7 @@ EOF
             ;;
         8)
             VLESS_ENC_ENCRYPTION_URI=$(url_encode "$VLESS_ENC_ENCRYPTION")
-            XHTTP_ENTRY_LINKS+=("$(build_xhttp_vlessenc_full_link "${UUID}" "${XHTTP_UP_IP_URI}" "${LOCAL_ENC_PORT}" "${XHTTP_DOWN_IP_RAW}" "${LOCAL_ENC_PORT}" "${VLESS_ENC_ENCRYPTION}" "${XHTTP_PATH}" "XHTTP-Vless-Enc-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-实验-zdd")")
+            XHTTP_ENTRY_LINKS+=("$(build_xhttp_vlessenc_full_link "${UUID}" "${XHTTP_UP_IP_URI}" "${LOCAL_ENC_PORT}" "${XHTTP_DOWN_IP_RAW}" "${LOCAL_ENC_PORT}" "${VLESS_ENC_ENCRYPTION}" "${XHTTP_PATH}" "XHTTP-Vless-Enc-$(get_xhttp_split_direction_share_name "$XHTTP_SPLIT_DIRECTION")-实验-zxray")")
             XHTTP_PATCH_LABELS+=("XHTTP + Vless-Enc 实验入口")
             XHTTP_PATCH_FILES+=("${XHTTP_PATCH_DIR}/xhttp_vlessenc_patch.json")
             write_xhttp_client_patch_file "${XHTTP_PATCH_DIR}/xhttp_vlessenc_patch.json" "$XHTTP_DOWN_IP_RAW" "$LOCAL_ENC_PORT" "none" "" "" "" "" "$XHTTP_PATH"
@@ -5805,7 +6046,10 @@ EOF
     esac
 
     local TEMP_CONFIG
-    TEMP_CONFIG=$(mktemp /tmp/xray_config.XXXXXX.json)
+    TEMP_CONFIG=$(mktemp /tmp/xray_config.XXXXXX.json) || {
+        echo -e "${RED}  ✗ 无法创建临时配置文件。${NC}"
+        return 1
+    }
     add_tmp_file "$TEMP_CONFIG"
 
     cat > "$TEMP_CONFIG" <<JSONEOF
@@ -5846,6 +6090,7 @@ JSONEOF
     echo -e "${GREEN}  ✓ 配置文件语法验证通过${NC}"
 
     cp -f -- "$TEMP_CONFIG" "$CONFIG_FILE" || return 1
+    chmod 600 "$CONFIG_FILE" || return 1
 
     systemctl enable xray >/dev/null 2>&1 || true
     systemctl restart xray
@@ -5884,20 +6129,38 @@ JSONEOF
 
 function install_default_flow() {
     if is_alpine_system; then
-        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC。${NC}"
-        echo -e "${YELLOW}  请使用 10 号 Alpine 专用入口，再选择 Vless-Enc 或 SS2022。${NC}"
-        return 1
+        echo -e "${YELLOW}  检测到当前为 Alpine / OpenRC，进入 Alpine 安装方案。${NC}"
+        install_alpine_service_entry
+        return $?
     fi
     install_xray
 }
 
 function run_quick_install_entry() {
     if is_alpine_system; then
-        echo -e "${YELLOW}检测到 Alpine / OpenRC。${NC}"
-        echo -e "${YELLOW}请先进入主菜单后执行 10 号 Alpine 专用入口。${NC}"
-        return 1
+        install_alpine_service_entry
+        return $?
     fi
     install_xray
+}
+
+function update_restart_menu() {
+    while true; do
+        line
+        center_echo "更新 / 重启当前服务" "${CYAN}${BOLD}"
+        line
+        echo -e "  ${CYAN}1.${NC} 更新核心 / 组件并按当前逻辑处理服务"
+        echo -e "  ${CYAN}2.${NC} 仅重启当前服务"
+        echo -e "  ${CYAN}0.${NC} 返回主菜单"
+        line
+        read -r -p "选择 [0/1/2]: " UPDATE_RESTART_CHOICE
+        case "$UPDATE_RESTART_CHOICE" in
+            1|01) update_current_service; return $? ;;
+            2|02) restart_current_service; return $? ;;
+            0|00) return 0 ;;
+            *) echo -e "${RED}无效输入，请重新选择。${NC}"; sleep 1 ;;
+        esac
+    done
 }
 
 function update_current_service() {
@@ -5912,7 +6175,7 @@ function update_current_service() {
             ;;
         xray|"")
             if is_alpine_system; then
-                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先执行覆盖安装选择 Alpine 方案。${NC}"
                 return 1
             fi
             update_xray
@@ -5932,7 +6195,7 @@ function restart_current_service() {
             ;;
         xray|"")
             if is_alpine_system; then
-                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先执行覆盖安装选择 Alpine 方案。${NC}"
                 return 1
             fi
             restart_xray
@@ -5952,7 +6215,7 @@ function show_runtime_status() {
             ;;
         xray|"")
             if is_alpine_system; then
-                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先执行覆盖安装选择 Alpine 方案。${NC}"
                 return 1
             fi
             show_status
@@ -5972,7 +6235,7 @@ function edit_runtime_config() {
             ;;
         xray|"")
             if is_alpine_system; then
-                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先进入 10 号 Alpine 专用入口。${NC}"
+                echo -e "${YELLOW}当前为 Alpine / OpenRC，请先执行覆盖安装选择 Alpine 方案。${NC}"
                 return 1
             fi
             edit_config
@@ -5986,17 +6249,17 @@ function should_auto_confirm_uninstall() {
 
 function uninstall_alpine_all_and_delete_self() {
     line
-    center_echo "卸载脚本和 Alpine Xray / SS2022" "${RED}${BOLD}"
+    center_echo "完整卸载 Alpine Xray / SS2022" "${RED}${BOLD}"
     line
     echo -e "${RED}  - 卸载 Alpine Xray 与 shadowsocks-rust${NC}"
-    echo -e "${RED}  - 删除 Xray / SS2022 配置、OpenRC 服务文件与常见残留${NC}"
-    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
-    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    echo -e "${RED}  - 删除配置、服务文件、脚本源文件与生成目录${NC}"
+    echo -e "${RED}  - 删除 zxray 启动命令${NC}"
+    echo -e "${RED}  - 删除临时文件、日志与生成的 txt 文件${NC}"
     line
     if should_auto_confirm_uninstall; then
         echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
     else
-        read -r -p "输入 yes 继续: " CONFIRM
+        read -r -p "输入 yes 确认完整卸载: " CONFIRM
         if [[ "$CONFIRM" != "yes" ]]; then
             echo -e "${YELLOW}已取消。${NC}"
             return 0
@@ -6005,6 +6268,7 @@ function uninstall_alpine_all_and_delete_self() {
 
     cleanup_xray_artifacts_alpine
     cleanup_alpine_ss_artifacts
+    cleanup_alpine_service_backups
     cleanup_doudou_runtime
 
     echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
@@ -6035,7 +6299,11 @@ function update_xray() {
 
     local update_log
     local update_ret
-    update_log=$(mktemp /tmp/xray-update.XXXXXX.log)
+    update_log=$(mktemp /tmp/xray-update.XXXXXX.log) || {
+        echo -e "${RED}  ✗ 无法创建 Xray 更新日志临时文件。${NC}"
+        line
+        return 1
+    }
     add_tmp_file "$update_log"
 
     set +o pipefail
@@ -6291,43 +6559,224 @@ function cleanup_xray_artifacts() {
     systemctl reset-failed >/dev/null 2>&1 || true
 }
 
+function cleanup_legacy_quick_paths() {
+    local legacy_path
+    local -a legacy_paths=(
+        "/usr/local/bin/zxray"
+        "/usr/local/bin/zdd"
+        "/usr/local/bin/doudou"
+        "/usr/local/bin/xray-manager"
+        "/usr/bin/zxray"
+        "/usr/bin/zdd"
+        "/usr/bin/doudou"
+        "/usr/bin/xray-manager"
+        "/usr/sbin/zxray"
+        "/usr/sbin/zdd"
+        "/usr/sbin/doudou"
+        "/usr/sbin/xray-manager"
+        "/root/bin/zxray"
+        "/root/bin/zdd"
+        "/root/bin/doudou"
+        "/root/bin/xray-manager"
+        "/root/.local/bin/zxray"
+        "/root/.local/bin/zdd"
+        "/root/.local/bin/doudou"
+        "/root/.local/bin/xray-manager"
+    )
+
+    for legacy_path in "${legacy_paths[@]}"; do
+        remove_path_quiet "$legacy_path" "$legacy_path"
+    done
+}
+
+function canonicalize_path() {
+    local path="$1"
+    local dir=""
+    local base=""
+
+    if command -v readlink >/dev/null 2>&1; then
+        readlink -f -- "$path" 2>/dev/null && return 0
+    fi
+
+    dir=$(dirname -- "$path" 2>/dev/null || true)
+    base=$(basename -- "$path" 2>/dev/null || true)
+    [[ -n "$dir" && -n "$base" ]] || return 1
+    (
+        cd -- "$dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base"
+    ) && return 0
+    return 1
+}
+
+function remove_current_script_source_if_safe() {
+    local source_path=""
+    local real_path=""
+
+    source_path=$(resolve_self_source_path 2>/dev/null || true)
+    [[ -n "$source_path" ]] || return 0
+
+    case "$source_path" in
+        /proc/*|/dev/*)
+            return 0
+            ;;
+    esac
+
+    real_path=$(canonicalize_path "$source_path" 2>/dev/null || true)
+    [[ -n "$real_path" ]] || real_path="$source_path"
+
+    case "$real_path" in
+        "$SELF_SCRIPT_PATH"|/usr/local/lib/doudou/*|/usr/local/lib/zxray/*|/tmp/doudou-entry.*.sh|/root/xray-manager*.sh|/root/zxray*.sh|/root/zdd-xray*.sh|/root/doudou-xray*.sh)
+            remove_path_quiet "$real_path" "$real_path"
+            ;;
+    esac
+}
+
+function remove_recorded_source_if_safe() {
+    local source_path=""
+    local expected_sha=""
+    local actual_sha=""
+    local owner_uid=""
+    local -a record_lines=()
+
+    [[ -f "$SOURCE_RECORD_FILE" ]] || return 0
+    mapfile -t record_lines < "$SOURCE_RECORD_FILE" 2>/dev/null || return 0
+    [[ ${#record_lines[@]} -eq 2 ]] || return 0
+
+    source_path="${record_lines[0]}"
+    expected_sha="${record_lines[1],,}"
+    [[ -n "$source_path" && "$source_path" != *$'\n'* && "$source_path" != *$'\r'* ]] || return 0
+    [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || return 0
+
+    case "$source_path" in
+        /proc/*|/dev/*|"$SELF_SCRIPT_PATH"|/usr/local/lib/doudou/*|/usr/local/lib/zxray/*)
+            return 0
+            ;;
+    esac
+    [[ -f "$source_path" && ! -L "$source_path" ]] || return 0
+
+    owner_uid=$(stat -Lc '%u' -- "$source_path" 2>/dev/null || true)
+    [[ "$owner_uid" == "0" ]] || return 0
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    actual_sha=$(sha256sum -- "$source_path" 2>/dev/null | awk 'NR==1 {print tolower($1)}')
+    [[ "$actual_sha" == "$expected_sha" ]] || {
+        echo -e "${YELLOW}  ⚠ 原始脚本内容已变化，为避免误删，保留：${source_path}${NC}"
+        return 0
+    }
+
+    if rm -f -- "$source_path"; then
+        echo -e "${GREEN}  ✓ 已删除原始安装脚本：${source_path}${NC}"
+    else
+        echo -e "${YELLOW}  ⚠ 原始安装脚本删除失败：${source_path}${NC}"
+    fi
+}
+
+function source_file_is_xray_manager() {
+    local source_path="$1"
+    [[ -f "$source_path" && ! -L "$source_path" ]] || return 1
+    grep -Fq 'DATA_DIR="/usr/local/share/doudou-xray"' "$source_path" 2>/dev/null \
+        && grep -Fq 'QUICK_BIN="/usr/local/bin/zxray"' "$source_path" 2>/dev/null \
+        && grep -Fq 'function cleanup_doudou_runtime' "$source_path" 2>/dev/null
+}
+
+function remove_legacy_root_script_sources() {
+    local source_path
+    local owner_uid=""
+    local recorded_source=""
+
+    if [[ -f "$SOURCE_RECORD_FILE" ]]; then
+        recorded_source=$(head -n 1 "$SOURCE_RECORD_FILE" 2>/dev/null || true)
+    fi
+
+    for source_path in /root/*.sh; do
+        [[ -e "$source_path" || -L "$source_path" ]] || continue
+        [[ "$source_path" != "$SELF_SCRIPT_PATH" ]] || continue
+        [[ -z "$recorded_source" || "$source_path" != "$recorded_source" ]] || continue
+        source_file_is_xray_manager "$source_path" || continue
+        owner_uid=$(stat -c '%u' -- "$source_path" 2>/dev/null || true)
+        [[ "$owner_uid" == "0" ]] || continue
+        if rm -f -- "$source_path"; then
+            echo -e "${GREEN}  ✓ 已删除旧的 root 脚本源文件：${source_path}${NC}"
+        fi
+    done
+}
+
+function cleanup_script_temp_artifacts() {
+    local temp_path
+    local -a temp_paths=(
+        /tmp/doudou-entry.*.sh
+        /tmp/doudou-self-update.*.sh
+        /tmp/xray-install.*.sh
+        /tmp/xray-install-curl.*.log
+        /tmp/xray-update.*.log
+        /tmp/xray_config.*.json
+        /tmp/xray-alpine-config.*.json
+        /tmp/ssserver-foreground.*.log
+        /tmp/alpine-manual-time.*.log
+    )
+
+    for temp_path in "${temp_paths[@]}"; do
+        [[ -e "$temp_path" || -L "$temp_path" ]] || continue
+        remove_path_quiet "$temp_path" "$temp_path"
+    done
+}
+
+function cleanup_bbr_config() {
+    if [[ -f "$SYSCTL_BBR_BACKUP_FILE" ]]; then
+        if mv -f -- "$SYSCTL_BBR_BACKUP_FILE" "$SYSCTL_BBR_FILE"; then
+            echo -e "${GREEN}  ✓ 已恢复原有 BBR 配置: ${SYSCTL_BBR_FILE}${NC}"
+        else
+            echo -e "${YELLOW}  ⚠ 原有 BBR 配置恢复失败，已保留备份: ${SYSCTL_BBR_BACKUP_FILE}${NC}"
+        fi
+        return 0
+    fi
+
+    if [[ -f "$SYSCTL_BBR_FILE" ]] && grep -q '^# BBR + FQ' "$SYSCTL_BBR_FILE"; then
+        remove_path_quiet "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_FILE"
+    fi
+}
+
 function cleanup_doudou_runtime() {
-    echo -e "${YELLOW}  清理脚本自身文件...${NC}"
+    echo -e "${YELLOW}  清理脚本、原始源文件与临时残留...${NC}"
 
     remove_path_quiet "$INFO_FILE" "$INFO_FILE"
     remove_path_quiet "$SUB_FILE" "$SUB_FILE"
     remove_path_quiet "$SERVICE_KIND_FILE" "$SERVICE_KIND_FILE"
     remove_path_quiet "$ALPINE_RESOLV_BACKUP" "$ALPINE_RESOLV_BACKUP"
     remove_path_quiet "$SNI_POOL_FILE" "$SNI_POOL_FILE"
-    remove_path_quiet "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_FILE"
-    remove_path_quiet "$QUICK_BIN" "$QUICK_BIN"
-    remove_path_quiet "$LEGACY_QUICK_BIN" "$LEGACY_QUICK_BIN"
+    cleanup_bbr_config
+    cleanup_legacy_quick_paths
+    remove_recorded_source_if_safe
+    remove_current_script_source_if_safe
+    remove_legacy_root_script_sources
+    cleanup_script_temp_artifacts
     remove_path_quiet "$SELF_DIR" "$SELF_DIR"
     remove_path_quiet "$DATA_DIR" "$DATA_DIR"
 }
 
 function cleanup_script_only_runtime() {
-    echo -e "${YELLOW}  清理脚本自身文件...${NC}"
+    echo -e "${YELLOW}  清理脚本、原始源文件与临时残留...${NC}"
 
     remove_path_quiet "$INFO_FILE" "$INFO_FILE"
     remove_path_quiet "$SUB_FILE" "$SUB_FILE"
     remove_path_quiet "$SERVICE_KIND_FILE" "$SERVICE_KIND_FILE"
     remove_path_quiet "$ALPINE_RESOLV_BACKUP" "$ALPINE_RESOLV_BACKUP"
     remove_path_quiet "$SNI_POOL_FILE" "$SNI_POOL_FILE"
-    remove_path_quiet "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_FILE"
-    remove_path_quiet "$QUICK_BIN" "$QUICK_BIN"
-    remove_path_quiet "$LEGACY_QUICK_BIN" "$LEGACY_QUICK_BIN"
+    cleanup_bbr_config
+    cleanup_legacy_quick_paths
+    remove_recorded_source_if_safe
+    remove_current_script_source_if_safe
+    remove_legacy_root_script_sources
+    cleanup_script_temp_artifacts
     remove_path_quiet "$SELF_DIR" "$SELF_DIR"
     remove_path_quiet "$DATA_DIR" "$DATA_DIR"
 }
 
 function uninstall_script_only() {
     line
-    center_echo "仅卸载脚本" "${RED}${BOLD}"
+    center_echo "仅卸载脚本文件" "${RED}${BOLD}"
     line
-    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
-    echo -e "${RED}  - 删除本脚本存储目录、生成的 txt 文件与脚本写入项${NC}"
-    echo -e "${RED}  - 保留当前服务、配置与相关残留${NC}"
+    echo -e "${RED}  - 删除 zxray 启动命令${NC}"
+    echo -e "${RED}  - 删除脚本源文件、存储目录与临时残留${NC}"
+    echo -e "${RED}  - 保留当前服务、配置与 Xray / SS-Rust 运行文件${NC}"
     line
     if ! ask_yes_no "是否仅卸载脚本并保留当前服务与配置"; then
         echo -e "${YELLOW}已取消。${NC}"
@@ -6343,17 +6792,17 @@ function uninstall_script_only() {
 
 function uninstall_xray_and_delete_self() {
     line
-    center_echo "卸载脚本和 Xray" "${RED}${BOLD}"
+    center_echo "完整卸载 Xray" "${RED}${BOLD}"
     line
     echo -e "${RED}  - 卸载 Xray${NC}"
-    echo -e "${RED}  - 删除配置、服务文件与常见残留${NC}"
-    echo -e "${RED}  - 删除快捷指令 zdd${NC}"
-    echo -e "${RED}  - 删除本脚本存储目录与生成的 txt 文件${NC}"
+    echo -e "${RED}  - 删除配置、服务文件、脚本源文件与生成目录${NC}"
+    echo -e "${RED}  - 删除 zxray 启动命令${NC}"
+    echo -e "${RED}  - 删除临时文件、日志与生成的 txt 文件${NC}"
     line
     if should_auto_confirm_uninstall; then
         echo -e "${YELLOW}  检测到快捷完整卸载：已自动确认继续。${NC}"
     else
-        read -r -p "输入 yes 继续: " CONFIRM
+        read -r -p "输入 yes 确认完整卸载: " CONFIRM
         if [[ "$CONFIRM" != "yes" ]]; then
             echo -e "${YELLOW}已取消。${NC}"
             return 0
@@ -6380,10 +6829,10 @@ function uninstall_xray_and_delete_self() {
 function uninstall_menu() {
     while true; do
         line
-        center_echo "卸载 脚本 Xray SS-Rust" "${RED}${BOLD}"
+        center_echo "卸载脚本、Xray、SS-Rust" "${RED}${BOLD}"
         line
-        echo -e "  ${CYAN}1.${NC} 仅卸载脚本"
-        echo -e "  ${CYAN}2.${NC} 卸载 脚本 Xray SS-Rust"
+        echo -e "  ${CYAN}1.${NC} 仅卸载脚本文件"
+        echo -e "  ${CYAN}2.${NC} 完整卸载脚本、Xray、SS-Rust"
         echo -e "  ${CYAN}0.${NC} 返回主菜单"
         line
         read -r -p "选择 [0/1/2]: " UNINSTALL_CHOICE
@@ -6460,14 +6909,8 @@ function get_xray_version_badge() {
 
 function show_main_header() {
     line
-    echo -e "  ${GREEN}${BOLD}Xray Manager ${SCRIPT_VERSION}${NC}"
-    echo -e "  ${GREEN}${BRAND_HEADER}${NC}"
-    echo -e "  ${YELLOW}SS 和 Vless-Enc 不适合过墙；Vless-Enc 的 padding 功能慎用${NC}"
-    echo -e "  Xray 状态 : $(get_xray_running_badge)"
-    echo -e "  Xray 版本 : $(get_xray_version_badge)"
-    echo -e "  ${CYAN}快捷指令:${NC}"
-    echo -e "    ${CYAN}zdd xray${NC}    | ${CYAN}zdd install${NC}"
-    echo -e "    ${CYAN}zdd update${NC}  | ${CYAN}zdd uninstall${NC}"
+    center_echo "Xray Manager ${SCRIPT_VERSION}" "${BRIGHT_YELLOW}${BOLD}"
+    echo -e "  ${CYAN}启动命令: ${BRIGHT_YELLOW}zxray${NC}"
     line
 }
 
@@ -6493,17 +6936,11 @@ fi
 while true; do
     clear_screen
     show_main_header
-    echo -e "  ${CYAN}01.${NC} 覆盖安装"
-    echo -e "  ${CYAN}02.${NC} 更新 Xray"
-    echo -e "  ${CYAN}03.${NC} 重启 Xray"
-    echo -e "  ${CYAN}04.${NC} 查看订阅链接"
-    echo -e "  ${CYAN}05.${NC} 查看状态 & 日志"
-    echo -e "  ${CYAN}06.${NC} SNI 管理 & 测速"
-    echo -e "  ${CYAN}07.${NC} 环境检测（时间 & BBR）"
-    echo -e "  ${CYAN}08.${NC} 修改 Xray 配置（退出后重启服务生效）"
-    echo -e "  ${CYAN}09.${NC} 卸载 Xray 脚本等文件（可单独卸载脚本）"
-    echo -e "  ${CYAN}10.${NC} Alpine 专用 Vless-Enc / SS2022（仅落地）"
-    echo -e "  ${CYAN}00.${NC} 退出脚本"
+    echo -e "  ${CYAN}1.${NC} 覆盖安装"
+    echo -e "  ${CYAN}2.${NC} 更新/重启 Xray"
+    echo -e "  ${CYAN}3.${NC} 查看订阅链接"
+    echo -e "  ${CYAN}4.${NC} 完整卸载"
+    echo -e "  ${CYAN}5.${NC} 退出脚本"
     line
     read -r -p "选择: " CHOICE
 
@@ -6512,16 +6949,10 @@ while true; do
             continue
             ;;
         1|01) install_default_flow    ;;
-        2|02) update_current_service  ;;
-        3|03) restart_current_service ;;
-        4|04) show_info               ;;
-        5|05) show_runtime_status     ;;
-        6|06) manage_sni              ;;
-        7|07) run_syscheck            ;;
-        8|08) edit_runtime_config     ;;
-        9|09) uninstall_menu          ;;
-        10)   install_alpine_service_entry   ;;
-        0|00)
+        2|02) update_restart_menu     ;;
+        3|03) show_info               ;;
+        4|04) uninstall_current_service_and_delete_self ;;
+        5|05)
             echo -e "${GREEN}已退出。${NC}"
             sleep 0.3
             clear_screen
