@@ -6969,7 +6969,7 @@ function get_xray_version_badge() {
 
 function show_main_header() {
     line
-    center_echo "Xray Manager ${SCRIPT_VERSION}" "${BRIGHT_YELLOW}${BOLD}"
+    center_echo "Xray Manager V 0.1.0${SCRIPT_VERSION}" "${BRIGHT_YELLOW}${BOLD}"
     center_echo "启动命令: zxray"
     line
 }
