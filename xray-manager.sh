@@ -7397,7 +7397,7 @@ function get_xray_version_badge() {
 function show_main_header() {
     line
     center_echo "X R A Y  M A N A G E R" "${BRIGHT_YELLOW}${BOLD}"
-    center_echo "输入 zxray 可重新唤醒菜单" "${CYAN}"
+    echo "输入 zxray 可重新唤醒菜单" "${CYAN}"
     line
 }
 
