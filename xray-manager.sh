@@ -7,7 +7,6 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BRIGHT_YELLOW='\033[1;93m'
-BLUE='\033[1;94m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
@@ -138,7 +137,7 @@ function add_tmp_file() {
 
 function cleanup_tmp_files() {
     local f
-    for f in "${TMP_FILES[@]}"; do
+    for f in "${TMP_FILES[@]-}"; do
         [[ -n "$f" && -e "$f" ]] && rm -f -- "$f"
     done
     TMP_FILES=()
@@ -581,7 +580,7 @@ function load_sni_pool() {
     if [[ -f "$SNI_POOL_FILE" ]]; then
         while IFS= read -r linebuf; do
             linebuf=$(printf '%s' "$linebuf" | tr -d '\n')
-            [[ -n "$linebuf" ]] && DEST_OPTIONS+=("$linebuf")
+            [[ -n "$linebuf" && "$linebuf" =~ ^[A-Za-z0-9._-]+$ ]] && DEST_OPTIONS+=("$linebuf")
         done < "$SNI_POOL_FILE"
         if [[ ${#DEST_OPTIONS[@]} -gt 0 ]]; then
             SNI_POOL_SOURCE="file"
@@ -849,7 +848,7 @@ function read_manual_sni() {
     local value
     while true; do
         read -r -p "$prompt" value
-        value=$(echo "$value" | tr -d '[:space:]')
+        value=$(printf '%s' "$value" | tr -d '[:space:]')
         if [[ -z "$value" ]]; then
             echo -e "${RED}  SNI 不能为空。${NC}" >&2
             continue
@@ -1358,6 +1357,11 @@ function install_deps() {
                     echo -e "${YELLOW}  等待 dpkg/apt 锁释放（后台可能有自动更新在运行）...${NC}"
                 fi
                 lock_waited=$((lock_waited + 1))
+                if [[ $lock_waited -ge 60 ]]; then
+                    echo -e "${RED}  ✗ 等待 dpkg/apt 锁超过 3 分钟，已停止等待。${NC}"
+                    echo -e "${YELLOW}  请确认后台更新没有卡住，稍后重新执行安装。${NC}"
+                    return 1
+                fi
                 sleep 3
             done
         fi
@@ -2302,7 +2306,7 @@ function ensure_sni_benchmark_ready() {
     if is_alpine_system; then
         echo -e "${CYAN}  建议：先执行覆盖安装选择 Alpine SS2022，或手动安装：apk add openssl coreutils${NC}"
     else
-        echo -e "${CYAN}  建议：先执行 01 安装，或手动安装 openssl / coreutils 后再测速。${NC}"
+        echo -e "${CYAN}  建议：先执行主菜单 1，或手动安装 openssl / coreutils 后再测速。${NC}"
     fi
     return 1
 }
@@ -2539,20 +2543,20 @@ function download_and_run_xray_installer() {
         if curl -fsSL --connect-timeout 10 --max-time 60 -o "$installer" "$url" 2>"$curl_err"; then
             echo -e "${GREEN}  ✓ 下载成功${NC}"
             break
-        fi
-
-        curl_ret=$?
-        echo -e "${RED}  ✗ 第 ${retry}/${max_retry} 次下载失败${NC}"
-        print_download_error_reason "$curl_ret" "$curl_err"
-
-        if [[ "$retry" -lt "$max_retry" ]]; then
-            echo -e "${YELLOW}    处理：${sleep_seconds} 秒后自动重试...${NC}"
-            sleep "$sleep_seconds"
         else
-            echo -e "${RED}  ✗ 官方安装脚本下载失败，已达到最大重试次数。${NC}"
-            echo -e "${YELLOW}    结论：更像是外部下载源或网络链路异常，不是当前管理脚本菜单逻辑错误。${NC}"
-            echo -e "${YELLOW}    建议：稍后重试，或手动检查 GitHub / DNS / 出站网络。${NC}"
-            return 1
+            curl_ret=$?
+            echo -e "${RED}  ✗ 第 ${retry}/${max_retry} 次下载失败${NC}"
+            print_download_error_reason "$curl_ret" "$curl_err"
+
+            if [[ "$retry" -lt "$max_retry" ]]; then
+                echo -e "${YELLOW}    处理：${sleep_seconds} 秒后自动重试...${NC}"
+                sleep "$sleep_seconds"
+            else
+                echo -e "${RED}  ✗ 官方安装脚本下载失败，已达到最大重试次数。${NC}"
+                echo -e "${YELLOW}    结论：更像是外部下载源或网络链路异常，不是当前管理脚本菜单逻辑错误。${NC}"
+                echo -e "${YELLOW}    建议：稍后重试，或手动检查 GitHub / DNS / 出站网络。${NC}"
+                return 1
+            fi
         fi
     done
 
@@ -2721,7 +2725,7 @@ function print_saved_txt_files() {
 }
 
 function print_quick_command() {
-    center_echo "命令: zxray" "${BLUE}${BOLD}"
+    center_echo "输入 zxray 可重新唤醒菜单" "${CYAN}"
 }
 
 function render_saved_meta_block() {
@@ -2763,7 +2767,7 @@ function manage_sni() {
         echo -e "${CYAN}${BOLD}  SNI 管理 & 测速${NC}"
         line
         show_sni_pool_source
-        echo -e "  当前候选池（共 ${#DEST_OPTIONS[@]} 个）："
+        echo -e "${CYAN}  当前候选池（共 ${#DEST_OPTIONS[@]} 个）：${NC}"
         local idx=1 d
         for d in "${DEST_OPTIONS[@]}"; do
             printf "    ${CYAN}%2d.${NC} %s\n" "$idx" "$d"
@@ -2784,9 +2788,11 @@ function manage_sni() {
                 ;;
             a|A)
                 read -r -p "新增域名: " NEW_DOMAIN
-                NEW_DOMAIN=$(echo "$NEW_DOMAIN" | tr -d '[:space:]')
+                NEW_DOMAIN=$(printf '%s' "$NEW_DOMAIN" | tr -d '[:space:]')
                 if [[ -z "$NEW_DOMAIN" ]]; then
                     echo -e "${RED}  域名不能为空。${NC}"
+                elif [[ ! "$NEW_DOMAIN" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                    echo -e "${RED}  域名仅允许字母、数字、点、下划线和连字符。${NC}"
                 elif printf '%s\n' "${DEST_OPTIONS[@]}" | grep -Fxq "$NEW_DOMAIN"; then
                     echo -e "${YELLOW}  该域名已存在，无需重复添加。${NC}"
                 else
@@ -2820,13 +2826,13 @@ function manage_sni() {
                     save_sni_pool
                     echo -e "${GREEN}  ✓ 已恢复内置默认候选池（${#DEST_OPTIONS[@]} 个域名）${NC}"
                 else
-                    echo -e "  已取消。"
+                    echo -e "${YELLOW}  已取消。${NC}"
                 fi
                 sleep 1
                 ;;
             t|T)
                 benchmark_dest
-                echo -e "${CYAN}  提示：当前会话内重新运行安装（主菜单 01），若候选池未变，将直接应用本次测速得到的最优 SNI。${NC}"
+                echo -e "${CYAN}  提示：返回后重新运行主菜单 1，若候选池未变，将直接应用本次测速得到的最优 SNI。${NC}"
                 read -r -p "按 Enter 继续..." _
                 ;;
             0)
@@ -3470,7 +3476,8 @@ function build_xhttp_client_patch_json() {
 "serverName": "$(json_escape "$server_name")",
 "fingerprint": "$(json_escape "$fingerprint")",
 "publicKey": "$(json_escape "$public_key")",
-"shortId": "$(json_escape "$short_id")"
+"shortId": "$(json_escape "$short_id")",
+"spiderX": "/"
 },
 "xhttpSettings": {
 "path": "$(json_escape "$path")"
@@ -3537,7 +3544,7 @@ function build_xhttp_reality_full_link() {
     extra_json=$(build_xhttp_client_patch_json "$down_address" "$down_port" "reality" "$server_name" "$fingerprint" "$public_key" "$short_id" "$path") || return 1
     extra_compact=$(compact_json_inline "$extra_json")
     extra_uri=$(url_encode "$extra_compact")
-    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$server_name" "$fingerprint" "$public_key" "$short_id" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
+    printf 'vless://%s@%s:%s?encryption=none&security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%%2F&type=xhttp&path=%s&mode=auto&extra=%s#%s'         "$uuid" "$up_host_uri" "$up_port" "$server_name" "$fingerprint" "$public_key" "$short_id" "$(url_encode "$path")" "$extra_uri" "$(url_encode "$share_name")"
 }
 
 function build_xhttp_vlessenc_full_link() {
@@ -4100,7 +4107,7 @@ function install_alpine_xray_vlessenc() {
 
                 echo -e "${GREEN}  已选：${TEMPLATE_LABEL}${NC}"
                 echo -e "${YELLOW}  说明：该 Alpine Xray 流程仅提供 Vless-Enc，不包含 Reality，也不提供 padding / delay 选项。${NC}"
-                echo -e "${YELLOW}  说明：01 安装为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
+                echo -e "${YELLOW}  说明：主菜单 1 为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
 
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
@@ -4652,10 +4659,25 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
             if is_quick_install_noninteractive; then
                 if [[ -n "$QUICK_SCENARIO" ]]; then
                     SCENARIO="$QUICK_SCENARIO"
-                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用指定值（$(printf '%02d' "$SCENARIO") $(get_install_scenario_label "$SCENARIO")）。${NC}"
+                    case "$SCENARIO" in
+                        01) SCENARIO="1" ;;
+                        02) SCENARIO="2" ;;
+                        03) SCENARIO="3" ;;
+                        04) SCENARIO="4" ;;
+                        05) SCENARIO="5" ;;
+                        06) SCENARIO="6" ;;
+                        07) SCENARIO="7" ;;
+                        08) SCENARIO="8" ;;
+                        1|2|3|4|5|6|7|8) ;;
+                        *)
+                            echo -e "${RED}  ✗ 快速安装模板编号无效：${SCENARIO}，仅支持 1-8。${NC}"
+                            return 1
+                            ;;
+                    esac
+                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用指定值（$(get_install_scenario_label "$SCENARIO")）。${NC}"
                 else
                     SCENARIO="1"
-                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（01 Reality 直出 / 多落地，非交互模式默认 0 个落地）。${NC}"
+                    echo -e "${YELLOW}  检测到非交互快速安装：安装模板自动使用默认值（主菜单 1：Reality 直出 / 多落地，非交互模式默认 0 个落地）。${NC}"
                 fi
             else
                 SCENARIO=$(choose_install_scenario)
@@ -4827,7 +4849,7 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         ;;
                 esac
 
-                echo -e "${YELLOW}  说明：01 安装为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
+                echo -e "${YELLOW}  说明：主菜单 1 为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
 
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
@@ -5026,10 +5048,10 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                                 while true; do
                                     route_port=$(read_manual_ss_port "请输入落地${route_idx}端口: ")
                                     duplicate_port=0
-                                    if [[ "$route_port" == "$PORT" || "$route_port" == "$LOCAL_SS_PORT" || "$route_port" == "$LOCAL_ENC_PORT" || "$route_port" == "$MANUAL_SS_PORT" || "$route_port" == "$MANUAL_ENC_PORT" ]]; then
+                                    if [[ "$route_port" == "$REALITY_PORT" || "$route_port" == "${LOCAL_SS_PORT:-}" || "$route_port" == "${LOCAL_ENC_PORT:-}" || "$route_port" == "$MANUAL_SS_PORT" || "$route_port" == "$MANUAL_ENC_PORT" ]]; then
                                         duplicate_port=1
                                     fi
-                                    for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                                    for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]-}"; do
                                         [[ "$existing_port" == "$route_port" ]] && duplicate_port=1
                                     done
                                     if is_port_in_use_by_non_xray "$route_port" || [[ "$duplicate_port" -eq 1 ]]; then
@@ -5249,7 +5271,7 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
             while true; do
                 LOCAL_SS_PORT=$(pick_random_free_port_excluding "$PORT" "$LOCAL_ENC_PORT") || { echo -e "${RED}  ✗ 无法选出可用的随机高位 SS2022 端口。${NC}"; return 1; }
                 duplicate_port=0
-                for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]-}"; do
                     [[ "$existing_port" != "auto" && "$existing_port" == "$LOCAL_SS_PORT" ]] && duplicate_port=1
                 done
                 [[ "$duplicate_port" -eq 0 ]] && break
@@ -5273,7 +5295,7 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
             while true; do
                 LOCAL_ENC_PORT=$(pick_random_free_port_excluding "$PORT" "$LOCAL_SS_PORT") || { echo -e "${RED}  ✗ 无法为 Vless-Enc 选出可用的随机高位端口。${NC}"; return 1; }
                 duplicate_port=0
-                for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]-}"; do
                     [[ "$existing_port" != "auto" && "$existing_port" == "$LOCAL_ENC_PORT" ]] && duplicate_port=1
                 done
                 [[ "$duplicate_port" -eq 0 ]] && break
@@ -5309,10 +5331,10 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
                         return 1
                     }
                     duplicate_port=0
-                    for existing_port in "${MULTI_ROUTE_PORTS[@]}"; do
+                    for existing_port in "${MULTI_ROUTE_PORTS[@]-}"; do
                         [[ "$existing_port" == "$route_port" ]] && duplicate_port=1
                     done
-                    for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]}"; do
+                    for existing_port in "${MULTI_ROUTE_MANUAL_PORTS[@]-}"; do
                         [[ "$existing_port" != "auto" && "$existing_port" == "$route_port" ]] && duplicate_port=1
                     done
                     [[ "$duplicate_port" -eq 0 ]] && break
@@ -5434,14 +5456,14 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
 
     if [[ "$SCENARIO" == "1" || "$SCENARIO" == "4" ]]; then
         if [[ "$SCENARIO" == "1" ]]; then
-            VLESS_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-zxray"
+            VLESS_LINK="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-直出-zxray"
             if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                REALITY_LINK_V6="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-直出-IPv6-zxray"
+                REALITY_LINK_V6="vless://${REALITY_DIRECT_UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-直出-IPv6-zxray"
             fi
         else
-            VLESS_LINK="vless://${UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-zxray"
+            VLESS_LINK="vless://${UUID}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-zxray"
             if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                REALITY_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-IPv6-zxray"
+                REALITY_LINK_V6="vless://${UUID}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-IPv6-zxray"
             fi
         fi
     fi
@@ -5529,9 +5551,9 @@ EOF
       },
 EOF
 )
-                    REALITY_LANDING_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-zxray")
+                    REALITY_LANDING_LINKS+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-落地${idx}-zxray")
                     if [[ -n "$SERVER_IP_URI_V6" ]]; then
-                        REALITY_LANDING_LINKS_V6+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}#Reality-落地${idx}-IPv6-zxray")
+                        REALITY_LANDING_LINKS_V6+=("vless://${REALITY_LANDING_UUIDS[$((idx-1))]}@${SERVER_IP_URI_V6}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=firefox&type=raw&flow=xtls-rprx-vision&sni=${DEST}&sid=${SHORT_ID}&spx=%2F#Reality-落地${idx}-IPv6-zxray")
                     fi
                 done
             fi
@@ -5617,11 +5639,13 @@ EOF
 )
                     fi
                 done
-                SUBS_TEXT+="\n\n说明:"
-                SUBS_TEXT+="\n  - 直出入口: 命中 reality_direct 用户，服务端直接出站"
+                SUBS_TEXT+=$'\n\n说明:'
+                SUBS_TEXT+=$'\n  - 直出入口: 命中 reality_direct 用户，服务端直接出站'
                 for idx in $(seq 1 "$REALITY_LANDING_COUNT"); do
-                    SUBS_TEXT+="\n  - 落地入口 ${idx}: 命中 reality_landing_${idx} 用户，服务端转发到 ${LANDING_LABELS[$((idx-1))]}"
-                    SUBS_TEXT+="\n    落地原始链接 ${idx}: ${LANDING_LINKS[$((idx-1))]}"
+                    SUBS_TEXT+=$'\n'
+                    SUBS_TEXT+="  - 落地入口 ${idx}: 命中 reality_landing_${idx} 用户，服务端转发到 ${LANDING_LABELS[$((idx-1))]}"
+                    SUBS_TEXT+=$'\n'
+                    SUBS_TEXT+="    落地原始链接 ${idx}: ${LANDING_LINKS[$((idx-1))]}"
                 done
             fi
             PORTS_TEXT=$(cat <<EOF
@@ -6361,8 +6385,10 @@ EOF
 )
             if [[ "$REALITY_LANDING_COUNT" -gt 0 ]]; then
                 for idx2 in $(seq 1 "$REALITY_LANDING_COUNT"); do
-                    SUBS_TEXT+="\n  - 落地入口 ${idx2}: ${LANDING_LABELS[$((idx2-1))]}"
-                    SUBS_TEXT+="\n    落地原始链接 ${idx2}: ${LANDING_LINKS[$((idx2-1))]}"
+                    SUBS_TEXT+=$'\n'
+                    SUBS_TEXT+="  - 落地入口 ${idx2}: ${LANDING_LABELS[$((idx2-1))]}"
+                    SUBS_TEXT+=$'\n'
+                    SUBS_TEXT+="    落地原始链接 ${idx2}: ${LANDING_LINKS[$((idx2-1))]}"
                 done
             fi
             PORTS_TEXT=$(cat <<EOF
@@ -6513,7 +6539,12 @@ JSONEOF
     fix_xray_config_permissions || return 1
 
     systemctl enable xray >/dev/null 2>&1 || true
-    systemctl restart xray
+    if ! systemctl restart xray; then
+        echo -e "${RED}  ✗ Xray 服务重启命令失败。${NC}"
+        systemctl status xray --no-pager -l 2>/dev/null | sed -n '1,25p' || true
+        echo -e "${YELLOW}  请继续查看完整日志：journalctl -u xray -n 50 --no-pager${NC}"
+        return 1
+    fi
 
     local check_attempt=0
     while [[ $check_attempt -lt 5 ]]; do
@@ -6786,12 +6817,18 @@ function update_xray() {
         return 1
     fi
 
-    systemctl restart xray
+    if ! systemctl restart xray; then
+        echo -e "${RED}  ✗ 更新后重启 Xray 失败，请查看: journalctl -u xray -n 30 --no-pager${NC}"
+        line
+        return 1
+    fi
     sleep 1
     if systemctl is-active --quiet xray; then
         echo -e "${GREEN}  ✓ 更新成功并已重启！当前版本: $(/usr/local/bin/xray version | head -1)${NC}"
     else
         echo -e "${RED}  ✗ 核心已更新，但服务启动失败，请查看: journalctl -u xray -n 30 --no-pager${NC}"
+        line
+        return 1
     fi
     line
 }
@@ -6824,12 +6861,18 @@ function restart_xray() {
         return 1
     fi
 
-    systemctl restart xray
+    if ! systemctl restart xray; then
+        echo -e "${RED}  ✗ 重启 Xray 失败，请查看: journalctl -u xray -n 30 --no-pager${NC}"
+        line
+        return 1
+    fi
     sleep 2
     if systemctl is-active --quiet xray; then
         echo -e "${GREEN}  ✓ Xray 服务已重启，运行正常。${NC}"
     else
         echo -e "${RED}  ✗ 重启失败，请查看: journalctl -u xray -n 30 --no-pager${NC}"
+        line
+        return 1
     fi
     line
 }
@@ -7354,7 +7397,7 @@ function get_xray_version_badge() {
 function show_main_header() {
     line
     center_echo "X R A Y  M A N A G E R" "${BRIGHT_YELLOW}${BOLD}"
-    center_echo "命令:  zxray" "${CYAN}"
+    center_echo "输入 zxray 可重新唤醒菜单" "${CYAN}"
     line
 }
 
