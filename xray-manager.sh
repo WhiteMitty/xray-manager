@@ -2077,14 +2077,8 @@ EOF2
 }
 
 function maybe_configure_bbr() {
-    if ! is_stdin_interactive; then
-        check_bbr || true
-        return 0
-    fi
-    if ask_yes_no "  是否检测并配置 BBR + FQ"; then
-        check_bbr || true
-    else
-        echo -e "${CYAN}  已按选择跳过 BBR + FQ 配置。${NC}"
+    if ! check_bbr; then
+        echo -e "${YELLOW}  ⚠ BBR + FQ 未能完全启用，将继续执行当前安装任务。${NC}"
     fi
     return 0
 }
@@ -2931,6 +2925,64 @@ function patch_xray_installer_missing_stop() {
     return 0
 }
 
+function stop_orphaned_alpine_xray_process() {
+    local force_stop="${1:-0}"
+    local attempt=0
+
+    is_alpine_system || return 0
+    command -v pgrep >/dev/null 2>&1 || return 0
+    pgrep -x xray >/dev/null 2>&1 || {
+        [[ ! -e /run/xray.pid ]] || rm -f -- /run/xray.pid >/dev/null 2>&1 || true
+        return 0
+    }
+
+    if [[ "$force_stop" != "1" && -x "$ALPINE_XRAY_SERVICE_FILE" ]]; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}  ⚠ 检测到 Xray 进程仍在运行，但 OpenRC 服务不存在或不可用。${NC}"
+    echo -e "${CYAN}  正在停止孤立的 Xray 进程，随后继续安装...${NC}"
+
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -x xray >/dev/null 2>&1 || true
+    else
+        local orphan_pid=""
+        while IFS= read -r orphan_pid; do
+            if [[ "$orphan_pid" =~ ^[0-9]+$ ]]; then
+                kill -TERM "$orphan_pid" >/dev/null 2>&1 || true
+            fi
+        done < <(pgrep -x xray 2>/dev/null || true)
+    fi
+
+    for ((attempt = 0; attempt < 5; attempt++)); do
+        pgrep -x xray >/dev/null 2>&1 || break
+        sleep 1
+    done
+
+    if pgrep -x xray >/dev/null 2>&1; then
+        if command -v pkill >/dev/null 2>&1; then
+            pkill -KILL -x xray >/dev/null 2>&1 || true
+        else
+            local stubborn_pid=""
+            while IFS= read -r stubborn_pid; do
+                if [[ "$stubborn_pid" =~ ^[0-9]+$ ]]; then
+                    kill -KILL "$stubborn_pid" >/dev/null 2>&1 || true
+                fi
+            done < <(pgrep -x xray 2>/dev/null || true)
+        fi
+        sleep 1
+    fi
+
+    if pgrep -x xray >/dev/null 2>&1; then
+        echo -e "${RED}  ✗ 无法停止孤立的 Xray 进程，已取消安装以避免核心文件被运行中的进程占用。${NC}"
+        return 1
+    fi
+
+    rm -f -- /run/xray.pid >/dev/null 2>&1 || true
+    echo -e "${GREEN}  ✓ 孤立的 Xray 进程已停止${NC}"
+    return 0
+}
+
 function validate_xray_installer() {
     local runner="$1"
     local installer="$2"
@@ -2963,6 +3015,10 @@ function run_xray_official_install_with_recovery() {
     local installer_ret=1
     local retry_ret=1
 
+    if is_alpine_system; then
+        stop_orphaned_alpine_xray_process || return 1
+    fi
+
     run_log=$(mktemp /tmp/xray-installer-run.XXXXXX.log 2>/dev/null) || true
     if [[ -z "$run_log" ]]; then
         echo -e "${YELLOW}  ⚠ 无法创建安装日志，将直接执行官方安装器。${NC}"
@@ -2976,6 +3032,20 @@ function run_xray_official_install_with_recovery() {
     installer_ret=${PIPESTATUS[0]}
     set -o pipefail
     [[ "$installer_ret" -eq 0 ]] && return 0
+
+    if is_alpine_system \
+        && grep -Eq 'rc-service: service .*xray.* does not exist' "$run_log"; then
+        echo -e "${YELLOW}  ⚠ 官方安装器发现 Xray 进程，但系统中没有可用的 xray OpenRC 服务。${NC}"
+        stop_orphaned_alpine_xray_process 1 || return "$installer_ret"
+
+        : > "$run_log"
+        echo -e "${CYAN}  正在清理孤立进程后重试官方安装器...${NC}"
+        set +o pipefail
+        "$runner" "$installer" install 2>&1 | tee "$run_log"
+        retry_ret=${PIPESTATUS[0]}
+        set -o pipefail
+        return "$retry_ret"
+    fi
 
     if ! grep -Fq 'Unit xray.service not loaded' "$run_log"; then
         return "$installer_ret"
@@ -4516,7 +4586,7 @@ function show_alpine_xray_status() {
     if [[ -x /usr/local/bin/xray ]]; then
         echo -e "${CYAN}  版本: $(/usr/local/bin/xray version | head -1)${NC}"
     else
-        echo -e "${YELLOW}  版本: N/A${NC}"
+        echo -e "${GREEN}  版本: N/A${NC}"
     fi
 
     if [[ -x "$ALPINE_XRAY_SERVICE_FILE" ]]; then
@@ -4780,10 +4850,14 @@ function _install_alpine_xray_vlessenc_impl() {
                 echo -e "${YELLOW}  说明：该 Alpine Xray 流程仅提供 Vless-Enc，不包含 Reality，也不提供 padding / delay 选项。${NC}"
                 echo -e "${YELLOW}  说明：主菜单 1 为覆盖安装，会生成新的完整配置并替换当前 Xray 配置；旧配置会先自动备份。${NC}"
 
+                echo ""
+                MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 监听端口: ") || return 1
+                ENC_PORT_SOURCE="manual"
+
                 if [[ "$INSTALL_MODE" == "auto" ]]; then
                     echo -e "${CYAN}  自动模式将使用本模板默认值：${NC}"
                     echo -e "${CYAN}    - Vless-Enc：xorpub / 0rtt / x25519 认证${NC}"
-                    echo -e "${CYAN}    - Vless-Enc 端口：随机高位端口${NC}"
+                    echo -e "${CYAN}    - Vless-Enc 端口：${MANUAL_ENC_PORT}${NC}"
                     if [[ "$SCENARIO" == "3" ]]; then
                         echo -e "${CYAN}    - 出口：freedom / ${FREEDOM_DESC}${NC}"
                     else
@@ -4806,11 +4880,6 @@ function _install_alpine_xray_vlessenc_impl() {
                         [[ "$FREEDOM_DOMAIN_STRATEGY" == "ForceIPv4" ]] && FREEDOM_DESC="仅 IPv4"
                     fi
 
-                    echo ""
-                    if ask_yes_no "  是否手动指定 Vless-Enc 端口（y=手动指定，n=使用默认配置：随机高位端口）"; then
-                        MANUAL_ENC_PORT=$(read_manual_ss_port "请输入 Vless-Enc 端口: ")
-                        ENC_PORT_SOURCE="manual"
-                    fi
                     echo ""
                     echo -e "${CYAN}  Vless-Enc 握手模式：${NC}"
                     echo -e "${CYAN}  - 0rtt：更偏性能；1rtt：更偏保守${NC}"
@@ -4894,7 +4963,8 @@ function _install_alpine_xray_vlessenc_impl() {
 
     echo -e "${YELLOW}  安装 Xray 核心程序...${NC}"
     download_and_run_xray_installer install || {
-        echo -e "${RED}Xray 安装失败！请检查网络连接后重试。${NC}"
+        echo -e "${RED}Xray 安装未完成，请查看上方安装器原始错误。${NC}"
+        echo -e "${YELLOW}可能原因包括网络、上游安装器或本机残留的服务/进程状态。${NC}"
         return 1
     }
 
@@ -5902,7 +5972,8 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
 
     echo -e "${YELLOW}  安装 Xray 核心程序...${NC}"
     download_and_run_xray_installer install || {
-        echo -e "${RED}Xray 安装失败！请检查网络连接后重试。${NC}"
+        echo -e "${RED}Xray 安装未完成，请查看上方安装器原始错误。${NC}"
+        echo -e "${YELLOW}可能原因包括网络、上游安装器或本机残留的服务/进程状态。${NC}"
         return 1
     }
 
@@ -8294,13 +8365,13 @@ function get_xray_version_badge() {
 
     xray_bin=$(get_xray_binary_path 2>/dev/null || true)
     if [[ -z "$xray_bin" ]]; then
-        printf '%bN/A%b' "$YELLOW" "$NC"
+        printf '%bN/A%b' "$GREEN" "$NC"
         return 0
     fi
 
     version_line=$("$xray_bin" version 2>/dev/null | awk 'NR==1 {print $1, $2; exit}')
     if [[ -z "$version_line" ]]; then
-        printf '%bN/A%b' "$YELLOW" "$NC"
+        printf '%bN/A%b' "$GREEN" "$NC"
         return 0
     fi
 
@@ -8335,14 +8406,17 @@ function get_runtime_version_badge() {
             if command -v ssserver >/dev/null 2>&1; then
                 version_line=$(ssserver --version 2>/dev/null | awk 'NR==1 {print; exit}')
             fi
-            [[ -n "$version_line" ]] || version_line="N/A"
-            printf '%b%s%b' "$CYAN" "$version_line" "$NC"
+            if [[ -n "$version_line" ]]; then
+                printf '%b%s%b' "$CYAN" "$version_line" "$NC"
+            else
+                printf '%bN/A%b' "$GREEN" "$NC"
+            fi
             ;;
         alpine-xray-vlessenc|xray)
             get_xray_version_badge
             ;;
         *)
-            printf '%bN/A%b' "$YELLOW" "$NC"
+            printf '%bN/A%b' "$GREEN" "$NC"
             ;;
     esac
 }
@@ -8410,7 +8484,7 @@ while true; do
     echo -e "  ${CYAN}1.${NC} 覆盖安装"
     echo -e "  ${CYAN}2.${NC} 更新/重启当前服务"
     echo -e "  ${CYAN}3.${NC} 查看订阅链接"
-    echo -e "  ${CYAN}4.${NC} 完整卸载（y/n 确认）"
+    echo -e "  ${CYAN}4.${NC} 完整卸载"
     echo -e "  ${CYAN}5.${NC} 退出脚本"
     line
     read_input -r -p "请选择 [1-5]: " CHOICE
