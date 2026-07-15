@@ -12,7 +12,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 AUTHOR_NAME="Doudou Zhang"
-SCRIPT_VERSION="v 0.2.1"
+SCRIPT_VERSION="v 0.1.0"
 UI_WIDTH=60
 DATA_DIR="/usr/local/share/doudou-xray"
 SELF_DIR="/usr/local/lib/doudou"
@@ -59,10 +59,14 @@ TRANSACTION_XRAY_ENABLED=0
 TRANSACTION_SS_ACTIVE=0
 TRANSACTION_SS_ENABLED=0
 TRANSACTION_SS_PACKAGE_PRESENT=0
+TRANSACTION_MIMALLOC_PACKAGE_PRESENT=0
+TRANSACTION_SS_PACKAGE_VERSION=""
+TRANSACTION_MIMALLOC_PACKAGE_VERSION=""
 TRANSACTION_CONGESTION_CONTROL=""
 TRANSACTION_DEFAULT_QDISC=""
 TRANSACTION_PATHS=()
 TRANSACTION_PRESENT=()
+CLEANUP_FAILURES=()
 
 if [[ ! -t 1 || -n "${NO_COLOR:-}" ]]; then
     RED=''
@@ -180,6 +184,27 @@ function cleanup_tmp_files() {
     TMP_FILES=()
 }
 
+function atomic_replace_file() {
+    local source_path="$1"
+    local target_path="$2"
+    local file_mode="${3:-600}"
+    local target_dir=""
+    local staged_path=""
+
+    target_dir=$(dirname -- "$target_path") || return 1
+    [[ -d "$target_dir" ]] || return 1
+    staged_path=$(mktemp "${target_path}.new.XXXXXX") || return 1
+    add_tmp_file "$staged_path"
+
+    if ! cp -f -- "$source_path" "$staged_path" \
+        || ! chmod "$file_mode" "$staged_path" \
+        || ! mv -f -- "$staged_path" "$target_path"; then
+        rm -f -- "$staged_path" >/dev/null 2>&1 || true
+        return 1
+    fi
+    return 0
+}
+
 function release_global_lock() {
     if [[ "$GLOBAL_LOCK_MODE" == "mkdir" && -n "$GLOBAL_LOCK_DIR" && -d "$GLOBAL_LOCK_DIR" ]]; then
         local owner_pid=""
@@ -251,10 +276,99 @@ function reset_transaction_state() {
     TRANSACTION_SS_ACTIVE=0
     TRANSACTION_SS_ENABLED=0
     TRANSACTION_SS_PACKAGE_PRESENT=0
+    TRANSACTION_MIMALLOC_PACKAGE_PRESENT=0
+    TRANSACTION_SS_PACKAGE_VERSION=""
+    TRANSACTION_MIMALLOC_PACKAGE_VERSION=""
     TRANSACTION_CONGESTION_CONTROL=""
     TRANSACTION_DEFAULT_QDISC=""
     TRANSACTION_PATHS=()
     TRANSACTION_PRESENT=()
+}
+
+function get_apk_installed_version() {
+    local package_name="$1"
+    local package_entry=""
+
+    command -v apk >/dev/null 2>&1 || return 1
+    apk info -e "$package_name" >/dev/null 2>&1 || return 1
+    package_entry=$(apk list --installed "$package_name" 2>/dev/null \
+        | awk -v prefix="${package_name}-" '
+            index($1, prefix) == 1 && /\[installed\]/ && !found {
+                print substr($1, length(prefix) + 1)
+                found=1
+            }
+        ')
+    if [[ -z "$package_entry" ]]; then
+        package_entry=$(apk info -a "$package_name" 2>/dev/null \
+            | awk -v prefix="${package_name}-" '
+                index($1, prefix) == 1 && $2 == "description:" && !found {
+                    print substr($1, length(prefix) + 1)
+                    found=1
+                }
+            ')
+    fi
+    [[ -n "$package_entry" ]] || return 1
+    printf '%s\n' "$package_entry"
+}
+
+function backup_alpine_package_for_transaction() {
+    local package_name="$1"
+    local package_version=""
+    local backup_dir=""
+    local archive_path=""
+
+    [[ "$TRANSACTION_ACTIVE" == "1" && "$TRANSACTION_RUNTIME" == "alpine-ss" ]] || return 1
+    apk info -e "$package_name" >/dev/null 2>&1 || return 0
+    package_version=$(get_apk_installed_version "$package_name" 2>/dev/null || true)
+    [[ -n "$package_version" ]] || return 1
+
+    backup_dir="${TRANSACTION_DIR}/apk-packages"
+    mkdir -p -- "$backup_dir" || return 1
+    archive_path="${backup_dir}/${package_name}-${package_version}.apk"
+    if [[ ! -s "$archive_path" ]]; then
+        apk fetch --output "$backup_dir" "$package_name" >/dev/null 2>&1 || return 1
+    fi
+    [[ -s "$archive_path" ]]
+}
+
+function restore_alpine_package_state() {
+    local package_name="$1"
+    local was_present="$2"
+    local old_version="$3"
+    local current_version=""
+    local archive_path=""
+
+    if [[ "$was_present" == "0" ]]; then
+        if apk info -e "$package_name" >/dev/null 2>&1; then
+            apk del "$package_name" >/dev/null 2>&1 || return 1
+        fi
+        return 0
+    fi
+
+    if ! apk info -e "$package_name" >/dev/null 2>&1; then
+        [[ -n "$old_version" ]] || return 1
+        archive_path="${TRANSACTION_DIR}/apk-packages/${package_name}-${old_version}.apk"
+        if [[ -s "$archive_path" ]]; then
+            apk add "$archive_path" >/dev/null 2>&1 || return 1
+        else
+            apk add "${package_name}=${old_version}" >/dev/null 2>&1 || return 1
+        fi
+        return 0
+    fi
+
+    current_version=$(get_apk_installed_version "$package_name" 2>/dev/null || true)
+    if [[ -z "$old_version" || "$current_version" == "$old_version" ]]; then
+        return 0
+    fi
+
+    archive_path="${TRANSACTION_DIR}/apk-packages/${package_name}-${old_version}.apk"
+    if [[ -s "$archive_path" ]]; then
+        apk add "$archive_path" >/dev/null 2>&1 || return 1
+    else
+        apk add "${package_name}=${old_version}" >/dev/null 2>&1 || return 1
+    fi
+    current_version=$(get_apk_installed_version "$package_name" 2>/dev/null || true)
+    [[ "$current_version" == "$old_version" ]]
 }
 
 function begin_deployment_transaction() {
@@ -282,20 +396,21 @@ function begin_deployment_transaction() {
     TRANSACTION_CONGESTION_CONTROL=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     TRANSACTION_DEFAULT_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
     TRANSACTION_PATHS=(
-        "/usr/local/bin/xray"
-        "/usr/local/share/xray"
-        "/usr/local/etc/xray"
         "$SYSCTL_BBR_FILE"
         "$SYSCTL_BBR_BACKUP_FILE"
         "$INFO_FILE"
         "$SUB_FILE"
         "$SERVICE_KIND_FILE"
-        "$XHTTP_PATCH_DIR"
     )
 
     case "$runtime" in
         systemd)
             TRANSACTION_PATHS+=(
+                "/usr/local/bin/xray"
+                "/usr/local/share/xray"
+                "/usr/local/etc/xray"
+                "/var/log/xray"
+                "$XHTTP_PATCH_DIR"
                 "/etc/systemd/system/xray.service"
                 "/etc/systemd/system/xray@.service"
                 "/etc/systemd/system/xray.service.d"
@@ -304,19 +419,37 @@ function begin_deployment_transaction() {
             systemctl is-active --quiet xray 2>/dev/null && TRANSACTION_XRAY_ACTIVE=1
             systemctl is-enabled --quiet xray 2>/dev/null && TRANSACTION_XRAY_ENABLED=1
             ;;
-        alpine)
+        alpine-xray)
             TRANSACTION_PATHS+=(
+                "/usr/local/bin/xray"
+                "/usr/local/share/xray"
+                "/usr/local/etc/xray"
+                "/var/log/xray"
+                "$XHTTP_PATCH_DIR"
                 "$ALPINE_XRAY_SERVICE_FILE"
+                "/etc/apk/repositories"
+                "$ALPINE_REPO_BACKUP_FILE"
+            )
+            rc-service xray status >/dev/null 2>&1 && TRANSACTION_XRAY_ACTIVE=1
+            rc-update show 2>/dev/null | grep -Eq '(^|[[:space:]])xray([[:space:]]|$)' && TRANSACTION_XRAY_ENABLED=1
+            ;;
+        alpine-ss)
+            TRANSACTION_PATHS+=(
                 "$ALPINE_SS_SERVICE_FILE"
                 "$ALPINE_SS_CONFIG_DIR"
                 "/etc/apk/repositories"
                 "$ALPINE_REPO_BACKUP_FILE"
             )
-            rc-service xray status >/dev/null 2>&1 && TRANSACTION_XRAY_ACTIVE=1
             rc-service ssserver status >/dev/null 2>&1 && TRANSACTION_SS_ACTIVE=1
-            rc-update show 2>/dev/null | grep -Eq '(^|[[:space:]])xray([[:space:]]|$)' && TRANSACTION_XRAY_ENABLED=1
             rc-update show 2>/dev/null | grep -Eq '(^|[[:space:]])ssserver([[:space:]]|$)' && TRANSACTION_SS_ENABLED=1
-            apk info -e shadowsocks-rust >/dev/null 2>&1 && TRANSACTION_SS_PACKAGE_PRESENT=1
+            if apk info -e shadowsocks-rust >/dev/null 2>&1; then
+                TRANSACTION_SS_PACKAGE_PRESENT=1
+                TRANSACTION_SS_PACKAGE_VERSION=$(get_apk_installed_version shadowsocks-rust 2>/dev/null || true)
+            fi
+            if apk info -e mimalloc >/dev/null 2>&1; then
+                TRANSACTION_MIMALLOC_PACKAGE_PRESENT=1
+                TRANSACTION_MIMALLOC_PACKAGE_VERSION=$(get_apk_installed_version mimalloc 2>/dev/null || true)
+            fi
             ;;
         *)
             echo -e "${RED}  ✗ 未知部署事务类型：${runtime}${NC}"
@@ -343,7 +476,7 @@ function begin_deployment_transaction() {
     done
 
     TRANSACTION_ACTIVE=1
-    echo -e "${CYAN}  已建立部署事务快照；后续失败将自动恢复旧核心、配置与服务状态。${NC}"
+    echo -e "${CYAN}  已建立部署事务快照；后续失败将自动恢复部署前的文件、配置与服务状态。${NC}"
 }
 
 function rollback_deployment_transaction() {
@@ -358,8 +491,10 @@ function rollback_deployment_transaction() {
         systemd)
             systemctl stop xray >/dev/null 2>&1 || true
             ;;
-        alpine)
+        alpine-xray)
             rc-service xray stop >/dev/null 2>&1 || true
+            ;;
+        alpine-ss)
             rc-service ssserver stop >/dev/null 2>&1 || true
             ;;
     esac
@@ -388,24 +523,35 @@ function rollback_deployment_transaction() {
                 systemctl stop xray >/dev/null 2>&1 || true
             fi
             ;;
-        alpine)
-            if [[ "$TRANSACTION_SS_PACKAGE_PRESENT" == "0" ]] && apk info -e shadowsocks-rust >/dev/null 2>&1; then
-                apk del shadowsocks-rust mimalloc >/dev/null 2>&1 || true
-            fi
+        alpine-xray)
             if [[ "$TRANSACTION_XRAY_ENABLED" == "1" ]]; then
                 rc-update add xray default >/dev/null 2>&1 || rollback_failed=1
             else
                 rc-update del xray default >/dev/null 2>&1 || true
             fi
+            if [[ "$TRANSACTION_XRAY_ACTIVE" == "1" ]]; then
+                rc-service xray start >/dev/null 2>&1 || rollback_failed=1
+            else
+                rc-service xray stop >/dev/null 2>&1 || true
+            fi
+            if [[ "$TRANSACTION_XRAY_ACTIVE" == "1" ]] && ! rc-service xray status >/dev/null 2>&1; then
+                rollback_failed=1
+            fi
+            ;;
+        alpine-ss)
+            restore_alpine_package_state shadowsocks-rust \
+                "$TRANSACTION_SS_PACKAGE_PRESENT" "$TRANSACTION_SS_PACKAGE_VERSION" || rollback_failed=1
+            restore_alpine_package_state mimalloc \
+                "$TRANSACTION_MIMALLOC_PACKAGE_PRESENT" "$TRANSACTION_MIMALLOC_PACKAGE_VERSION" || rollback_failed=1
             if [[ "$TRANSACTION_SS_ENABLED" == "1" ]]; then
                 rc-update add ssserver default >/dev/null 2>&1 || rollback_failed=1
             else
                 rc-update del ssserver default >/dev/null 2>&1 || true
             fi
-            [[ "$TRANSACTION_XRAY_ACTIVE" == "1" ]] && rc-service xray start >/dev/null 2>&1 || true
-            [[ "$TRANSACTION_SS_ACTIVE" == "1" ]] && rc-service ssserver start >/dev/null 2>&1 || true
-            if [[ "$TRANSACTION_XRAY_ACTIVE" == "1" ]] && ! rc-service xray status >/dev/null 2>&1; then
-                rollback_failed=1
+            if [[ "$TRANSACTION_SS_ACTIVE" == "1" ]]; then
+                rc-service ssserver start >/dev/null 2>&1 || rollback_failed=1
+            else
+                rc-service ssserver stop >/dev/null 2>&1 || true
             fi
             if [[ "$TRANSACTION_SS_ACTIVE" == "1" ]] && ! rc-service ssserver status >/dev/null 2>&1; then
                 rollback_failed=1
@@ -419,11 +565,11 @@ function rollback_deployment_transaction() {
     if [[ -n "$TRANSACTION_DEFAULT_QDISC" ]]; then
         sysctl -w "net.core.default_qdisc=${TRANSACTION_DEFAULT_QDISC}" >/dev/null 2>&1 || rollback_failed=1
     fi
-    rm -rf -- "$TRANSACTION_DIR" >/dev/null 2>&1 || true
+    rm -rf -- "$TRANSACTION_DIR" >/dev/null 2>&1 || rollback_failed=1
     reset_transaction_state
 
     if [[ "$rollback_failed" == "0" ]]; then
-        echo -e "${GREEN}  ✓ 已恢复部署前的核心、配置与服务状态。${NC}"
+        echo -e "${GREEN}  ✓ 已恢复部署前的文件、配置与服务状态。${NC}"
         return 0
     fi
     echo -e "${RED}  ✗ 自动回滚未完全成功，请立即检查服务状态与配置。${NC}"
@@ -432,8 +578,14 @@ function rollback_deployment_transaction() {
 
 function commit_deployment_transaction() {
     [[ "$TRANSACTION_ACTIVE" == "1" ]] || return 0
-    rm -rf -- "$TRANSACTION_DIR" >/dev/null 2>&1 || true
+    local transaction_dir="$TRANSACTION_DIR"
+    if ! rm -rf -- "$transaction_dir" >/dev/null 2>&1; then
+        echo -e "${YELLOW}  ⚠ 部署已完成，但事务快照目录删除失败：${transaction_dir}${NC}"
+        reset_transaction_state
+        return 1
+    fi
     reset_transaction_state
+    return 0
 }
 
 function run_transactional() {
@@ -447,7 +599,7 @@ function run_transactional() {
     "$implementation" "$@"
     ret=$?
     if [[ "$ret" -eq 0 ]]; then
-        commit_deployment_transaction
+        commit_deployment_transaction || return 1
         return 0
     fi
 
@@ -538,17 +690,19 @@ function record_source_file() {
         rm -f -- "$record_tmp" >/dev/null 2>&1 || true
         return 1
     fi
-    chmod 600 "$record_tmp" >/dev/null 2>&1 || true
-    mv -f -- "$record_tmp" "$SOURCE_RECORD_FILE" 2>/dev/null || {
+    if ! chmod 600 "$record_tmp" >/dev/null 2>&1 \
+        || ! mv -f -- "$record_tmp" "$SOURCE_RECORD_FILE" 2>/dev/null; then
         rm -f -- "$record_tmp" >/dev/null 2>&1 || true
         return 1
-    }
+    fi
 }
 
 function reexec_with_root() {
     if [[ $EUID -eq 0 ]]; then
         if [[ -n "${DOUDOU_ENTRY_TEMP:-}" && -f "${DOUDOU_ENTRY_TEMP}" ]]; then
             rm -f -- "${DOUDOU_ENTRY_TEMP}" >/dev/null 2>&1 || true
+        elif [[ -z "${DOUDOU_ENTRY_TEMP:-}" ]]; then
+            unset DOUDOU_ORIGINAL_SOURCE
         fi
         return 0
     fi
@@ -575,13 +729,22 @@ function reexec_with_root() {
 
     if command -v sudo >/dev/null 2>&1; then
         echo -e "${YELLOW}检测到当前非 root，正在尝试 sudo 提权重新执行...${NC}"
-        exec env DOUDOU_ENTRY_TEMP="$temp_self" sudo -E bash "$temp_self" "$@"
+        exec env DOUDOU_ENTRY_TEMP="$temp_self" DOUDOU_ORIGINAL_SOURCE="$self_path" \
+            sudo -E bash "$temp_self" "$@"
     fi
 
     if command -v su >/dev/null 2>&1; then
-        local cmd
-        cmd="DOUDOU_ENTRY_TEMP=$(printf '%q' "$temp_self") bash $(printf '%q' "$temp_self")"
-        local arg
+        local cmd=""
+        local arg=""
+        local env_name=""
+        local env_value=""
+        local -a preserved_env=(DOUDOU_MANAGER_SHA256 DOUDOU_XRAY_INSTALLER_SHA256 DOUDOU_SELF_UPDATED NO_COLOR)
+        cmd="DOUDOU_ENTRY_TEMP=$(printf '%q' "$temp_self") DOUDOU_ORIGINAL_SOURCE=$(printf '%q' "$self_path")"
+        for env_name in "${preserved_env[@]}"; do
+            env_value="${!env_name:-}"
+            [[ -n "$env_value" ]] && cmd+=" ${env_name}=$(printf '%q' "$env_value")"
+        done
+        cmd+=" bash $(printf '%q' "$temp_self")"
         for arg in "$@"; do
             cmd+=" $(printf '%q' "$arg")"
         done
@@ -595,9 +758,10 @@ function reexec_with_root() {
 }
 
 function ensure_runtime_layout() {
-    mkdir -p "$DATA_DIR" "$SELF_DIR"
-    chmod 700 "$DATA_DIR" >/dev/null 2>&1 || true
-    chmod 755 "$SELF_DIR" >/dev/null 2>&1 || true
+    mkdir -p "$DATA_DIR" "$SELF_DIR" || return 1
+    chmod 700 "$DATA_DIR" >/dev/null 2>&1 || return 1
+    chmod 755 "$SELF_DIR" >/dev/null 2>&1 || return 1
+    return 0
 }
 
 function is_managed_quick_launcher() {
@@ -628,18 +792,23 @@ function remove_managed_quick_launcher() {
 }
 
 function install_quick_launcher() {
-    local current_path
+    local current_path=""
+    local source_record_path=""
+    local launcher_tmp=""
     current_path=$(resolve_self_source_path 2>/dev/null || true)
+    [[ -n "$current_path" ]] || return 1
+    source_record_path="${DOUDOU_ORIGINAL_SOURCE:-$current_path}"
 
-    ensure_runtime_layout
+    ensure_runtime_layout || return 1
 
     if [[ -n "$current_path" ]]; then
         if [[ "$current_path" != "$SELF_SCRIPT_PATH" ]]; then
-            materialize_self_source "$current_path" "$SELF_SCRIPT_PATH" || return 1
+            atomic_replace_file "$current_path" "$SELF_SCRIPT_PATH" 755 || return 1
+        else
+            chmod 755 "$SELF_SCRIPT_PATH" >/dev/null 2>&1 || return 1
         fi
-        chmod 755 "$SELF_SCRIPT_PATH" >/dev/null 2>&1 || true
-        if [[ "$current_path" != "$SELF_SCRIPT_PATH" ]]; then
-            record_source_file "$current_path" >/dev/null 2>&1 || true
+        if [[ "$source_record_path" != "$SELF_SCRIPT_PATH" ]]; then
+            record_source_file "$source_record_path" >/dev/null 2>&1 || return 1
         fi
     fi
 
@@ -660,7 +829,9 @@ function install_quick_launcher() {
         remove_managed_quick_launcher "$legacy_path" || true
     done
 
-    cat > "$QUICK_BIN" <<EOF
+    launcher_tmp=$(mktemp "${QUICK_BIN}.new.XXXXXX") || return 1
+    add_tmp_file "$launcher_tmp"
+    if ! cat > "$launcher_tmp" <<EOF
 #!/bin/bash
 # Managed by doudou-xray-manager
 set -u
@@ -672,7 +843,16 @@ set -u
     echo "用法: zxray"
     exit 1
 EOF
-    chmod 755 "$QUICK_BIN" >/dev/null 2>&1 || true
+    then
+        rm -f -- "$launcher_tmp" >/dev/null 2>&1 || true
+        return 1
+    fi
+    if ! chmod 755 "$launcher_tmp" \
+        || ! mv -f -- "$launcher_tmp" "$QUICK_BIN"; then
+        rm -f -- "$launcher_tmp" >/dev/null 2>&1 || true
+        return 1
+    fi
+    return 0
 }
 
 function download_latest_script_to() {
@@ -763,6 +943,10 @@ function validate_downloaded_manager_script() {
         echo -e "${RED}  ✗ 拉取脚本未通过项目身份标记检查。${NC}"
         return 1
     fi
+    if ! grep -Fqx "SCRIPT_VERSION=\"${SCRIPT_VERSION}\"" "$script_path"; then
+        echo -e "${RED}  ✗ 拉取脚本的版本标识不是固定版本 ${SCRIPT_VERSION}，已拒绝覆盖。${NC}"
+        return 1
+    fi
     verify_optional_pinned_sha256 "$script_path" "${DOUDOU_MANAGER_SHA256:-}" "管理脚本" || return 1
     return 0
 }
@@ -794,7 +978,7 @@ function self_update_and_update_xray() {
     downloaded_sha=$(get_file_sha256 "$temp_script" 2>/dev/null || true)
     [[ -n "$downloaded_sha" ]] && echo -e "${CYAN}  下载内容 SHA-256: ${downloaded_sha}${NC}"
 
-    ensure_runtime_layout
+    ensure_runtime_layout || return 1
     local self_backup=""
     local staged_script=""
     if [[ -f "$SELF_SCRIPT_PATH" ]]; then
@@ -874,7 +1058,10 @@ function parse_cli_args() {
 
 parse_cli_args "$@"
 acquire_global_lock || exit 1
-ensure_runtime_layout
+ensure_runtime_layout || {
+    echo -e "${RED}错误：无法创建或保护脚本运行目录。${NC}"
+    exit 1
+}
 if ! install_quick_launcher; then
     echo -e "${YELLOW}  ⚠ 快捷命令安装未完成；当前脚本仍可继续使用。${NC}"
 fi
@@ -896,10 +1083,17 @@ function is_alpine_system() {
 
 function write_install_runtime_kind() {
     local kind="$1"
-    (
-        umask 077
-        printf '%s\n' "$kind" > "$SERVICE_KIND_FILE"
-    )
+    local staged_path=""
+
+    staged_path=$(mktemp "${SERVICE_KIND_FILE}.new.XXXXXX") || return 1
+    add_tmp_file "$staged_path"
+    if ! (umask 077; printf '%s\n' "$kind" > "$staged_path") \
+        || ! chmod 600 "$staged_path" \
+        || ! mv -f -- "$staged_path" "$SERVICE_KIND_FILE"; then
+        rm -f -- "$staged_path" >/dev/null 2>&1 || true
+        return 1
+    fi
+    return 0
 }
 
 function get_install_runtime_kind() {
@@ -1485,6 +1679,7 @@ function validate_vlessenc_padding_profile() {
     local profile="$1"
     local -a segments=()
     local seg prob min max idx
+    local total_padding_max=0
 
     [[ -n "$profile" ]] || return 1
     [[ "$profile" != *[[:space:]]* ]] || return 1
@@ -1494,14 +1689,19 @@ function validate_vlessenc_padding_profile() {
     for idx in "${!segments[@]}"; do
         seg="${segments[$idx]}"
         [[ "$seg" =~ ^([0-9]{1,3})-([0-9]+)-([0-9]+)$ ]] || return 1
-        prob="${BASH_REMATCH[1]}"
-        min="${BASH_REMATCH[2]}"
-        max="${BASH_REMATCH[3]}"
+        [[ ${#BASH_REMATCH[2]} -le 9 && ${#BASH_REMATCH[3]} -le 9 ]] || return 1
+        prob=$((10#${BASH_REMATCH[1]}))
+        min=$((10#${BASH_REMATCH[2]}))
+        max=$((10#${BASH_REMATCH[3]}))
         (( prob >= 0 && prob <= 100 )) || return 1
         (( max >= min )) || return 1
         if (( idx == 0 )); then
             (( prob == 100 )) || return 1
             (( min >= 35 )) || return 1
+        fi
+        if (( idx % 2 == 0 )); then
+            total_padding_max=$((total_padding_max + max))
+            (( total_padding_max <= 65553 )) || return 1
         fi
     done
     return 0
@@ -1518,6 +1718,7 @@ function read_manual_vlessenc_padding_profile() {
         echo -e "${CYAN}  规则 2：第一段概率必须为 100。${NC}" >&2
         echo -e "${CYAN}  规则 3：第一段最小长度（示例中为96）必须 >= 35，否则 Xray 会直接报错。${NC}" >&2
         echo -e "${CYAN}  规则 4：每段都必须满足 最大值 >= 最小值。${NC}" >&2
+        echo -e "${CYAN}  规则 5：所有 padding 段的最大值总和不得超过 65553。${NC}" >&2
         echo -e "${CYAN}  说明：首段中的两个数字表示 padding 长度范围；delay 段中的两个数字表示等待时间范围（毫秒）。${NC}" >&2
         read_input -r -p "请输入 ${side_label} padding / delay: " value
         value=$(printf '%s' "$value" | tr -d '[:space:]')
@@ -1807,6 +2008,7 @@ function check_bbr() {
     echo -e "${YELLOW}  检测并配置 BBR + FQ...${NC}"
 
     local current_cc current_qdisc
+    local staged_bbr=""
     current_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)
     current_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || true)
 
@@ -1827,7 +2029,7 @@ function check_bbr() {
     echo -e "${YELLOW}  BBR 或 FQ 未完全启用，正在写入配置...${NC}"
     if [[ -f "$SYSCTL_BBR_FILE" ]] && ! grep -q '^# BBR + FQ' "$SYSCTL_BBR_FILE"; then
         if [[ ! -f "$SYSCTL_BBR_BACKUP_FILE" ]]; then
-            cp -a -- "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_BACKUP_FILE" || {
+            atomic_replace_file "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_BACKUP_FILE" 600 || {
                 echo -e "${RED}  ✗ 无法备份已有 ${SYSCTL_BBR_FILE}，为避免覆盖用户配置，已跳过写入。${NC}"
                 return 1
             }
@@ -1835,12 +2037,25 @@ function check_bbr() {
         fi
     fi
 
-    if ! cat > "$SYSCTL_BBR_FILE" <<EOF2
+    staged_bbr=$(mktemp "${SYSCTL_BBR_FILE}.new.XXXXXX") || {
+        echo -e "${RED}  ✗ 无法创建 BBR 配置暂存文件。${NC}"
+        return 1
+    }
+    add_tmp_file "$staged_bbr"
+    if ! cat > "$staged_bbr" <<EOF2
 # BBR + FQ — 由 Xray 管理脚本自动写入
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF2
     then
+        rm -f -- "$staged_bbr" >/dev/null 2>&1 || true
+        echo -e "${RED}  ✗ 写入 BBR 暂存配置失败。${NC}"
+        return 1
+    fi
+    if ! chmod 644 "$staged_bbr" \
+        || ! mv -f -- "$staged_bbr" "$SYSCTL_BBR_FILE"
+    then
+        rm -f -- "$staged_bbr" >/dev/null 2>&1 || true
         echo -e "${RED}  ✗ 写入 ${SYSCTL_BBR_FILE} 失败。${NC}"
         return 1
     fi
@@ -1888,6 +2103,7 @@ function get_alpine_repo_branch() {
 function ensure_alpine_community_repo() {
     local repo_file="/etc/apk/repositories"
     local repo_branch community_line
+    local staged_repo=""
 
     [[ -f "$repo_file" ]] || {
         echo -e "${RED}  ✗ 未找到 ${repo_file}${NC}"
@@ -1902,15 +2118,21 @@ function ensure_alpine_community_repo() {
     repo_branch=$(get_alpine_repo_branch) || return 1
     community_line="https://dl-cdn.alpinelinux.org/alpine/${repo_branch}/community"
     if [[ ! -f "$ALPINE_REPO_BACKUP_FILE" ]]; then
-        cp -a -- "$repo_file" "$ALPINE_REPO_BACKUP_FILE" || {
+        atomic_replace_file "$repo_file" "$ALPINE_REPO_BACKUP_FILE" 600 || {
             echo -e "${RED}  ✗ Alpine 仓库文件备份失败，拒绝修改。${NC}"
             return 1
         }
-        chmod 600 "$ALPINE_REPO_BACKUP_FILE" >/dev/null 2>&1 || true
         echo -e "${CYAN}  已备份 Alpine 仓库配置：${ALPINE_REPO_BACKUP_FILE}${NC}"
     fi
     echo -e "${YELLOW}  未检测到 community 仓库，正在追加：${community_line}${NC}"
-    printf '%s\n' "$community_line" >> "$repo_file" || return 1
+    staged_repo=$(mktemp "${repo_file}.new.XXXXXX") || return 1
+    add_tmp_file "$staged_repo"
+    if ! cp -a -- "$repo_file" "$staged_repo" \
+        || ! printf '%s\n' "$community_line" >> "$staged_repo" \
+        || ! mv -f -- "$staged_repo" "$repo_file"; then
+        rm -f -- "$staged_repo" >/dev/null 2>&1 || true
+        return 1
+    fi
     echo -e "${GREEN}  ✓ 已追加 Alpine community 仓库${NC}"
     return 0
 }
@@ -2129,7 +2351,7 @@ function restart_alpine_ssservice() {
     local listen_port=""
     listen_port=$(get_alpine_ss_port_from_config)
     if [[ -n "$listen_port" ]]; then
-        if ss -ltnup 2>/dev/null | grep -q ":${listen_port}\b"; then
+        if ss -ltnup 2>/dev/null | grep -Eq ":${listen_port}([[:space:]]|$)"; then
             echo -e "${GREEN}  ✓ 已检测到 ${listen_port} 端口监听${NC}"
         else
             echo -e "${YELLOW}  ⚠ 未明确检测到 ${listen_port} 端口监听，请手动检查：ss -ltnup | grep :${listen_port}${NC}"
@@ -2138,14 +2360,25 @@ function restart_alpine_ssservice() {
     line
 }
 
-function update_alpine_ssservice() {
+function _update_alpine_ssservice_impl() {
     line
     echo -e "${YELLOW}  更新 Alpine SS2022（shadowsocks-rust）...${NC}"
     ensure_alpine_supported || return 1
     ensure_alpine_community_repo || { line; return 1; }
+    apk update || {
+        echo -e "${RED}  ✗ 无法刷新 Alpine 仓库索引，已取消更新。${NC}"
+        line
+        return 1
+    }
 
-    apk update || { line; return 1; }
-    apk add --upgrade shadowsocks-rust mimalloc curl wget jq openssl coreutils procps ca-certificates iproute2 || {
+    if ! backup_alpine_package_for_transaction shadowsocks-rust \
+        || ! backup_alpine_package_for_transaction mimalloc; then
+        echo -e "${RED}  ✗ 无法备份当前 Alpine 软件包，已取消更新以保证可回滚。${NC}"
+        line
+        return 1
+    fi
+
+    apk add --upgrade shadowsocks-rust mimalloc || {
         echo -e "${RED}  ✗ 更新失败，请检查网络或仓库状态。${NC}"
         line
         return 1
@@ -2176,7 +2409,7 @@ function show_alpine_ss_status() {
     listen_port=$(get_alpine_ss_port_from_config)
     if [[ -n "$listen_port" ]]; then
         center_echo "监听检查" "${CYAN}${BOLD}"
-        ss -ltnup 2>/dev/null | grep ":${listen_port}\b" || echo -e "${YELLOW}  未检测到 ${listen_port} 端口监听${NC}"
+        ss -ltnup 2>/dev/null | grep -E ":${listen_port}([[:space:]]|$)" || echo -e "${YELLOW}  未检测到 ${listen_port} 端口监听${NC}"
         echo ""
     fi
 
@@ -2298,12 +2531,16 @@ function uninstall_alpine_ss_and_delete_self() {
         return 0
     fi
 
+    reset_cleanup_failures
     cleanup_alpine_ss_artifacts
     cleanup_alpine_service_backups
 
     cleanup_doudou_runtime
-
-    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    verify_full_uninstall_residuals "alpine-ss"
+    if ! report_cleanup_outcome "卸载与清理已完成。"; then
+        line
+        return 1
+    fi
     line
     exit 0
 }
@@ -2404,8 +2641,11 @@ ${ss_link_v6}
 
     ports_text="端口:
   SS2022 :     ${ss_port}"
-    write_dynamic_result_files "$sub_text" "$ports_text"
-    write_install_runtime_kind "alpine-ss2022"
+    write_dynamic_result_files "$sub_text" "$ports_text" || {
+        echo -e "${RED}  节点信息原子写入失败，请检查 ${DATA_DIR}${NC}"
+        return 1
+    }
+    write_install_runtime_kind "alpine-ss2022" || return 1
     render_saved_node_info "配置完成" || {
         echo -e "${RED}  节点信息写入失败，请检查 ${INFO_FILE}${NC}"
         return 1
@@ -2987,12 +3227,12 @@ function render_saved_node_info() {
     local title="$1"
     local saved_time=""
 
-    if [[ ! -f "$INFO_FILE" ]]; then
+    if [[ ! -s "$INFO_FILE" ]]; then
         return 1
     fi
 
     saved_time=$(get_saved_generate_time "$INFO_FILE")
-    [[ -n "$saved_time" ]] || saved_time="未知"
+    [[ -n "$saved_time" ]] || return 1
 
     line
     center_echo "$title" "${GREEN}${BOLD}"
@@ -3100,8 +3340,52 @@ function manage_sni() {
 
 function uri_decode() {
     local data="$1"
+    local decoded=""
+    local char=""
+    local hex=""
+    local i=0
+
+    while (( i < ${#data} )); do
+        char="${data:i:1}"
+        if [[ "$char" == "%" ]]; then
+            (( i + 2 < ${#data} )) || return 1
+            hex="${data:i+1:2}"
+            [[ "$hex" =~ ^[0-9A-Fa-f]{2}$ && "$hex" != "00" ]] || return 1
+            printf -v char '%b' "\\x${hex}"
+            decoded+="$char"
+            i=$((i + 3))
+            continue
+        fi
+        decoded+="$char"
+        i=$((i + 1))
+    done
+    printf '%s' "$decoded"
+}
+
+function uri_decode_query_component() {
+    local data="$1"
     data="${data//+/ }"
-    printf '%b' "${data//%/\\x}"
+    uri_decode "$data"
+}
+
+function validate_percent_encoding() {
+    local data="$1"
+    local char=""
+    local hex=""
+    local i=0
+
+    while (( i < ${#data} )); do
+        char="${data:i:1}"
+        if [[ "$char" == "%" ]]; then
+            (( i + 2 < ${#data} )) || return 1
+            hex="${data:i+1:2}"
+            [[ "$hex" =~ ^[0-9A-Fa-f]{2}$ && "$hex" != "00" ]] || return 1
+            i=$((i + 3))
+            continue
+        fi
+        i=$((i + 1))
+    done
+    return 0
 }
 
 function get_query_param() {
@@ -3122,8 +3406,8 @@ function get_query_param() {
             if [[ $had_noglob -eq 0 ]]; then
                 set +f
             fi
-            uri_decode "$v"
-            return 0
+            uri_decode_query_component "$v"
+            return $?
         fi
     done
 
@@ -3140,7 +3424,7 @@ function base64_decode_relaxed() {
     case $((${#s} % 4)) in
         2) s+="==" ;;
         3) s+="=" ;;
-        1) s+="===" ;;
+        1) return 1 ;;
     esac
     printf '%s' "$s" | base64 -d 2>/dev/null
 }
@@ -3201,7 +3485,9 @@ function parse_host_port() {
     else
         return 1
     fi
-    [[ -n "$PARSED_HOST" && "$PARSED_PORT" =~ ^[0-9]+$ && ${#PARSED_PORT} -le 5 ]] || return 1
+    [[ -n "$PARSED_HOST" && "$PARSED_HOST" != *[[:space:][:cntrl:]]* \
+        && "$PARSED_HOST" != *'['* && "$PARSED_HOST" != *']'* \
+        && "$PARSED_PORT" =~ ^[0-9]+$ && ${#PARSED_PORT} -le 5 ]] || return 1
     port_number=$((10#$PARSED_PORT))
     (( port_number >= 1 && port_number <= 65535 )) || {
         echo -e "${RED}  落地链接端口必须在 1-65535 范围内。${NC}" >&2
@@ -3214,7 +3500,7 @@ function parse_ss_link_to_outbound() {
     local link="$1"
     local tag="$2"
     local body main fragment left right creds hostport decoded method password
-    local main_no_query="" query=""
+    local main_no_query="" query="" decoded_body=""
 
     body="${link#ss://}"
     main="${body%%#*}"
@@ -3236,8 +3522,8 @@ function parse_ss_link_to_outbound() {
     if [[ "$main_no_query" == *"@"* ]]; then
         left="${main_no_query%@*}"
         right="${main_no_query#*@}"
-        left=$(uri_decode "$left")
-        right=$(uri_decode "$right")
+        left=$(uri_decode "$left") || return 1
+        right=$(uri_decode "$right") || return 1
         hostport="${right%/}"
         if [[ "$left" == *:* ]]; then
             creds="$left"
@@ -3245,8 +3531,8 @@ function parse_ss_link_to_outbound() {
             creds=$(base64_decode_relaxed "$left") || return 1
         fi
     else
-        decoded=$(base64_decode_relaxed "$(uri_decode "$main_no_query")") || return 1
-        decoded=$(uri_decode "$decoded")
+        decoded_body=$(uri_decode "$main_no_query") || return 1
+        decoded=$(base64_decode_relaxed "$decoded_body") || return 1
         creds="${decoded%@*}"
         hostport="${decoded#*@}"
         hostport="${hostport%/}"
@@ -3259,7 +3545,7 @@ function parse_ss_link_to_outbound() {
     parse_host_port "$hostport" || return 1
 
     PARSED_LINK_KIND="ss"
-    PARSED_LINK_LABEL=$(uri_decode "$fragment")
+    PARSED_LINK_LABEL=$(uri_decode "$fragment") || return 1
     [[ -n "$PARSED_LINK_LABEL" ]] || PARSED_LINK_LABEL="SS 落地"
     PARSED_METHOD="$method"
 
@@ -3329,8 +3615,12 @@ function parse_vless_link_to_outbound() {
         hostport="$rest"
         query=""
     fi
-    uuid_dec=$(uri_decode "$uuid")
-    hostport_dec=$(uri_decode "$hostport")
+    validate_percent_encoding "$query" || {
+        echo -e "${RED}  VLESS 落地链接包含非法百分号编码，已严格拒绝。${NC}" >&2
+        return 1
+    }
+    uuid_dec=$(uri_decode "$uuid") || return 1
+    hostport_dec=$(uri_decode "$hostport") || return 1
     hostport_dec="${hostport_dec%/}"
     parse_host_port "$hostport_dec" || return 1
 
@@ -3426,7 +3716,7 @@ EOF
 )
     fi
 
-    label_dec=$(uri_decode "$fragment")
+    label_dec=$(uri_decode "$fragment") || return 1
     if [[ -n "$encryption" && "$encryption" != "none" ]]; then
         [[ -n "$label_dec" ]] || label_dec="Vless-Enc 落地"
     elif [[ "$security" == "reality" ]]; then
@@ -3580,16 +3870,26 @@ function write_dynamic_result_files() {
     local public_sub_text=""
     local normalized_public_sub_text=""
     local normalized_ports_text=""
+    local info_tmp=""
+    local sub_tmp=""
     now_time=$(date '+%Y-%m-%d %H:%M:%S')
 
-    normalized_sub_text=$(printf '%b\n' "$sub_text" | normalize_block_spacing)
-    public_sub_text=$(printf '%b\n' "$sub_text" | sanitize_public_subscription_text)
+    normalized_sub_text=$(printf '%s\n' "$sub_text" | normalize_block_spacing)
+    public_sub_text=$(printf '%s\n' "$sub_text" | sanitize_public_subscription_text)
     normalized_public_sub_text=$(printf '%s\n' "$public_sub_text" | normalize_block_spacing)
     if [[ -n "$ports_text" ]]; then
-        normalized_ports_text=$(printf '%b\n' "$ports_text" | normalize_block_spacing)
+        normalized_ports_text=$(printf '%s\n' "$ports_text" | normalize_block_spacing)
     fi
 
-    (
+    info_tmp=$(mktemp "${INFO_FILE}.new.XXXXXX") || return 1
+    sub_tmp=$(mktemp "${SUB_FILE}.new.XXXXXX") || {
+        rm -f -- "$info_tmp" >/dev/null 2>&1 || true
+        return 1
+    }
+    add_tmp_file "$info_tmp"
+    add_tmp_file "$sub_tmp"
+
+    if ! (
         umask 077
         {
             printf '作者    : %s\n' "$AUTHOR_NAME"
@@ -3599,16 +3899,26 @@ function write_dynamic_result_files() {
             if [[ -n "$normalized_ports_text" ]]; then
                 printf '\n%s\n' "$normalized_ports_text"
             fi
-        } > "$INFO_FILE"
+        } > "$info_tmp" &&
 
         {
             printf '版本    : %s\n' "$SCRIPT_VERSION"
             printf '生成时间: %s\n\n' "$now_time"
             printf '%s\n' "$normalized_public_sub_text"
-        } > "$SUB_FILE"
-    )
+        } > "$sub_tmp"
+    ); then
+        rm -f -- "$info_tmp" "$sub_tmp" >/dev/null 2>&1 || true
+        return 1
+    fi
 
-    chmod 600 "$INFO_FILE" "$SUB_FILE" >/dev/null 2>&1 || true
+    if [[ ! -s "$info_tmp" || ! -s "$sub_tmp" ]] \
+        || ! chmod 600 "$info_tmp" "$sub_tmp" \
+        || ! mv -f -- "$info_tmp" "$INFO_FILE" \
+        || ! mv -f -- "$sub_tmp" "$SUB_FILE"; then
+        rm -f -- "$info_tmp" "$sub_tmp" >/dev/null 2>&1 || true
+        return 1
+    fi
+    return 0
 }
 
 
@@ -3837,6 +4147,7 @@ function write_xhttp_client_patch_file() {
     local path="$9"
     local patch_dir=""
     local patch_json=""
+    local staged_path=""
 
     patch_json=$(build_xhttp_client_patch_json "$address" "$port" "$security" "$server_name" "$fingerprint" "$public_key" "$short_id" "$path") || return 1
     if ! printf '%s\n' "$patch_json" | jq -e . >/dev/null 2>&1; then
@@ -3849,9 +4160,16 @@ function write_xhttp_client_patch_file() {
         echo -e "${RED}  ✗ 无法创建 XHTTP 补丁目录：${patch_dir}${NC}"
         return 1
     }
-    if ! (umask 077; printf '%s\n' "$patch_json" > "$file_path"); then
+    staged_path=$(mktemp "${file_path}.new.XXXXXX") || {
+        echo -e "${RED}  ✗ 无法创建 XHTTP 客户端补丁暂存文件。${NC}"
+        return 1
+    }
+    add_tmp_file "$staged_path"
+    if ! (umask 077; printf '%s\n' "$patch_json" > "$staged_path") \
+        || ! chmod 600 "$staged_path" \
+        || ! mv -f -- "$staged_path" "$file_path"; then
         echo -e "${RED}  ✗ 无法写入 XHTTP 客户端补丁：${file_path}${NC}"
-        rm -f -- "$file_path" >/dev/null 2>&1 || true
+        rm -f -- "$staged_path" >/dev/null 2>&1 || true
         return 1
     fi
     return 0
@@ -4149,7 +4467,7 @@ function restart_alpine_xray_service() {
     local listen_port=""
     listen_port=$(get_alpine_xray_enc_port_from_config)
     if [[ -n "$listen_port" ]]; then
-        if ss -ltnup 2>/dev/null | grep -q ":${listen_port}\b"; then
+        if ss -ltnup 2>/dev/null | grep -Eq ":${listen_port}([[:space:]]|$)"; then
             echo -e "${GREEN}  ✓ 已检测到 ${listen_port} 端口监听${NC}"
         else
             echo -e "${YELLOW}  ⚠ 未明确检测到 ${listen_port} 端口监听，请手动检查：ss -ltnup | grep :${listen_port}${NC}"
@@ -4211,7 +4529,7 @@ function show_alpine_xray_status() {
     listen_port=$(get_alpine_xray_enc_port_from_config)
     if [[ -n "$listen_port" ]]; then
         center_echo "监听检查" "${CYAN}${BOLD}"
-        ss -ltnup 2>/dev/null | grep ":${listen_port}\b" || echo -e "${YELLOW}  未检测到 ${listen_port} 端口监听${NC}"
+        ss -ltnup 2>/dev/null | grep -E ":${listen_port}([[:space:]]|$)" || echo -e "${YELLOW}  未检测到 ${listen_port} 端口监听${NC}"
         echo ""
     fi
 
@@ -4331,15 +4649,30 @@ function cleanup_xray_artifacts_alpine() {
     echo -e "${YELLOW}  清理 Alpine Xray 残留...${NC}"
     rc-service xray stop >/dev/null 2>&1 || true
     rc-update del xray default >/dev/null 2>&1 || true
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -x xray >/dev/null 2>&1 || true
+    fi
     remove_path_quiet "$ALPINE_XRAY_SERVICE_FILE" "$ALPINE_XRAY_SERVICE_FILE"
     cleanup_xray_artifacts
 }
 
 function cleanup_alpine_ss_artifacts() {
+    local -a packages_to_remove=()
+
     echo -e "${YELLOW}  清理 Alpine SS2022 残留...${NC}"
     rc-service ssserver stop >/dev/null 2>&1 || true
     rc-update del ssserver default >/dev/null 2>&1 || true
-    apk del shadowsocks-rust mimalloc >/dev/null 2>&1 || true
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -x ssserver >/dev/null 2>&1 || true
+    fi
+    if command -v apk >/dev/null 2>&1; then
+        apk info -e shadowsocks-rust >/dev/null 2>&1 && packages_to_remove+=(shadowsocks-rust)
+        apk info -e mimalloc >/dev/null 2>&1 && packages_to_remove+=(mimalloc)
+        if [[ ${#packages_to_remove[@]} -gt 0 ]] \
+            && ! apk del "${packages_to_remove[@]}" >/dev/null 2>&1; then
+            record_cleanup_failure "卸载 Alpine 软件包失败：${packages_to_remove[*]}"
+        fi
+    fi
     remove_path_quiet "$ALPINE_SS_SERVICE_FILE" "$ALPINE_SS_SERVICE_FILE"
     remove_path_quiet "$ALPINE_SS_CONFIG_DIR" "$ALPINE_SS_CONFIG_DIR"
 }
@@ -4358,11 +4691,15 @@ function uninstall_alpine_xray_and_delete_self() {
         return 0
     fi
 
+    reset_cleanup_failures
     cleanup_xray_artifacts_alpine
     cleanup_alpine_service_backups
     cleanup_doudou_runtime
-
-    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    verify_full_uninstall_residuals "alpine-xray"
+    if ! report_cleanup_outcome "卸载与清理已完成。"; then
+        line
+        return 1
+    fi
     line
     exit 0
 }
@@ -4614,7 +4951,7 @@ function _install_alpine_xray_vlessenc_impl() {
 
     echo -e "\n${CYAN}[Step 6/6] 写入配置并启动服务${NC}"
     render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
-    ensure_runtime_layout
+    ensure_runtime_layout || return 1
     mkdir -p "$CONFIG_DIR"
     backup_existing_config || { echo -e "${RED}  旧配置备份失败，安装已中止。${NC}"; return 1; }
 
@@ -4859,7 +5196,10 @@ JSONEOF
             return 1
         }
     fi
-    cp -f -- "$TEMP_CONFIG" "$CONFIG_FILE" || return 1
+    atomic_replace_file "$TEMP_CONFIG" "$CONFIG_FILE" 600 || {
+        echo -e "${RED}  ✗ 无法原子替换 Xray 配置文件。${NC}"
+        return 1
+    }
     chmod 600 "$CONFIG_FILE" || return 1
     write_alpine_xray_openrc_service || return 1
     rc-update add xray default >/dev/null 2>&1 || true
@@ -4888,14 +5228,17 @@ JSONEOF
     fi
     echo -e "${GREEN}  ✓ Alpine Xray 服务已启动${NC}"
 
-    if ss -ltnup 2>/dev/null | grep -q ":${LOCAL_ENC_PORT}\b"; then
+    if ss -ltnup 2>/dev/null | grep -Eq ":${LOCAL_ENC_PORT}([[:space:]]|$)"; then
         echo -e "${GREEN}  ✓ 已检测到 ${LOCAL_ENC_PORT} 端口监听${NC}"
     else
         echo -e "${YELLOW}  ⚠ 未明确检测到 ${LOCAL_ENC_PORT} 端口监听，请手动检查：ss -ltnup | grep :${LOCAL_ENC_PORT}${NC}"
     fi
 
-    write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT"
-    write_install_runtime_kind "alpine-xray-vlessenc"
+    write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT" || {
+        echo -e "${RED}  节点信息原子写入失败，请检查 ${DATA_DIR}${NC}"
+        return 1
+    }
+    write_install_runtime_kind "alpine-xray-vlessenc" || return 1
     render_saved_node_info "配置完成" || { echo -e "${RED}  节点信息写入失败，请检查 ${INFO_FILE}${NC}"; return 1; }
 }
 
@@ -5773,7 +6116,7 @@ ${CYAN}[Step 3/7] 第三层：模板选择${NC}"
 
     echo -e "\n${CYAN}[Step 7/7] 写入配置并启动服务${NC}"
     render_install_context "$TEMPLATE_LABEL" "$INSTALL_MODE"
-    ensure_runtime_layout
+    ensure_runtime_layout || return 1
     mkdir -p "$CONFIG_DIR"
     rm -rf -- "$XHTTP_PATCH_DIR" >/dev/null 2>&1 || true
     mkdir -p -- "$XHTTP_PATCH_DIR" || {
@@ -6921,7 +7264,10 @@ JSONEOF
     fi
     echo -e "${GREEN}  ✓ 配置文件语法验证通过${NC}"
 
-    cp -f -- "$TEMP_CONFIG" "$CONFIG_FILE" || return 1
+    atomic_replace_file "$TEMP_CONFIG" "$CONFIG_FILE" 600 || {
+        echo -e "${RED}  ✗ 无法原子替换 Xray 配置文件。${NC}"
+        return 1
+    }
     fix_xray_config_permissions || return 1
 
     systemctl enable xray >/dev/null 2>&1 || true
@@ -6970,8 +7316,11 @@ JSONEOF
         7) detect_port_bind_warning "XHTTP + Reality" "$PORT" ;;
     esac
 
-    write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT"
-    write_install_runtime_kind "xray"
+    write_dynamic_result_files "$SUBS_TEXT" "$PORTS_TEXT" || {
+        echo -e "${RED}  节点信息原子写入失败，请检查 ${DATA_DIR}${NC}"
+        return 1
+    }
+    write_install_runtime_kind "xray" || return 1
     render_saved_node_info "配置完成" || { echo -e "${RED}  节点信息写入失败，请检查 ${INFO_FILE}${NC}"; return 1; }
 }
 
@@ -7106,12 +7455,16 @@ function uninstall_alpine_all_and_delete_self() {
         return 0
     fi
 
+    reset_cleanup_failures
     cleanup_xray_artifacts_alpine
     cleanup_alpine_ss_artifacts
     cleanup_alpine_service_backups
     cleanup_doudou_runtime
-
-    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    verify_full_uninstall_residuals "alpine-all"
+    if ! report_cleanup_outcome "卸载与清理已完成。"; then
+        line
+        return 1
+    fi
     line
     exit 0
 }
@@ -7126,6 +7479,15 @@ function uninstall_current_service_and_delete_self() {
         xray|"")
             if is_alpine_system; then
                 uninstall_alpine_all_and_delete_self
+                return $?
+            fi
+            uninstall_xray_and_delete_self
+            ;;
+        *)
+            echo -e "${YELLOW}  ⚠ 安装类型记录无法识别：${runtime_kind}；将按当前系统执行严格卸载。${NC}"
+            if is_alpine_system; then
+                uninstall_alpine_all_and_delete_self
+                return $?
             fi
             uninstall_xray_and_delete_self
             ;;
@@ -7375,6 +7737,136 @@ function edit_config() {
     done
 }
 
+function reset_cleanup_failures() {
+    CLEANUP_FAILURES=()
+}
+
+function record_cleanup_failure() {
+    local failure="$1"
+    local existing=""
+
+    for existing in "${CLEANUP_FAILURES[@]-}"; do
+        [[ "$existing" == "$failure" ]] && return 0
+    done
+    CLEANUP_FAILURES+=("$failure")
+}
+
+function verify_path_removed() {
+    local path="$1"
+    if [[ -e "$path" || -L "$path" ]]; then
+        record_cleanup_failure "仍有残留：${path}"
+        return 1
+    fi
+    return 0
+}
+
+function verify_process_stopped() {
+    local process_name="$1"
+    command -v pgrep >/dev/null 2>&1 || return 0
+    if pgrep -x "$process_name" >/dev/null 2>&1; then
+        record_cleanup_failure "进程仍在运行：${process_name}"
+        return 1
+    fi
+    return 0
+}
+
+function verify_full_uninstall_residuals() {
+    local cleanup_mode="$1"
+    local path=""
+    local -a manager_paths=(
+        "$SELF_DIR"
+        "$DATA_DIR"
+        "/usr/local/bin/zxray"
+        "/usr/local/bin/zdd"
+        "/usr/local/bin/doudou"
+        "/usr/local/bin/xray-manager"
+        "/usr/bin/zxray"
+        "/usr/bin/zdd"
+        "/usr/bin/doudou"
+        "/usr/bin/xray-manager"
+        "/usr/sbin/zxray"
+        "/usr/sbin/zdd"
+        "/usr/sbin/doudou"
+        "/usr/sbin/xray-manager"
+        "/root/bin/zxray"
+        "/root/bin/zdd"
+        "/root/bin/doudou"
+        "/root/bin/xray-manager"
+        "/root/.local/bin/zxray"
+        "/root/.local/bin/zdd"
+        "/root/.local/bin/doudou"
+        "/root/.local/bin/xray-manager"
+    )
+    local -a xray_paths=(
+        "/usr/local/bin/xray"
+        "/usr/local/share/xray"
+        "/usr/local/etc/xray"
+        "/var/log/xray"
+        "/var/lib/xray"
+        "/run/xray"
+        "/etc/systemd/system/xray.service"
+        "/etc/systemd/system/xray@.service"
+        "/etc/systemd/system/xray.service.d"
+        "/etc/systemd/system/xray@.service.d"
+        "/etc/systemd/system/multi-user.target.wants/xray.service"
+        "/etc/systemd/system/multi-user.target.wants/xray@.service"
+        "/etc/logrotate.d/xray"
+        "/etc/systemd/system/logrotate@.service"
+        "/etc/systemd/system/logrotate@.timer"
+        "/etc/systemd/system/timers.target.wants/logrotate@xray.timer"
+    )
+
+    for path in "${manager_paths[@]}"; do
+        verify_path_removed "$path" || true
+    done
+
+    case "$cleanup_mode" in
+        systemd|alpine-xray|alpine-all)
+            for path in "${xray_paths[@]}"; do
+                verify_path_removed "$path" || true
+            done
+            verify_process_stopped xray || true
+            ;;
+    esac
+
+    case "$cleanup_mode" in
+        alpine-ss|alpine-all)
+            verify_path_removed "$ALPINE_SS_SERVICE_FILE" || true
+            verify_path_removed "$ALPINE_SS_CONFIG_DIR" || true
+            verify_process_stopped ssserver || true
+            if command -v apk >/dev/null 2>&1; then
+                apk info -e shadowsocks-rust >/dev/null 2>&1 \
+                    && record_cleanup_failure "软件包仍存在：shadowsocks-rust"
+                apk info -e mimalloc >/dev/null 2>&1 \
+                    && record_cleanup_failure "软件包仍存在：mimalloc"
+            fi
+            ;;
+    esac
+
+    case "$cleanup_mode" in
+        alpine-xray|alpine-all)
+            verify_path_removed "$ALPINE_XRAY_SERVICE_FILE" || true
+            ;;
+    esac
+}
+
+function report_cleanup_outcome() {
+    local success_message="$1"
+    local failure=""
+
+    if [[ ${#CLEANUP_FAILURES[@]} -eq 0 ]]; then
+        echo -e "${GREEN}  ✓ ${success_message}${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  ✗ 严格卸载未完全成功，发现 ${#CLEANUP_FAILURES[@]} 项问题：${NC}"
+    for failure in "${CLEANUP_FAILURES[@]}"; do
+        echo -e "${RED}    - ${failure}${NC}"
+    done
+    echo -e "${YELLOW}  请处理上述残留后重新执行卸载；脚本本次返回失败状态。${NC}"
+    return 1
+}
+
 function remove_path_quiet() {
     local path="$1"
     local label="$2"
@@ -7384,12 +7876,26 @@ function remove_path_quiet() {
             echo -e "${GREEN}  ✓ 已删除: ${label}${NC}"
         else
             echo -e "${YELLOW}  ⚠ 删除失败: ${label}${NC}"
+            record_cleanup_failure "删除失败：${label}"
         fi
     fi
 }
 
 function cleanup_xray_artifacts() {
     echo -e "${YELLOW}  清理 Xray 残留...${NC}"
+
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+        systemctl stop xray >/dev/null 2>&1 || true
+        systemctl disable xray >/dev/null 2>&1 || true
+        systemctl stop logrotate@xray.timer >/dev/null 2>&1 || true
+        systemctl disable logrotate@xray.timer >/dev/null 2>&1 || true
+    fi
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service xray stop >/dev/null 2>&1 || true
+    fi
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -x xray >/dev/null 2>&1 || true
+    fi
 
     remove_path_quiet "/usr/local/bin/xray" "/usr/local/bin/xray"
     remove_path_quiet "/usr/local/share/xray" "/usr/local/share/xray"
@@ -7403,9 +7909,15 @@ function cleanup_xray_artifacts() {
     remove_path_quiet "/etc/systemd/system/xray@.service.d" "/etc/systemd/system/xray@.service.d"
     remove_path_quiet "/etc/systemd/system/multi-user.target.wants/xray.service" "/etc/systemd/system/multi-user.target.wants/xray.service"
     remove_path_quiet "/etc/systemd/system/multi-user.target.wants/xray@.service" "/etc/systemd/system/multi-user.target.wants/xray@.service"
+    remove_path_quiet "/etc/logrotate.d/xray" "/etc/logrotate.d/xray"
+    remove_path_quiet "/etc/systemd/system/logrotate@.service" "/etc/systemd/system/logrotate@.service"
+    remove_path_quiet "/etc/systemd/system/logrotate@.timer" "/etc/systemd/system/logrotate@.timer"
+    remove_path_quiet "/etc/systemd/system/timers.target.wants/logrotate@xray.timer" "/etc/systemd/system/timers.target.wants/logrotate@xray.timer"
 
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl reset-failed >/dev/null 2>&1 || true
+    if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+        systemctl daemon-reload >/dev/null 2>&1 || record_cleanup_failure "systemd daemon-reload 失败"
+        systemctl reset-failed >/dev/null 2>&1 || true
+    fi
 }
 
 function cleanup_legacy_quick_paths() {
@@ -7483,7 +7995,6 @@ function remove_recorded_source_if_safe() {
     local source_path=""
     local expected_sha=""
     local actual_sha=""
-    local owner_uid=""
     local -a record_lines=()
 
     [[ -f "$SOURCE_RECORD_FILE" ]] || return 0
@@ -7502,19 +8013,18 @@ function remove_recorded_source_if_safe() {
     esac
     [[ -f "$source_path" && ! -L "$source_path" ]] || return 0
 
-    owner_uid=$(stat -Lc '%u' -- "$source_path" 2>/dev/null || true)
-    [[ "$owner_uid" == "0" ]] || return 0
-    command -v sha256sum >/dev/null 2>&1 || return 0
-    actual_sha=$(sha256sum -- "$source_path" 2>/dev/null | awk 'NR==1 {print tolower($1)}')
-    [[ "$actual_sha" == "$expected_sha" ]] || {
-        echo -e "${YELLOW}  ⚠ 原始脚本内容已变化，为避免误删，保留：${source_path}${NC}"
-        return 0
-    }
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_sha=$(sha256sum -- "$source_path" 2>/dev/null | awk 'NR==1 {print tolower($1)}')
+        if [[ -n "$actual_sha" && "$actual_sha" != "$expected_sha" ]]; then
+            echo -e "${YELLOW}  ⚠ 原始脚本内容已变化；按严格卸载要求仍继续删除：${source_path}${NC}"
+        fi
+    fi
 
     if rm -f -- "$source_path"; then
         echo -e "${GREEN}  ✓ 已删除原始安装脚本：${source_path}${NC}"
     else
         echo -e "${YELLOW}  ⚠ 原始安装脚本删除失败：${source_path}${NC}"
+        record_cleanup_failure "原始安装脚本删除失败：${source_path}"
     fi
 }
 
@@ -7544,6 +8054,8 @@ function remove_legacy_root_script_sources() {
         [[ "$owner_uid" == "0" ]] || continue
         if rm -f -- "$source_path"; then
             echo -e "${GREEN}  ✓ 已删除旧的 root 脚本源文件：${source_path}${NC}"
+        else
+            record_cleanup_failure "旧的 root 脚本源文件删除失败：${source_path}"
         fi
     done
 }
@@ -7555,11 +8067,15 @@ function cleanup_script_temp_artifacts() {
         /tmp/doudou-self-update.*.sh
         /tmp/xray-install.*.sh
         /tmp/xray-install-curl.*.log
+        /tmp/xray-installer-run.*.log
         /tmp/xray-update.*.log
         /tmp/xray_config.*.json
         /tmp/xray-alpine-config.*.json
         /tmp/ssserver-foreground.*.log
-        /tmp/alpine-manual-time.*.log
+        /tmp/doudou-xray-transaction.*
+        /usr/local/bin/zxray.new.*
+        /etc/sysctl.d/99-bbr.conf.new.*
+        /etc/apk/repositories.new.*
     )
 
     for temp_path in "${temp_paths[@]}"; do
@@ -7570,10 +8086,12 @@ function cleanup_script_temp_artifacts() {
 
 function cleanup_bbr_config() {
     if [[ -f "$SYSCTL_BBR_BACKUP_FILE" ]]; then
-        if mv -f -- "$SYSCTL_BBR_BACKUP_FILE" "$SYSCTL_BBR_FILE"; then
+        if atomic_replace_file "$SYSCTL_BBR_BACKUP_FILE" "$SYSCTL_BBR_FILE" 644 \
+            && rm -f -- "$SYSCTL_BBR_BACKUP_FILE"; then
             echo -e "${GREEN}  ✓ 已恢复原有 BBR 配置: ${SYSCTL_BBR_FILE}${NC}"
         else
             echo -e "${YELLOW}  ⚠ 原有 BBR 配置恢复失败，已保留备份: ${SYSCTL_BBR_BACKUP_FILE}${NC}"
+            record_cleanup_failure "原有 BBR 配置恢复失败：${SYSCTL_BBR_FILE}"
         fi
         return 0
     fi
@@ -7581,6 +8099,30 @@ function cleanup_bbr_config() {
     if [[ -f "$SYSCTL_BBR_FILE" ]] && grep -q '^# BBR + FQ' "$SYSCTL_BBR_FILE"; then
         remove_path_quiet "$SYSCTL_BBR_FILE" "$SYSCTL_BBR_FILE"
     fi
+}
+
+function restore_alpine_repository_config() {
+    local repo_file="/etc/apk/repositories"
+
+    [[ -f "$ALPINE_REPO_BACKUP_FILE" ]] || return 0
+    if atomic_replace_file "$ALPINE_REPO_BACKUP_FILE" "$repo_file" 644 \
+        && rm -f -- "$ALPINE_REPO_BACKUP_FILE"; then
+        echo -e "${GREEN}  ✓ 已恢复原有 Alpine 仓库配置: ${repo_file}${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}  ⚠ Alpine 仓库配置恢复失败，已保留备份: ${ALPINE_REPO_BACKUP_FILE}${NC}"
+    record_cleanup_failure "原有 Alpine 仓库配置恢复失败：${repo_file}"
+    return 1
+}
+
+function cleanup_data_dir_after_restore() {
+    if [[ -f "$SYSCTL_BBR_BACKUP_FILE" || -f "$ALPINE_REPO_BACKUP_FILE" ]]; then
+        echo -e "${YELLOW}  ⚠ 为避免丢失恢复备份，暂时保留目录：${DATA_DIR}${NC}"
+        record_cleanup_failure "仍有恢复备份，已保留目录：${DATA_DIR}"
+        return 1
+    fi
+    remove_path_quiet "$DATA_DIR" "$DATA_DIR"
 }
 
 function cleanup_doudou_runtime() {
@@ -7591,6 +8133,7 @@ function cleanup_doudou_runtime() {
     remove_path_quiet "$SERVICE_KIND_FILE" "$SERVICE_KIND_FILE"
     remove_path_quiet "$ALPINE_RESOLV_BACKUP" "$ALPINE_RESOLV_BACKUP"
     remove_path_quiet "$SNI_POOL_FILE" "$SNI_POOL_FILE"
+    restore_alpine_repository_config || true
     cleanup_bbr_config
     cleanup_legacy_quick_paths
     remove_recorded_source_if_safe
@@ -7598,7 +8141,7 @@ function cleanup_doudou_runtime() {
     remove_legacy_root_script_sources
     cleanup_script_temp_artifacts
     remove_path_quiet "$SELF_DIR" "$SELF_DIR"
-    remove_path_quiet "$DATA_DIR" "$DATA_DIR"
+    cleanup_data_dir_after_restore || true
 }
 
 function cleanup_script_only_runtime() {
@@ -7609,6 +8152,7 @@ function cleanup_script_only_runtime() {
     remove_path_quiet "$SERVICE_KIND_FILE" "$SERVICE_KIND_FILE"
     remove_path_quiet "$ALPINE_RESOLV_BACKUP" "$ALPINE_RESOLV_BACKUP"
     remove_path_quiet "$SNI_POOL_FILE" "$SNI_POOL_FILE"
+    restore_alpine_repository_config || true
     cleanup_bbr_config
     cleanup_legacy_quick_paths
     remove_recorded_source_if_safe
@@ -7616,7 +8160,7 @@ function cleanup_script_only_runtime() {
     remove_legacy_root_script_sources
     cleanup_script_temp_artifacts
     remove_path_quiet "$SELF_DIR" "$SELF_DIR"
-    remove_path_quiet "$DATA_DIR" "$DATA_DIR"
+    cleanup_data_dir_after_restore || true
 }
 
 function uninstall_script_only() {
@@ -7632,9 +8176,13 @@ function uninstall_script_only() {
         return 0
     fi
 
+    reset_cleanup_failures
     cleanup_script_only_runtime
-
-    echo -e "${GREEN}  ✓ 脚本已卸载，当前服务已保留。${NC}"
+    verify_full_uninstall_residuals "script-only"
+    if ! report_cleanup_outcome "脚本已卸载，当前服务已保留。"; then
+        line
+        return 1
+    fi
     line
     exit 0
 }
@@ -7653,6 +8201,7 @@ function uninstall_xray_and_delete_self() {
         return 0
     fi
 
+    reset_cleanup_failures
     echo -e "${YELLOW}  停止并禁用 Xray 服务...${NC}"
     systemctl stop xray >/dev/null 2>&1 || true
     systemctl disable xray >/dev/null 2>&1 || true
@@ -7664,8 +8213,11 @@ function uninstall_xray_and_delete_self() {
 
     cleanup_xray_artifacts
     cleanup_doudou_runtime
-
-    echo -e "${GREEN}  ✓ 卸载与清理已完成。${NC}"
+    verify_full_uninstall_residuals "systemd"
+    if ! report_cleanup_outcome "卸载与清理已完成。"; then
+        line
+        return 1
+    fi
     line
     exit 0
 }
@@ -7820,15 +8372,19 @@ function show_main_header() {
 }
 
 function install_alpine_ss2022() {
-    run_transactional "alpine" "Alpine SS2022 安装" _install_alpine_ss2022_impl
+    run_transactional "alpine-ss" "Alpine SS2022 安装" _install_alpine_ss2022_impl
+}
+
+function update_alpine_ssservice() {
+    run_transactional "alpine-ss" "Alpine SS2022 组件更新" _update_alpine_ssservice_impl
 }
 
 function install_alpine_xray_vlessenc() {
-    run_transactional "alpine" "Alpine Xray 覆盖安装" _install_alpine_xray_vlessenc_impl
+    run_transactional "alpine-xray" "Alpine Xray 覆盖安装" _install_alpine_xray_vlessenc_impl
 }
 
 function update_alpine_xray_service() {
-    run_transactional "alpine" "Alpine Xray 核心更新" _update_alpine_xray_service_impl
+    run_transactional "alpine-xray" "Alpine Xray 核心更新" _update_alpine_xray_service_impl
 }
 
 function install_xray() {
