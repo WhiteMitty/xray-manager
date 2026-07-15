@@ -2762,6 +2762,7 @@ function benchmark_dest() {
     local d
     local candidate_index=0
     local candidate_total=${#DEST_OPTIONS[@]}
+    local candidate_index_width=${#candidate_total}
     for d in "${DEST_OPTIONS[@]}"; do
         domain_len=${#d}
         if (( domain_len > domain_col_width )); then
@@ -2775,7 +2776,7 @@ function benchmark_dest() {
         local success=0
         local i
 
-        printf '  [%d/%d] ' "$candidate_index" "$candidate_total"
+        printf '  [%0*d/%d] ' "$candidate_index_width" "$candidate_index" "$candidate_total"
 
         for i in 1 2 3; do
             local t1 t2 elapsed
@@ -8281,9 +8282,9 @@ function is_xray_running_now() {
 
 function get_xray_running_badge() {
     if is_xray_running_now; then
-        printf '%b运行中%b' "$GREEN" "$NC"
+        printf '%b运行中%b' "$BRIGHT_YELLOW" "$NC"
     else
-        printf '%b未运行%b' "$RED" "$NC"
+        printf '%b未运行%b' "$GREEN" "$NC"
     fi
 }
 
@@ -8306,31 +8307,22 @@ function get_xray_version_badge() {
     printf '%b%s%b' "$CYAN" "$version_line" "$NC"
 }
 
-function get_runtime_display_name() {
-    case "$1" in
-        alpine-ss2022) printf '%s' 'Alpine SS2022' ;;
-        alpine-xray-vlessenc) printf '%s' 'Alpine Xray' ;;
-        xray) printf '%s' 'Xray / systemd' ;;
-        *) printf '%s' '未安装' ;;
-    esac
-}
-
 function get_runtime_running_badge() {
     local runtime_kind="$1"
     case "$runtime_kind" in
         alpine-ss2022)
             if { command -v rc-service >/dev/null 2>&1 && rc-service ssserver status >/dev/null 2>&1; } \
                 || { command -v pgrep >/dev/null 2>&1 && pgrep -x ssserver >/dev/null 2>&1; }; then
-                printf '%b运行中%b' "$GREEN" "$NC"
+                printf '%b运行中%b' "$BRIGHT_YELLOW" "$NC"
             else
-                printf '%b未运行%b' "$RED" "$NC"
+                printf '%b未运行%b' "$GREEN" "$NC"
             fi
             ;;
         alpine-xray-vlessenc|xray)
             get_xray_running_badge
             ;;
         *)
-            printf '%b未安装%b' "$YELLOW" "$NC"
+            printf '%b未运行%b' "$GREEN" "$NC"
             ;;
     esac
 }
@@ -8357,17 +8349,14 @@ function get_runtime_version_badge() {
 
 function show_main_header() {
     local runtime_kind=""
-    local runtime_name=""
     runtime_kind=$(get_install_runtime_kind 2>/dev/null || true)
-    runtime_name=$(get_runtime_display_name "$runtime_kind")
 
     line
     center_echo "X R A Y  M A N A G E R" "${BRIGHT_YELLOW}${BOLD}"
-    printf '  管理器 : %b%s%b\n' "$GREEN" "$SCRIPT_VERSION" "$NC"
-    printf '  服务   : %b%s%b\n' "$CYAN" "$runtime_name" "$NC"
-    printf '  状态   : %s\n' "$(get_runtime_running_badge "$runtime_kind")"
-    printf '  版本   : %s\n' "$(get_runtime_version_badge "$runtime_kind")"
-    printf '  快捷键 : %bzxray%b（重新打开本菜单）\n' "$CYAN" "$NC"
+    printf '  版本 : %b%s%b\n' "$GREEN" "$SCRIPT_VERSION" "$NC"
+    printf '  状态 : %s\n' "$(get_runtime_running_badge "$runtime_kind")"
+    printf '  版本 : %s\n' "$(get_runtime_version_badge "$runtime_kind")"
+    printf '  命令 : %bzxray%b\n' "$CYAN" "$NC"
     line
 }
 
