@@ -87,12 +87,6 @@ fi
 
 DEFAULT_DEST_OPTIONS=(
     "c.6sc.co"
-    "www.aws.com"
-    "www.amd.com"
-    "www.sony.com"
-    "www.tesla.com"
-    "www.intel.com"
-    "www.adobe.com"
     "www.amazon.com"
     "drivers.amd.com"
     "a0.awsstatic.com"
@@ -104,7 +98,6 @@ DEFAULT_DEST_OPTIONS=(
     "tag.demandbase.com"
     "t0.m.awsstatic.com"
     "images-na.ssl-images-amazon.com"
-    "i7158c100-ds-aksb-a.akamaihd.net"
 )
 
 function line() {
