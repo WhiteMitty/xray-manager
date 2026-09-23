@@ -36,68 +36,53 @@ readonly SCRIPT_VERSION="0.2.0"
 readonly SCRIPT_MARKER="XRAY_MANAGER_DOUDOU"
 readonly SCRIPT_REMOTE_URL="https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh"
 readonly XRAY_MIN_VERSION="26.3.27"
-readonly HY_MIN_VERSION="2.9.2"
 readonly STATE_SCHEMA=3
 readonly SERVICE_USER="zxray"
 readonly MANAGED_TAG="# Managed by Xray Manager"
-readonly SCHEMES=(reality-raw reality-xhttp reality-split ss enc dual triple enc-split hy2)
+readonly SCHEMES=(reality-raw reality-xhttp reality-split ss enc dual triple enc-split)
 readonly DEFAULT_SNI_POOL=(c.6sc.co www.amazon.com drivers.amd.com a0.awsstatic.com d1.awsstatic.com
     s0.awsstatic.com gateway.icloud.com m.media-amazon.com addons.mozilla.org tag.demandbase.com
     t0.m.awsstatic.com images-na.ssl-images-amazon.com)
-readonly CF_V4=(173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18
-    108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17
-    162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22)
-readonly CF_V6_PREFIX=(2400:cb00: 2606:4700: 2803:f800: 2405:b500: 2405:8100: 2a06:98c0: 2a06:98c1: 2a06:98c2:
-    2a06:98c3: 2a06:98c4: 2a06:98c5: 2a06:98c6: 2a06:98c7: 2c0f:f248:)
 
 init_paths() {
-    local root=${1:-}
-    ROOT=$root
-    DATA_DIR=$root/usr/local/share/doudou-xray
-    SELF_DIR=$root/usr/local/lib/doudou
+    ROOT=${1:-}
+    DATA_DIR=$ROOT/usr/local/share/doudou-xray
+    SELF_DIR=$ROOT/usr/local/lib/doudou
     SELF_SCRIPT_PATH=$SELF_DIR/xray_manager.sh
-    QUICK_BIN=$root/usr/local/bin/zxray
+    QUICK_BIN=$ROOT/usr/local/bin/zxray
     STATE=$DATA_DIR/state.json
-    CONFIG_DIR=$root/usr/local/etc/xray
+    CONFIG_DIR=$ROOT/usr/local/etc/xray
     CONFIG_FILE=$CONFIG_DIR/config.json
-    XRAY_BIN=$root/usr/local/bin/xray
-    XRAY_ASSET_DIR=$root/usr/local/share/xray
+    XRAY_BIN=$ROOT/usr/local/bin/xray
+    XRAY_ASSET_DIR=$ROOT/usr/local/share/xray
     SS_BIN=$SELF_DIR/ssserver
     SS_CONFIG=$DATA_DIR/ssserver.json
     SS_ACL=$DATA_DIR/ssserver.acl
-    HY_BIN=$SELF_DIR/hysteria
-    HY_DIR=$DATA_DIR/hysteria
-    HY_CONFIG=$HY_DIR/config.yaml
     NGINX_DIR=$DATA_DIR/nginx
-    NGINX_RUN=$root/run/zxray-nginx
+    NGINX_RUN=$ROOT/run/zxray-nginx
     NODES_JSON=$DATA_DIR/nodes.json
     INFO_FILE=$DATA_DIR/xray_node_info.txt
     SUB_FILE=$DATA_DIR/xray_subscription.txt
     SUB_B64=$DATA_DIR/xray_subscription.base64
     SNI_POOL_FILE=$DATA_DIR/.xray_sni_pool
-    TX=$root/usr/local/share/doudou-xray-transaction
-    STAGE_BASE=$root/usr/local/share/doudou-xray-stage
-    LOCK_FILE=$root/run/lock/doudou-xray-manager.lock
-    SYSCTL_FILE=$root/etc/sysctl.d/99-zxray-bbr.conf
-    SYSTEMD_DIR=$root/etc/systemd/system
-    OPENRC_DIR=$root/etc/init.d
+    TX=$ROOT/usr/local/share/doudou-xray-transaction
+    STAGE_BASE=$ROOT/usr/local/share/doudou-xray-stage
+    LOCK_FILE=$ROOT/run/lock/doudou-xray-manager.lock
+    SYSCTL_FILE=$ROOT/etc/sysctl.d/99-zxray-bbr.conf
+    SYSTEMD_DIR=$ROOT/etc/systemd/system
+    OPENRC_DIR=$ROOT/etc/init.d
     MANAGED_PATHS=(
         "$DATA_DIR" "$SELF_DIR" "$CONFIG_DIR" "$XRAY_BIN" "$XRAY_ASSET_DIR"
-        "$root/var/log/xray" "$root/var/lib/xray"
-        "$SYSTEMD_DIR/xray.service" "$SYSTEMD_DIR/xray.service.d"
-        "$SYSTEMD_DIR/xray@.service" "$SYSTEMD_DIR/xray@.service.d"
-        "$SYSTEMD_DIR/zxray-ss.service" "$SYSTEMD_DIR/zxray-nginx.service" "$SYSTEMD_DIR/zxray-hy.service"
-        "$OPENRC_DIR/xray" "$OPENRC_DIR/zxray-ss" "$OPENRC_DIR/zxray-nginx" "$OPENRC_DIR/zxray-hy"
-        "$OPENRC_DIR/ssserver" "$root/etc/shadowsocks-rust"
-        "$root/etc/logrotate.d/xray" "$root/etc/logrotate.d/zxray"
-        "$QUICK_BIN" "$root/usr/local/bin/zdd" "$SYSCTL_FILE" "$root/etc/sysctl.d/99-bbr.conf"
+        "$SYSTEMD_DIR/xray.service" "$SYSTEMD_DIR/zxray-ss.service" "$SYSTEMD_DIR/zxray-nginx.service"
+        "$OPENRC_DIR/xray" "$OPENRC_DIR/zxray-ss" "$OPENRC_DIR/zxray-nginx"
+        "$ROOT/etc/logrotate.d/zxray" "$QUICK_BIN" "$SYSCTL_FILE"
     )
-    MANAGED_SERVICES=(xray zxray-ss zxray-nginx zxray-hy)
+    MANAGED_SERVICES=(xray zxray-ss zxray-nginx)
 }
 init_paths
 
-OS_ID='' OS_FAMILY='' INIT='' PKG=''
-ACTION=menu ASSUME_YES=0 FORCE=0 CLI_SCHEME='' CLI_CORE_TAG='' CLI_DOMAIN=''
+OS_FAMILY='' INIT='' PKG=''
+ACTION=menu ASSUME_YES=0 FORCE=0 CLI_SCHEME='' CLI_CORE_TAG=''
 ASSUME_YES_FLAG=()
 STAGE='' TX_ACTIVE=0 KEEP_TX=0 ACTION_PID='' CHILD_RUNNING=0
 INPUT_FD=0 SOURCE_PATH='' DRAFT='' CHECK_PID=''
@@ -106,12 +91,12 @@ CHILD_RC=0 SUB_RC=0 TOP_RC=0 STATE_READY=0
 MODE=new PREVIEW_RESULT=1
 PREVIEW_NOTES=()
 NET_V4='' NET_V6=''
-SNI_BEST_MS=0 SNI_LAST_MS=0
+SNI_BEST_MS=0
 PARSE_ERR=''
 SERVICE_USER_CREATED=0
 NGINX_MODULE_LINE='' NGINX_REJECT_TLS=1
-USE_XRAY='' USE_XRAY_ASSET='' USE_SS='' USE_HY=''
-NEW_XRAY=0 NEW_SS=0 NEW_HY=0
+USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
+NEW_XRAY=0 NEW_SS=0
 UI_W=60 LABEL_W=10
 C_RED='' C_GREEN='' C_YELLOW='' C_HI='' C_RESET=''
 
@@ -242,6 +227,11 @@ ui_kv() {
     printf '  %s%s\n' "$padded" "$fitted"
 }
 
+ui_section() {
+    ui_blank
+    printf '  %s%s%s\n' "$C_HI" "$1" "$C_RESET"
+}
+
 ui_footer() {
     ui_rule
     if [[ -n $ACTION_PID ]]; then printf '  %s   b 主页\n' "$*"; else printf '  %s\n' "$*"; fi
@@ -357,7 +347,7 @@ ask_number() {
     local __an_pr=$1 __an_min=$2 __an_max=$3 __an_def=${4:-} __an_n
     while :; do
         if [[ -n $__an_def ]]; then
-            read_line "$__an_pr（$__an_min-$__an_max，回车 $__an_def）：" __an_n
+            read_line "$__an_pr（$__an_min-$__an_max，回车默认 $__an_def）：" __an_n
             [[ -n $__an_n ]] || __an_n=$__an_def
         else
             read_line "$__an_pr（$__an_min-$__an_max）：" __an_n
@@ -378,7 +368,7 @@ ask_choice() {
         ui_item "$((__ac_i + 1))" "${__ac_opts[$__ac_i]}"
     done
     while :; do
-        read_line "请选择（回车 $__ac_def，0 返回）：" __ac_k
+        read_line "请选择（回车默认 $__ac_def，0 返回）：" __ac_k
         [[ -n $__ac_k ]] || __ac_k=$__ac_def
         if [[ $__ac_k == 0 ]]; then
             printf -v "$__ac_var" '%s' ''
@@ -436,8 +426,6 @@ b64url_nopad() { printf '%s' "$1" | base64 | tr -d '\r\n=' | tr '+/' '-_'; }
 b64_oneline() { base64 | tr -d '\r\n'; }
 
 sha256_of() { sha256sum "$1" | awk '{print $1}'; }
-
-json_str() { jq -Rn --arg v "$1" '$v'; }
 
 
 valid_port() { [[ $1 =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
@@ -512,33 +500,6 @@ atomic_write() {
 
 is_managed_file() { [[ -f $1 ]] && grep -q "^$MANAGED_TAG" "$1" 2>/dev/null; }
 
-ipv4_to_int() {
-    local -a o=()
-    IFS=. read -r -a o <<< "$1"
-    printf '%d' $(( (10#${o[0]} << 24) | (10#${o[1]} << 16) | (10#${o[2]} << 8) | 10#${o[3]} ))
-}
-ipv4_in_cidr() {
-    local ip=$1 net=${2%/*} bits=${2#*/} a b mask
-    a=$(ipv4_to_int "$ip")
-    b=$(ipv4_to_int "$net")
-    mask=$(( bits == 0 ? 0 : (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
-    (( (a & mask) == (b & mask) ))
-}
-
-is_cloudflare_ip() {
-    local ip=${1,,} c
-    if valid_ipv4 "$ip"; then
-        for c in "${CF_V4[@]}"; do
-            if ipv4_in_cidr "$ip" "$c"; then return 0; fi
-        done
-        return 1
-    fi
-    for c in "${CF_V6_PREFIX[@]}"; do
-        [[ $ip == "$c"* ]] && return 0
-    done
-    return 1
-}
-
 human_bytes() {
     local b=$1
     if (( b >= 1048576 && b % 1048576 == 0 )); then printf '%dM' $(( b / 1048576 ))
@@ -553,7 +514,6 @@ detect_system() {
         id=$(awk -F= '$1=="ID"{gsub(/"/,"",$2);print $2;exit}' "$ROOT/etc/os-release")
         like=$(awk -F= '$1=="ID_LIKE"{gsub(/"/,"",$2);print $2;exit}' "$ROOT/etc/os-release")
     fi
-    OS_ID=$id
     case " $id $like " in
         *" alpine "*) OS_FAMILY=alpine PKG=apk ;;
         *" debian "*|*" ubuntu "*) OS_FAMILY=debian PKG=apt ;;
@@ -571,15 +531,6 @@ detect_system() {
         die '需要 systemd，或 Alpine 上的 OpenRC。'
         return 1
     fi
-}
-
-os_label() {
-    case $OS_FAMILY in
-        alpine) printf 'Alpine' ;;
-        debian) if [[ $OS_ID == ubuntu ]]; then printf 'Ubuntu'; else printf 'Debian'; fi ;;
-        rhel) printf 'RHEL 系' ;;
-        arch) printf 'Arch' ;;
-    esac
 }
 
 pkg_install() {
@@ -821,18 +772,13 @@ tx_begin() {
         if [[ -e $p || -L $p ]]; then cp -a -- "$p" "$TX/backup/$i"; fi
     done
     : > "$TX/services"
-    for s in "${MANAGED_SERVICES[@]}" ssserver; do
+    for s in "${MANAGED_SERVICES[@]}"; do
         if svc_exists "$s"; then svc_state_line "$s" >> "$TX/services"; fi
     done
-    if [[ $INIT == systemd ]] && svc_exists logrotate@xray.timer; then
-        svc_state_line logrotate@xray.timer >> "$TX/services"
-    fi
     sysctl -n net.ipv4.tcp_congestion_control > "$TX/cc" 2>/dev/null || :
     sysctl -n net.core.default_qdisc > "$TX/qdisc" 2>/dev/null || :
     : > "$TX/new-packages"
     printf '%s\n' "$INIT" > "$TX/init"
-    if [[ -f $ROOT/etc/apk/repositories ]]; then cp -a "$ROOT/etc/apk/repositories" "$TX/repositories"; fi
-    if [[ -f $ROOT/etc/resolv.conf ]]; then cat "$ROOT/etc/resolv.conf" > "$TX/resolv-content" 2>/dev/null || true; fi
     touch "$TX/ready"
     TX_ACTIVE=1
 }
@@ -841,13 +787,6 @@ tx_rollback() {
     [[ -f $TX/ready ]] || { rm -rf -- "$TX"; TX_ACTIVE=0; return 0; }
     ui_warn '正在恢复到操作前的状态...'
     local i p s active enabled failed=0
-    while read -r s active enabled; do
-        [[ -n $s ]] || continue
-        if svc_exists "$s"; then
-            svc_do stop "$s" >/dev/null 2>&1 || true
-            svc_do disable "$s" >/dev/null 2>&1 || true
-        fi
-    done < "$TX/services"
     for s in "${MANAGED_SERVICES[@]}"; do
         if svc_exists "$s"; then
             svc_do stop "$s" >/dev/null 2>&1 || true
@@ -862,8 +801,6 @@ tx_rollback() {
             cp -a -- "$TX/backup/$i" "$p" || failed=1
         fi
     done
-    if [[ -f $TX/repositories ]]; then cp -a "$TX/repositories" "$ROOT/etc/apk/repositories" || failed=1; fi
-    if [[ -f $TX/resolv-content ]]; then cat "$TX/resolv-content" > "$ROOT/etc/resolv.conf" 2>/dev/null || true; fi
     svc_reload_units || failed=1
     while read -r s active enabled; do
         [[ -n $s ]] || continue
@@ -876,14 +813,6 @@ tx_rollback() {
         local -a pkgs=()
         mapfile -t pkgs < "$TX/new-packages"
         pkg_remove "${pkgs[@]}" >/dev/null 2>&1 || failed=1
-    fi
-    if [[ -f $TX/cert-perms ]]; then
-        local cp cg cm
-        while IFS=$'\t' read -r cp cg cm; do
-            [[ -f $cp ]] || continue
-            chgrp -- "$cg" "$cp" 2>/dev/null && chmod -- "$cm" "$cp" 2>/dev/null ||
-                ui_warn "没能恢复 $(basename -- "$cp") 的原权限。"
-        done < "$TX/cert-perms"
     fi
     if [[ -f $TX/created-user ]]; then remove_service_user; fi
     if (( failed )); then
@@ -1028,9 +957,7 @@ latest_tag_quiet() {
 
 normalize_tag() {
     local t=$1
-    [[ $t == latest ]] && { printf 'latest'; return 0; }
     [[ $t =~ ^[0-9] ]] && t=v$t
-    [[ $t =~ ^app/[0-9] ]] && t=app/v${t#app/}
     printf '%s' "$t"
 }
 
@@ -1120,35 +1047,6 @@ download_ss() {
 }
 
 
-hy_version_of() { "$1" version 2>/dev/null | awk -F'\t' '/^Version:/{print $2; exit}'; }
-
-download_hy() {
-    local tag=$1 out=$2 arch asset base digest
-    arch=$(arch_of)
-    case $arch in amd64|arm64|arm|386|s390x|riscv64) : ;; armv6) arch=arm ;; *) die "Hysteria 暂不支持此架构：$(uname -m)"; return 1 ;; esac
-    asset=hysteria-linux-$arch
-    if [[ $tag == latest ]]; then
-        base=https://github.com/apernet/hysteria/releases/latest/download
-    else
-        [[ $tag == app/* ]] || tag=app/$tag
-        base=https://github.com/apernet/hysteria/releases/download/$tag
-    fi
-    mkdir -p "$out"
-    fetch "$base/$asset" "$out/hysteria"
-    fetch "$base/hashes.txt" "$out/hashes.txt"
-    digest=$(awk -v a="$asset" '{n=$2; sub(/.*\//, "", n); if (n == a) {print $1; exit}}' "$out/hashes.txt")
-    [[ $digest =~ ^[0-9a-fA-F]{64}$ ]] || { die 'Hysteria 校验文件中找不到对应条目。'; return 1; }
-    [[ $(sha256_of "$out/hysteria") == "${digest,,}" ]] || { die 'Hysteria 安装包校验失败。'; return 1; }
-    chmod 755 "$out/hysteria"
-    rm -f -- "$out/hashes.txt"
-    local v
-    v=$(hy_version_of "$out/hysteria")
-    [[ $v =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { die '无法识别下载的 Hysteria 版本。'; return 1; }
-    ver_ge "$v" "$HY_MIN_VERSION" || { die "需要 Hysteria $HY_MIN_VERSION 或更新版本。"; return 1; }
-    printf '%s' "$v" > "$out/hy.version"
-}
-
-
 script_version_of() {
     [[ -f $1 ]] || return 0
     awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' "$1" 2>/dev/null || true
@@ -1163,7 +1061,6 @@ download_script() {
 }
 
 
-
 detect_public_ips() {
     local u
     NET_V4='' NET_V6=''
@@ -1172,7 +1069,7 @@ detect_public_ips() {
         if valid_ipv4 "$NET_V4"; then break; fi
         NET_V4=''
     done
-    if [[ -e /proc/net/if_inet6 && $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1) == 0 ]]; then
+    if has_ipv6_stack; then
         for u in https://api64.ipify.org https://ipv6.icanhazip.com https://v6.ident.me; do
             NET_V6=$(curl -6 -fsS --connect-timeout 3 --max-time 6 "$u" 2>/dev/null | tr -d '[:space:]' || true)
             if [[ $NET_V6 == *:* ]] && valid_ipv6 "$NET_V6"; then break; fi
@@ -1184,20 +1081,6 @@ detect_public_ips() {
 
 has_ipv6_stack() {
     [[ -e /proc/net/if_inet6 && $(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null || echo 1) == 0 ]]
-}
-
-doh_query() {
-    local name=$1 type=$2 url
-    for url in "https://1.1.1.1/dns-query?name=$name&type=$type" "https://dns.google/resolve?name=$name&type=$type"; do
-        local out
-        out=$(curl -fsS --connect-timeout 5 --max-time 8 -H 'accept: application/dns-json' "$url" 2>/dev/null || true)
-        [[ -n $out ]] || continue
-        local want=1
-        [[ $type == AAAA ]] && want=28
-        jq -r --argjson t "$want" '.Answer[]? | select(.type == $t) | .data' <<< "$out" 2>/dev/null || true
-        return 0
-    done
-    return 1
 }
 
 
@@ -1213,7 +1096,7 @@ pid_is_owned() {
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
     cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
     case $exe in
-        "$XRAY_BIN"|"$SS_BIN"|"$HY_BIN") return 0 ;;
+        "$XRAY_BIN"|"$SS_BIN") return 0 ;;
     esac
     [[ $cmd == *nginx* && $cmd == *"$NGINX_DIR/nginx.conf"* ]] && return 0
     if [[ $cmd == 'nginx: worker process'* || $cmd == 'nginx: cache '* ]]; then
@@ -1221,8 +1104,7 @@ pid_is_owned() {
         ppid=$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)
         if [[ $ppid =~ ^[0-9]+$ ]] && (( ppid > 1 && ppid != pid )) && pid_is_owned "$ppid"; then return 0; fi
     fi
-    [[ $cmd == *"$SS_BIN"* || $cmd == *"$HY_BIN"* || $cmd == *"$XRAY_BIN "* ]] && return 0
-    [[ $exe == /usr/bin/ssserver && -f $DATA_DIR/.install_kind ]] && return 0
+    [[ $cmd == *"$SS_BIN"* || $cmd == *"$XRAY_BIN "* ]] && return 0
     return 1
 }
 
@@ -1267,7 +1149,6 @@ random_free_port() {
 }
 
 
-
 sni_pool() {
     local d
     local -a pool=()
@@ -1300,7 +1181,7 @@ now_ms() {
 }
 
 sni_auto_select() {
-    local __sa_out=$1 __sa_d __sa_i __sa_t1 __sa_t2 __sa_ok __sa_best='' __sa_bscore=999999999 __sa_score __sa_n=0 __sa_total
+    local __sa_out=$1 __sa_d __sa_i __sa_t1 __sa_t2 __sa_ok __sa_best='' __sa_bscore=999999999 __sa_score __sa_ms __sa_n=0 __sa_total
     local -a __sa_pool=() __sa_times=() __sa_sorted=()
     mapfile -t __sa_pool < <(sni_pool)
     __sa_total=${#__sa_pool[@]}
@@ -1320,19 +1201,18 @@ sni_auto_select() {
         (( __sa_ok >= 2 )) || continue
         mapfile -t __sa_sorted < <(printf '%s\n' "${__sa_times[@]}" | sort -n)
         if (( __sa_ok == 3 )); then __sa_score=${__sa_sorted[1]}; else __sa_score=$(( (__sa_sorted[0] + __sa_sorted[1]) / 2 )); fi
-        SNI_LAST_MS=$__sa_score
+        __sa_ms=$__sa_score
         __sa_score=$(( (3 - __sa_ok) * 1000000 + __sa_score ))
         if (( __sa_score < __sa_bscore )); then
             __sa_bscore=$__sa_score
             __sa_best=$__sa_d
-            SNI_BEST_MS=$SNI_LAST_MS
+            SNI_BEST_MS=$__sa_ms
         fi
     done
     if [[ -t 1 ]]; then printf '\r%*s\r' "$UI_W" ''; fi
     [[ -n $__sa_best ]] || return 1
     printf -v "$__sa_out" '%s' "$__sa_best"
 }
-
 
 
 uri_decode() {
@@ -1522,7 +1402,6 @@ parse_landing_link() {
 }
 
 
-
 scheme_label() {
     case $1 in
         reality-raw) printf 'REALITY / RAW + Vision' ;;
@@ -1533,7 +1412,6 @@ scheme_label() {
         dual) printf 'SS2022 + VLESS-ENC' ;;
         triple) printf 'REALITY + SS2022 + VLESS-ENC' ;;
         enc-split) printf 'XHTTP + VLESS-ENC 上下行分离' ;;
-        hy2) printf 'Hysteria2' ;;
         *) printf '%s' "$1" ;;
     esac
 }
@@ -1541,7 +1419,6 @@ scheme_label() {
 scheme_has_reality() { [[ $1 == reality-* || $1 == triple ]]; }
 scheme_has_ss() { [[ $1 == ss || $1 == dual || $1 == triple ]]; }
 scheme_has_enc_inbound() { [[ $1 == enc || $1 == dual || $1 == triple || $1 == enc-split ]]; }
-scheme_has_landings() { [[ $1 == reality-raw || $1 == reality-xhttp || $1 == reality-split || $1 == ss || $1 == enc ]]; }
 scheme_is_split() { [[ $1 == reality-split || $1 == enc-split ]]; }
 scheme_transport() {
     case $1 in
@@ -1566,13 +1443,16 @@ st_filter() {
 st_set() { st_filter --argjson v "$2" "$1 = \$v"; }
 st_sets() { st_filter --arg v "$2" "$1 = \$v"; }
 
+load_state_draft() {
+    DRAFT=$STAGE/draft.json
+    cp -f -- "$STATE" "$DRAFT"
+}
+
 scheme() { st .scheme; }
 
 needs_nginx() {
     scheme_has_reality "$(scheme)" && [[ $(st .reality.guard) == nginx ]]
 }
-hy_on() { [[ $(st .hy.on) == 1 ]]; }
-
 ss_core() {
     [[ $(scheme) == ss ]] || { printf 'xray'; return 0; }
     local n mode
@@ -1585,18 +1465,12 @@ ss_core() {
     fi
 }
 
-needs_xray() {
-    local s
-    s=$(scheme)
-    [[ $s == hy2 ]] && return 1
-    [[ $s == ss && $(ss_core) == ss-rust ]] && return 1
-    return 0
-}
+needs_xray() { ! needs_ss_rust; }
 needs_ss_rust() { [[ $(scheme) == ss && $(ss_core) == ss-rust ]]; }
 
 port_in_draft() {
     [[ -n $DRAFT && -f $DRAFT ]] || return 1
-    jq -e --argjson p "$1" '[.reality.port, .reality.internal, .reality.gate, .enc.port, .ss.port, .hy.port, .hy.masq_port,
+    jq -e --argjson p "$1" '[.reality.port, .reality.internal, .reality.gate, .enc.port, .ss.port,
         (.users[]? | .port // 0)] | index($p) != null' "$DRAFT" >/dev/null 2>&1
 }
 
@@ -1611,10 +1485,6 @@ public_ports() {
     fi
     jq -r '.users[] | select(.port != null and .port > 0) | "tcp \(.port) \(.name)"' "$DRAFT"
     if [[ $s == ss ]]; then jq -r '.users[] | select(.port != null and .port > 0) | "udp \(.port) \(.name)"' "$DRAFT"; fi
-    if hy_on; then
-        printf 'udp %s Hysteria2\n' "$(st .hy.port)"
-        if [[ $(st .hy.masq_mode) == direct ]]; then printf 'tcp %s Hysteria2\n' "$(st .hy.port)"; fi
-    fi
 }
 
 
@@ -1626,7 +1496,7 @@ draft_new() {
         net: {host: (if $v4 != "" then $v4 elif $v6 != "" then $v6 else "" end), v4: $v4, v6: $v6, manual: 0},
         outbound: (if $v4 == "" and $v6 != "" then "v6first" else "v4first" end),
         bbr: 1,
-        core: {xray: "latest", ss: "latest", hy: "latest"},
+        core: {xray: "latest", ss: "latest"},
         reality: {port: 0, internal: 0, gate: 0, sni: "", sni_auto: 1, private_key: "", public_key: "", short_id: "",
                   fp: "firefox", guard: "nginx", limit: "orig", limit_custom: {ua: 8192, ur: 1024, da: 32768, dr: 2048},
                   conn_ip: 256, conn_total: 4096},
@@ -1636,10 +1506,7 @@ draft_new() {
         ss: {port: 0, method: "2022-blake3-aes-128-gcm", password: ""},
         users: [{name: "direct", id: "", out: "direct"}],
         landings: [],
-        hy: {on: 0, domain: "", port: 443, cert: "http", email: "", dns_provider: "cloudflare", dns_config: {},
-             cert_file: "", key_file: "", password: "", obfs: "none", obfs_password: "", profile: "standard",
-             brutal: 1, masq_mode: "auto", masq_port: 0, ech: 0, ech_name: "", ech_config: ""},
-        meta: {nginx_packages: [], nginx_hash: "", legacy_ss_package: 0, created_user: 0, selinux_note: 0, cert_perms: []}
+        meta: {nginx_packages: [], nginx_hash: "", created_user: 0, selinux_note: 0}
     }' > "$DRAFT"
     local p
     if scheme_has_reality "$s"; then
@@ -1660,30 +1527,12 @@ draft_new() {
     if [[ $s == enc-split ]]; then
         st_filter '.enc.rtt = "1rtt" | .enc.shape = "random" | .enc.auth = "mlkem768" | .enc.pad = "aggressive"'
     fi
-    if [[ $s == hy2 ]]; then hy_defaults; fi
     return 0
 }
 
-hy_defaults() {
-    st_set .hy.on 1
-    local p=443
-    if port_taken udp 443; then
-        p=$(random_free_port)
-        note_add "UDP 443 已被 $(port_owner_label udp 443) 占用，改用随机端口。"
-    fi
-    st_set .hy.port "$p"
-    if port_taken tcp 80; then
-        st_sets .hy.cert dns
-        note_add '80 端口已被占用，证书改用 DNS 验证。'
-    else
-        st_sets .hy.cert http
-    fi
-}
-
 finalize_identity() {
-    local xray=$1 s out
+    local xray=$1 s out i n id
     s=$(scheme)
-    local i n name id port
     n=$(jq '.users | length' "$DRAFT")
     for (( i = 0; i < n; i++ )); do
         id=$(jq -r ".users[$i].id" "$DRAFT")
@@ -1713,16 +1562,6 @@ finalize_identity() {
         fi
     fi
     if needs_enc_keys; then
-        if [[ -n $(st .enc.server_key) && -z $(st .enc.client_key) ]]; then
-            if [[ $(st .enc.auth) == mlkem768 ]]; then
-                out=$("$xray" mlkem768 -i "$(st .enc.server_key)")
-                st_sets .enc.client_key "$(awk '/^Client:/{print $NF; exit}' <<< "$out")"
-            else
-                out=$("$xray" x25519 -i "$(st .enc.server_key)")
-                st_sets .enc.client_key "$(awk '/Password \(PublicKey\):|Password:/{print $NF; exit}' <<< "$out")"
-            fi
-            [[ -n $(st .enc.client_key) ]] || { die '无法推导 VLESS-ENC 客户端密钥。'; return 1; }
-        fi
         if [[ -z $(st .enc.server_key) || -z $(st .enc.client_key) ]]; then
             local want line_dec line_enc
             out=$("$xray" vlessenc)
@@ -1735,11 +1574,6 @@ finalize_identity() {
         fi
     fi
     if scheme_has_ss "$s" && [[ -z $(st .ss.password) ]]; then st_sets .ss.password "$(ss_new_password)"; fi
-    if hy_on; then
-        [[ -n $(st .hy.password) ]] || st_sets .hy.password "$(rand_hex 16)"
-        if [[ $(st .hy.obfs) != none && -z $(st .hy.obfs_password) ]]; then st_sets .hy.obfs_password "$(rand_hex 16)"; fi
-        if [[ $(st .hy.masq_mode) == local && $(st .hy.masq_port) == 0 ]]; then st_set .hy.masq_port "$(random_free_port)"; fi
-    fi
     return 0
 }
 
@@ -1807,13 +1641,6 @@ outbound_xray_strategy() {
         v4only) printf 'ForceIPv4' ;; v6only) printf 'ForceIPv6' ;;
     esac
 }
-outbound_hy_mode() {
-    case $1 in
-        v4first) printf '46' ;; v6first) printf '64' ;;
-        v4only) printf '4' ;; v6only) printf '6' ;;
-    esac
-}
-
 limit_values() {
     case $(st .reality.limit) in
         orig) printf '8192 1024 32768 2048' ;;
@@ -1836,83 +1663,29 @@ limit_text() {
 
 note_add() { PREVIEW_NOTES+=("$1"); }
 
-cert_dirs_open() {
-    local f=$1 d
-    case $f in
-        /root/*|/home/*|/tmp/*|/var/tmp/*|/run/user/*) return 1 ;;
-        /*) ;;
-        *) return 1 ;;
-    esac
-    d=$(dirname -- "$f")
-    while [[ $d != / ]]; do
-        [[ $(( 8#$(stat -c %a "$d" 2>/dev/null || echo 0) & 1 )) == 1 ]] || return 1
-        d=$(dirname -- "$d")
-    done
-    return 0
-}
-cert_path_direct() {
-    local f=$1 real
-    cert_dirs_open "$f" || return 1
-    real=$(readlink -f -- "$f" 2>/dev/null) && [[ -e $real ]] || return 1
-    [[ $real == "$f" ]] || cert_dirs_open "$real"
-}
-cert_file_grantable() {
-    local m g
-    m=$(stat -L -c %a -- "$1" 2>/dev/null) || return 1
-    g=$(stat -L -c %g -- "$1" 2>/dev/null) || return 1
-    (( (8#$m & 4) != 0 )) && return 0
-    [[ $g == 0 || $(stat -L -c %G -- "$1" 2>/dev/null) == "$SERVICE_USER" ]]
-}
-
-hy_cert_direct() {
-    local f
-    for f in "$(st .hy.cert_file)" "$(st .hy.key_file)"; do
-        cert_path_direct "$f" && cert_file_grantable "$f" || return 1
-    done
-}
-
-hy_cert_copy() {
-    local v
-    v=$(st .hy.cert_copy)
-    if [[ -z $v ]]; then ! hy_cert_direct; else [[ $v == 1 ]]; fi
-}
-decide_cert_mode() {
-    if hy_on && [[ $(st .hy.cert) == file ]]; then
-        if hy_cert_direct; then st_set .hy.cert_copy 0; else st_set .hy.cert_copy 1; fi
-    else
-        st_set .hy.cert_copy 0
-    fi
-}
-
-hy_cert_path() {
-    if hy_cert_copy; then printf '%s/tls/%s.pem' "$HY_DIR" "$1"; else st ".hy.${1}_file"; fi
-}
-
-
 
 choose_scheme() {
     local __cs_var=$1 __cs_def=${2:-1} __cs_k i
     ui_clear
     ui_title '选择方案'
-    local -a fam=(REALITY REALITY REALITY SS2022 VLESS-ENC 双协议 三协议 实验 Hysteria2)
+    local -a fam=(REALITY REALITY REALITY SS2022 VLESS-ENC 双协议 三协议 实验)
     local -a desc=('RAW + Vision' 'XHTTP 单路 + XMUX' 'XHTTP 上下行分离（需双栈）' 'shadowsocks-rust'
-        'RAW + Vision' 'SS2022 + VLESS-ENC' 'REALITY + SS2022 + VLESS-ENC' 'XHTTP + VLESS-ENC 上下行分离'
-        'QUIC + 自有域名')
+        'RAW + Vision' 'SS2022 + VLESS-ENC' 'REALITY + SS2022 + VLESS-ENC' 'XHTTP + VLESS-ENC 上下行分离')
     local padded
     for i in "${!SCHEMES[@]}"; do
         pad_to "${fam[$i]}" 11 padded
         printf '  %d  %s%s\n' $(( i + 1 )) "$padded" "${desc[$i]}"
     done
-    ui_footer "回车 选 $__cs_def   0 返回"
+    ui_footer "回车默认 $__cs_def   0 返回"
     while :; do
         read_line '请选择：' __cs_k
         [[ -n $__cs_k ]] || __cs_k=$__cs_def
         if [[ $__cs_k == 0 ]]; then printf -v "$__cs_var" '%s' ''; return 0; fi
-        if [[ $__cs_k =~ ^[1-9]$ ]]; then
+        if [[ $__cs_k =~ ^[1-8]$ ]]; then
             printf -v "$__cs_var" '%s' "${SCHEMES[$((__cs_k - 1))]}"
             return 0
         fi
-        ui_warn '请选择 1-9。'
+        ui_warn '请选择 1-8。'
     done
 }
 
@@ -1927,15 +1700,14 @@ scheme_index() {
 
 preview_items() {
     case $(scheme) in
-        reality-raw) printf '%s\n' port sni landings addr guard hyadd other ;;
-        reality-xhttp) printf '%s\n' port sni xhttp landings addr guard hyadd other ;;
-        reality-split) printf '%s\n' port sni split landings addr guard hyadd other ;;
-        ss) printf '%s\n' port ssm landings addr hyadd other ;;
-        enc) printf '%s\n' port encp landings addr hyadd other ;;
-        dual) printf '%s\n' port ssm encp addr hyadd other ;;
-        triple) printf '%s\n' port sni ssm encp addr guard hyadd other ;;
-        enc-split) printf '%s\n' port split encp addr hyadd other ;;
-        hy2) printf '%s\n' domain hyport cert obfs cong other ;;
+        reality-raw) printf '%s\n' port sni landings addr guard other ;;
+        reality-xhttp) printf '%s\n' port sni xhttp landings addr guard other ;;
+        reality-split) printf '%s\n' port sni split landings addr guard other ;;
+        ss) printf '%s\n' port ssm landings addr other ;;
+        enc) printf '%s\n' port encp landings addr other ;;
+        dual) printf '%s\n' port ssm encp addr other ;;
+        triple) printf '%s\n' port sni ssm encp addr guard other ;;
+        enc-split) printf '%s\n' port split encp addr other ;;
     esac
 }
 
@@ -1943,8 +1715,7 @@ item_label() {
     case $1 in
         port) printf '端口' ;; sni) printf 'SNI' ;; xhttp|split) printf 'XHTTP' ;; landings) printf '出口' ;;
         addr) printf '地址' ;; guard) printf '防护' ;; ssm) printf 'SS2022' ;; encp) printf 'VLESS-ENC' ;;
-        hyadd) printf '附加 Hy2' ;; other) printf '其他' ;; domain) printf '域名' ;; hyport) printf '端口' ;;
-        cert) printf '证书' ;; obfs) printf '混淆' ;; cong) printf '拥塞' ;;
+        other) printf '其他' ;;
     esac
 }
 
@@ -2002,41 +1773,13 @@ item_value() {
             v="$(st .enc.rtt)，$(st .enc.shape)，$(st .enc.auth)"
             case $(st .enc.pad) in gentle) v+='，温和' ;; aggressive) v+='，激进' ;; custom) v+='，自定义' ;; esac
             printf '%s' "$v" ;;
-        hyadd)
-            if hy_on; then
-                v=$(st .hy.domain)
-                [[ -n $v ]] || v='域名未填写'
-                printf '%s，%s/UDP' "$v" "$(st .hy.port)"
-            else printf '关'; fi ;;
         other)
             local -a o=("$(outbound_label "$(st .outbound)")")
-            if [[ $s != hy2 ]]; then
-                if [[ $(st .bbr) == 1 ]]; then o+=('BBR'); else o+=('BBR 关'); fi
-            fi
+            if [[ $(st .bbr) == 1 ]]; then o+=('BBR'); else o+=('BBR 关'); fi
             if scheme_has_reality "$s"; then o+=("$(st .reality.fp)"); fi
-            if needs_xray; then o+=("Xray $(core_label xray)"); fi
-            if needs_ss_rust; then o+=("SS-Rust $(core_label ss)"); fi
-            if hy_on; then o+=("Hy2 $(core_label hy)"); fi
+            o+=("$(other_core_text)")
             v=$(IFS=,; printf '%s' "${o[*]}")
             printf '%s' "${v//,/，}" ;;
-        domain) v=$(st .hy.domain); if [[ -n $v ]]; then printf '%s' "$v"; else printf '未填写（必填）'; fi ;;
-        hyport) printf '%s/UDP' "$(st .hy.port)" ;;
-        cert)
-            case $(st .hy.cert) in
-                http) printf "Let's Encrypt，HTTP 验证，自动续签" ;;
-                dns) printf "Let's Encrypt，DNS 验证（%s）" "$(st .hy.dns_provider)" ;;
-                file) printf '已有证书' ;;
-            esac ;;
-        obfs)
-            case $(st .hy.obfs) in
-                none) v='关（伪装为 HTTP/3 网站）' ;; salamander) v='Salamander' ;; gecko) v='Gecko（实验）' ;;
-            esac
-            if [[ $(st .hy.ech) == 1 ]]; then v+='，ECH 开'; fi
-            printf '%s' "$v" ;;
-        cong)
-            case $(st .hy.profile) in conservative) v='BBR 保守' ;; aggressive) v='BBR 激进' ;; *) v='BBR 标准' ;; esac
-            if [[ $(st .hy.brutal) == 1 ]]; then v+='，允许客户端用 Brutal'; else v+='，不用 Brutal'; fi
-            printf '%s' "$v" ;;
     esac
 }
 
@@ -2061,33 +1804,26 @@ preview_loop() {
             ui_item "$(( i + 1 ))" "$(item_label "${items[$i]}")" "$(item_value "${items[$i]}")"
         done
         for i in "${!PREVIEW_NOTES[@]}"; do ui_warn "${PREVIEW_NOTES[$i]}"; done
-        if [[ $MODE == modify ]]; then ui_footer 'y 应用   数字 修改   c 换方案   0 返回'
-        else ui_footer 'y 开始安装   数字 修改   0 返回'; fi
+        if [[ $MODE == modify ]]; then ui_footer "y 应用修改   1-${#items[@]} 修改   c 换方案   0 返回"
+        else ui_footer "y 开始安装   1-${#items[@]} 修改   0 返回"; fi
         read_line '请选择：' k
         case $k in
             y|Y)
-                if hy_on && [[ -z $(st .hy.domain) ]]; then
-                    ui_warn 'Hysteria2 需要先填写域名。'
-                    edit_domain
-                    continue
-                fi
                 if scheme_has_reality "$(scheme)" && [[ -z $(st .reality.sni) ]]; then
                     ui_warn '需要先选择 SNI。'
                     edit_sni
                     continue
                 fi
-                if [[ $(scheme) != hy2 ]]; then
-                    if scheme_is_split "$(scheme)"; then
-                        if [[ -z $(st .net.v4) || -z $(st .net.v6) ]]; then
-                            ui_warn '需要先填写本机的 IPv4 和 IPv6 地址。'
-                            edit_addr
-                            continue
-                        fi
-                    elif [[ -z $(st .net.host) ]]; then
-                        ui_warn '需要先填写节点地址。'
+                if scheme_is_split "$(scheme)"; then
+                    if [[ -z $(st .net.v4) || -z $(st .net.v6) ]]; then
+                        ui_warn '需要先填写本机的 IPv4 和 IPv6 地址。'
                         edit_addr
                         continue
                     fi
+                elif [[ -z $(st .net.host) ]]; then
+                    ui_warn '需要先填写节点地址。'
+                    edit_addr
+                    continue
                 fi
                 PREVIEW_RESULT=0
                 return 0 ;;
@@ -2106,12 +1842,6 @@ preview_loop() {
 confirm_identity_change() {
     [[ $MODE == modify ]] || return 0
     ask_no "$1，客户端需要重新导入。继续"
-}
-
-hy_installed() { [[ -f $STATE ]] && [[ $(jq -r '.hy.on // 0' "$STATE" 2>/dev/null) == 1 ]]; }
-confirm_hy_change() {
-    hy_installed || return 0
-    confirm_identity_change "$1"
 }
 
 
@@ -2156,7 +1886,7 @@ edit_port() {
     done
     local idx=0
     if (( ${#keys[@]} > 1 )); then
-        ui_blank
+        ui_section '修改端口'
         for i in "${!keys[@]}"; do
             ui_item "$(( i + 1 ))" "${labels[$i]}" "$(st "${keys[$i]}")"
         done
@@ -2169,21 +1899,12 @@ edit_port() {
     [[ ${keys[$idx]} != .ss.port && ${keys[$idx]} != .users* ]] || proto=both
     ask_port "${labels[$idx]} 端口" "$(st "${keys[$idx]}")" "$proto" p
     st_set "${keys[$idx]}" "$p"
-    if [[ ${keys[$idx]} == .reality.port && $(st .hy.masq_mode) != auto ]]; then st_sets .hy.masq_mode auto; fi
-}
-
-edit_hyport() {
-    local p
-    if [[ $MODE == modify ]] && hy_installed; then ui_warn '修改端口后，Hysteria2 客户端需要改端口。'; fi
-    ask_port 'Hysteria2 端口（UDP）' "$(st .hy.port)" udp p
-    st_set .hy.port "$p"
-    st_sets .hy.masq_mode auto
 }
 
 
 edit_sni() {
     local c d
-    ui_blank
+    ui_section '修改 SNI'
     ask_choice c 1 '自动测速选择' '手动输入'
     case $c in
         1)
@@ -2230,7 +1951,7 @@ ask_path() {
 edit_xhttp() {
     local c v
     while :; do
-        ui_blank
+        ui_section '修改 XHTTP'
         ui_item 1 '路径' "$(st .xhttp.path)"
         if [[ $(stj .xhttp.xmux) == null ]]; then v='客户端内核默认'; else v=$(stj .xhttp.xmux | tr -d '{}"'); fi
         ui_item 2 'XMUX' "$v"
@@ -2255,7 +1976,7 @@ edit_xhttp() {
 edit_xmux() {
     local c r s cur
     cur=$(xmux_mode_index)
-    ui_blank
+    ui_section '修改 XMUX'
     ui_line 'XMUX 在客户端生效，参数通过链接的 extra 传给客户端。'
     ask_choice c "$cur" '客户端内核默认（推荐）' '按每条连接的并发数' '按底层连接数'
     case $c in
@@ -2268,7 +1989,7 @@ edit_xmux() {
                 ui_warn '格式为数字或区间，如 16-32。'
             done
             while :; do
-                read_line '每条连接复用时长区间，秒（回车 1800-3000）：' s
+                read_line '每条连接复用时长区间，秒（回车默认 1800-3000）：' s
                 [[ -n $s ]] || s=1800-3000
                 [[ $s =~ ^[0-9]{1,6}(-[0-9]{1,6})?$ ]] && break
                 ui_warn '格式为数字或区间，如 1800-3000。'
@@ -2288,7 +2009,7 @@ xmux_mode_index() {
 edit_split() {
     local c v
     while :; do
-        ui_blank
+        ui_section '修改 XHTTP'
         ui_item 1 '路径' "$(st .xhttp.path)"
         if [[ $(st .xhttp.split) == v6_up_v4_down ]]; then v='v6 上行 / v4 下行'; else v='v4 上行 / v6 下行'; fi
         ui_item 2 '方向' "$v"
@@ -2313,7 +2034,7 @@ edit_landings() {
     local c n i link idx
     while :; do
         n=$(jq '.landings | length' "$DRAFT")
-        ui_blank
+        ui_section '修改出口'
         if (( n == 0 )); then ui_line '当前仅直出。'; fi
         for (( i = 0; i < n; i++ )); do
             ui_kv "$(jq -r ".landings[$i].tag" "$DRAFT" | sed 's/landing/落地 /')" \
@@ -2365,7 +2086,7 @@ add_landing() {
 
 edit_addr() {
     local c v
-    ui_blank
+    ui_section '修改地址'
     if scheme_is_split "$(scheme)"; then
         ui_line '上下行分离需要本机的 IPv4 和 IPv6 地址。'
         read_line "IPv4（回车保持 $(st .net.v4)）：" v
@@ -2406,7 +2127,7 @@ edit_addr() {
 edit_guard() {
     local c v
     while :; do
-        ui_blank
+        ui_section '修改防护'
         if [[ $(st .reality.guard) == nginx ]]; then v='Nginx（SNI 过滤、连接上限）'; else v='Xray 内置过滤（不装 Nginx）'; fi
         ui_item 1 '前置' "$v"
         ui_item 2 '回落限速' "$(limit_label)：$(limit_text)"
@@ -2421,8 +2142,7 @@ edit_guard() {
                 else
                     if selinux_enforcing; then ui_warn 'SELinux 强制模式下无法使用 Nginx 前置。'; continue; fi
                     st_sets .reality.guard nginx
-                fi
-                st_sets .hy.masq_mode auto ;;
+                fi ;;
             2) edit_limit ;;
             3) if [[ $(st .reality.guard) == nginx ]]; then edit_conn; fi ;;
             '') continue ;;
@@ -2434,7 +2154,7 @@ edit_guard() {
 edit_limit() {
     local c ua ur da dr cur
     index_of cur "$(st .reality.limit)" orig std custom
-    ui_blank
+    ui_section '修改回落限速'
     ask_choice c "$cur" '原版：上传 8 KiB 后 1 KiB/s，下载 32 KiB 后 2 KiB/s' \
         '标准：上传 256 KiB 后 32 KiB/s，下载 1 MiB 后 64 KiB/s' '自定义'
     case $c in
@@ -2463,7 +2183,7 @@ edit_conn() {
 edit_ssm() {
     local c want cur
     index_of cur "$(st .ss.method)" 2022-blake3-aes-128-gcm 2022-blake3-aes-256-gcm
-    ui_blank
+    ui_section '修改 SS2022 加密方式'
     ask_choice c "$cur" '2022-blake3-aes-128-gcm' '2022-blake3-aes-256-gcm'
     case $c in
         1) want=2022-blake3-aes-128-gcm ;;
@@ -2480,7 +2200,7 @@ edit_ssm() {
 edit_encp() {
     local c v
     while :; do
-        ui_blank
+        ui_section '修改 VLESS-ENC'
         ui_item 1 '握手' "$(st .enc.rtt)"
         ui_item 2 '外观' "$(st .enc.shape)"
         ui_item 3 '认证' "$(st .enc.auth)"
@@ -2516,7 +2236,7 @@ edit_encp() {
 edit_padding() {
     local c p q cur
     index_of cur "$(st .enc.pad)" off gentle aggressive custom
-    ui_blank
+    ui_section '修改 padding'
     ask_choice c "$cur" '核心默认' '温和' '激进' '自定义'
     [[ -n $c ]] || return 0
     if [[ $c == "$cur" && $c != 4 ]]; then return 0; fi
@@ -2545,14 +2265,11 @@ edit_other() {
     local c s
     s=$(scheme)
     while :; do
-        ui_blank
+        ui_section '修改其他'
         ui_item 1 '出站' "$(outbound_label "$(st .outbound)")"
-        local k=2
-        local -a keys=(outbound)
-        if [[ $s != hy2 ]]; then
-            if [[ $(st .bbr) == 1 ]]; then ui_item "$k" 'BBR' '开（内核支持时）'; else ui_item "$k" 'BBR' '关（保持系统设置）'; fi
-            keys+=(bbr); k=$(( k + 1 ))
-        fi
+        if [[ $(st .bbr) == 1 ]]; then ui_item 2 'BBR' '开（内核支持时）'; else ui_item 2 'BBR' '关（保持系统设置）'; fi
+        local k=3
+        local -a keys=(outbound bbr)
         if scheme_has_reality "$s"; then
             ui_item "$k" '指纹' "$(st .reality.fp)"
             keys+=(fp); k=$(( k + 1 ))
@@ -2580,7 +2297,6 @@ other_core_text() {
     local -a o=()
     if needs_xray; then o+=("Xray $(core_label xray)"); fi
     if needs_ss_rust; then o+=("SS-Rust $(core_label ss)"); fi
-    if hy_on; then o+=("Hy2 $(core_label hy)"); fi
     local v
     v=$(IFS=,; printf '%s' "${o[*]}")
     printf '%s' "${v//,/，}"
@@ -2597,7 +2313,7 @@ edit_outbound() {
     done
     local cur
     index_of cur "$(st .outbound)" "${modes[@]}"
-    ui_blank
+    ui_section '修改出站'
     ask_choice c "$cur" "${opts[@]}"
     [[ -n $c ]] || return 0
     m=${modes[$((c - 1))]}
@@ -2613,212 +2329,15 @@ edit_core() {
     local -a which=()
     if needs_xray; then which+=(xray); fi
     if needs_ss_rust; then which+=(ss); fi
-    if hy_on; then which+=(hy); fi
-    ui_blank
-    local w
+    ui_section '修改核心版本'
+    local w name
     for w in "${which[@]}"; do
-        read_line "$w 版本（latest 或官方标签，回车保持 $(st ".core.$w")）：" v
+        if [[ $w == xray ]]; then name=Xray; else name=SS-Rust; fi
+        read_line "$name 版本（latest 或官方标签，回车保持 $(st ".core.$w")）：" v
         [[ -n $v ]] || continue
-        if [[ $v == latest || $v =~ ^(app/)?v?[0-9][A-Za-z0-9._-]*$ ]]; then st_sets ".core.$w" "$(normalize_tag "$v")"
+        if [[ $v == latest || $v =~ ^v?[0-9][A-Za-z0-9._-]*$ ]]; then st_sets ".core.$w" "$(normalize_tag "$v")"
         else ui_warn '版本格式不正确，未修改。'; fi
     done
-}
-
-
-edit_hyadd() {
-    local c
-    while :; do
-        ui_blank
-        if hy_on; then
-            ui_item 1 '附加 Hy2' '开'
-            ui_item 2 '域名' "$(item_value domain)"
-            ui_item 3 '端口' "$(item_value hyport)"
-            ui_item 4 '证书' "$(item_value cert)"
-            ui_item 5 '混淆' "$(item_value obfs)"
-            ui_item 6 '拥塞' "$(item_value cong)"
-        else
-            ui_item 1 '附加 Hy2' '关'
-        fi
-        read_line '修改哪一项（0 返回）：' c
-        case $c in
-            1)
-                PREVIEW_NOTES=()
-                if hy_on; then st_set .hy.on 0
-                else
-                    hy_defaults
-                    if [[ -z $(st .hy.domain) ]]; then edit_domain; fi
-                fi ;;
-            2) if hy_on; then edit_domain; fi ;;
-            3) if hy_on; then edit_hyport; fi ;;
-            4) if hy_on; then edit_cert; fi ;;
-            5) if hy_on; then edit_obfs; fi ;;
-            6) if hy_on; then edit_cong; fi ;;
-            '') continue ;;
-            *) return 0 ;;
-        esac
-    done
-}
-
-check_domain_dns() {
-    local d=$1 a aaaa ok=0 ip
-    ui_line "查询 $d 的解析..."
-    a=$(doh_query "$d" A | paste -sd ' ' || true)
-    aaaa=$(doh_query "$d" AAAA | paste -sd ' ' || true)
-    ui_kv 'A 记录' "${a:-无}"
-    ui_kv 'AAAA 记录' "${aaaa:-无}"
-    for ip in $a $aaaa; do
-        if is_cloudflare_ip "$ip"; then
-            ui_warn '域名解析到了 Cloudflare 代理，请改成仅 DNS（灰色云朵）。'
-            return 1
-        fi
-    done
-    if [[ -n $NET_V4 && " $a " == *" $NET_V4 "* ]]; then ok=1; fi
-    if [[ -n $NET_V6 && " $aaaa " == *" $NET_V6 "* ]]; then ok=1; fi
-    if (( ! ok )); then
-        ui_warn '域名没有解析到本机。'
-        ui_kv '本机 IPv4' "${NET_V4:-无}"
-        ui_kv '本机 IPv6' "${NET_V6:-无}"
-        return 1
-    fi
-    if [[ -n $a && ( -z $NET_V4 || " $a " != *" $NET_V4 "* ) ]]; then
-        ui_warn 'A 记录没有指向本机，证书验证可能失败。'
-        ui_line '请删除或改正这条记录。'
-        return 1
-    fi
-    if [[ -n $aaaa && ( -z $NET_V6 || " $aaaa " != *" $NET_V6 "* ) ]]; then
-        ui_warn 'AAAA 记录没有指向本机，证书验证可能失败。'
-        ui_line '请删除或改正这条记录。'
-        return 1
-    fi
-    ui_ok '解析正确。'
-    return 0
-}
-
-edit_domain() {
-    local d
-    while :; do
-        read_line 'Hysteria2 域名（需已解析到本机，回车取消）：' d
-        [[ -n $d ]] || return 0
-        d=${d,,}
-        if ! valid_domain "$d"; then ui_warn '请输入纯域名，如 hy.example.com。'; continue; fi
-        if [[ -n $(st .hy.domain) && $d != "$(st .hy.domain)" ]]; then
-            confirm_hy_change '更换域名' || return 0
-        fi
-        if check_domain_dns "$d" || ask_no '仍然使用这个域名（解析生效前证书申请会失败）'; then
-            st_sets .hy.domain "$d"
-            return 0
-        fi
-    done
-}
-
-edit_cert() {
-    local c v
-    ui_blank
-    local http_note='HTTP 验证（需要 80 端口）'
-    if port_taken tcp 80; then http_note='HTTP 验证（80 端口已被占用，不可用）'; fi
-    local cur
-    index_of cur "$(st .hy.cert)" http dns file
-    ask_choice c "$cur" "$http_note" 'DNS 验证（需要 DNS 服务商 API 令牌）' '使用已有证书文件'
-    [[ -n $c ]] || return 0
-    case $c in
-        1)
-            if port_taken tcp 80; then ui_warn '80 端口已被其他程序占用。'; return 0; fi
-            st_sets .hy.cert http
-            ui_line '提醒：云服务商的安全组需要放行 TCP 80。' ;;
-        2) edit_dns_provider ;;
-        3)
-            local cf kf
-            read_line '证书文件路径（完整链 PEM）：' cf
-            read_line '私钥文件路径：' kf
-            if [[ ! -r $cf || ! -r $kf || $cf != /* || $kf != /* ]]; then
-                ui_warn '请填写存在的文件的完整路径。'
-            elif ! openssl x509 -in "$cf" -noout 2>/dev/null; then
-                ui_warn '证书文件不是有效的 PEM 证书。'
-            elif [[ $(openssl x509 -in "$cf" -noout -issuer 2>/dev/null | cut -d= -f2-) == "$(openssl x509 -in "$cf" -noout -subject 2>/dev/null | cut -d= -f2-)" ]]; then
-                ui_warn '不支持自签名证书，请使用受信任 CA 签发的证书。'
-            elif [[ $(openssl x509 -in "$cf" -noout -pubkey 2>/dev/null) != "$(openssl pkey -in "$kf" -pubout 2>/dev/null)" ]]; then
-                ui_warn '私钥和证书不匹配。'
-            else
-                st_filter --arg c "$cf" --arg k "$kf" '.hy.cert = "file" | .hy.cert_file = $c | .hy.key_file = $k'
-                if ! hy_cert_direct; then
-                    ui_warn '运行用户不能直接读取这个证书，将复制一份给 Hysteria。'
-                    ui_line '证书续期后，在"更新 > 仅重启服务"里重启生效。'
-                fi
-            fi
-            return 0 ;;
-    esac
-    [[ $(st .hy.cert) != file ]] || return 0
-    if [[ -n $(st .hy.email) ]]; then read_line "ACME 联系邮箱（回车保持 $(st .hy.email)）：" v
-    else read_line 'ACME 联系邮箱（可留空）：' v; fi
-    if [[ -n $v ]]; then
-        if [[ $v =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; then st_sets .hy.email "$v"; else ui_warn '邮箱格式不正确，未修改。'; fi
-    fi
-}
-
-edit_dns_provider() {
-    local c p
-    local -a names=(cloudflare duckdns gandi godaddy namecheap njalla porkbun vultr)
-    local cur
-    index_of cur "$(st .hy.dns_provider)" "${names[@]}"
-    ui_blank
-    ask_choice c "$cur" "${names[@]}"
-    [[ -n $c ]] || return 0
-    p=${names[$((c - 1))]}
-    local -a keys=()
-    case $p in
-        cloudflare) keys=(cloudflare_api_token) ;;
-        duckdns) keys=(duckdns_api_token) ;;
-        gandi) keys=(gandi_api_token) ;;
-        godaddy) keys=(godaddy_api_token) ;;
-        namecheap) keys=(namecheap_api_key namecheap_api_user) ;;
-        njalla) keys=(njalla_api_token) ;;
-        porkbun) keys=(porkbun_api_key porkbun_api_secret_key) ;;
-        vultr) keys=(vultr_api_token) ;;
-    esac
-    local cfg='{}' k v
-    for k in "${keys[@]}"; do
-        read_line "$k：" v
-        [[ -n $v ]] || { ui_warn '已取消。'; return 0; }
-        cfg=$(jq -c --arg k "$k" --arg v "$v" '. + {($k): $v}' <<< "$cfg")
-    done
-    st_filter --arg p "$p" --argjson c "$cfg" '.hy.cert = "dns" | .hy.dns_provider = $p | .hy.dns_config = $c'
-}
-
-edit_obfs() {
-    local c n cur
-    index_of cur "$(st .hy.obfs)" none salamander gecko
-    ui_blank
-    ui_line '混淆与伪装二选一：开混淆后伪装站失效。'
-    ask_choice c "$cur" '关（伪装为 HTTP/3 网站）' 'Salamander' 'Gecko（实验，客户端支持少）' 'ECH 开关（实验）'
-    case $c in
-        1|2|3)
-            [[ $c != "$cur" ]] || return 0
-            confirm_hy_change '修改混淆' || return 0
-            case $c in 1) st_sets .hy.obfs none ;; 2) st_sets .hy.obfs salamander ;; 3) st_sets .hy.obfs gecko ;; esac ;;
-        4)
-            confirm_hy_change '切换 ECH' || return 0
-            if [[ $(st .hy.ech) == 1 ]]; then
-                st_filter '.hy.ech = 0 | .hy.ech_config = ""'
-            else
-                ui_line 'ECH 隐藏真实域名，需要客户端支持（主要是官方客户端）。'
-                read_line '外层 SNI（对外可见的域名）：' n
-                if valid_domain "$n"; then st_filter --arg n "${n,,}" '.hy.ech = 1 | .hy.ech_name = $n | .hy.ech_config = ""'
-                else ui_warn '域名格式不正确，未开启。'; fi
-            fi ;;
-    esac
-}
-
-edit_cong() {
-    local c cur
-    index_of cur "$(st .hy.profile)" conservative standard aggressive
-    ui_blank
-    ask_choice c "$cur" 'BBR 保守' 'BBR 标准' 'BBR 激进' '切换是否允许客户端用 Brutal'
-    case $c in
-        1) st_sets .hy.profile conservative ;;
-        2) st_sets .hy.profile standard ;;
-        3) st_sets .hy.profile aggressive ;;
-        4) if [[ $(st .hy.brutal) == 1 ]]; then st_set .hy.brutal 0; else st_set .hy.brutal 1; fi ;;
-    esac
 }
 
 
@@ -2894,9 +2413,7 @@ render_xray_config() {
         local users stream dec
         dec=$(enc_string server)
         if [[ $s == enc-split ]]; then users=$(shared_users_json ''); else users=$(shared_users_json xtls-rprx-vision); fi
-        if [[ $s != enc ]]; then
-            users=$(jq -c --arg d "$(st .enc.direct_id)" '[.[] | select(.email == "direct") | if $d != "" then .id = $d else . end]' <<< "$users")
-        fi
+        [[ $s == enc ]] || users=$(jq -c '[.[] | select(.email == "direct")]' <<< "$users")
         if [[ $s == enc-split ]]; then
             stream=$(jq -cn --arg path "$(st .xhttp.path)" '{network:"xhttp", security:"none", xhttpSettings:{path:$path, mode:"auto"}}')
         else
@@ -2905,13 +2422,6 @@ render_xray_config() {
         jq -cn --arg l "$listen" --argjson p "$(st .enc.port)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
             '{tag:"in-enc", listen:$l, port:$p, protocol:"vless", settings:{clients:$u, decryption:$dec}, streamSettings:$st}' >> "$inb"
         direct_tags+=(in-enc)
-        if [[ $s == enc ]]; then
-            jq -c --arg l "$listen" --arg dec "$dec" '.users[] | select((.port // 0) > 0) |
-                {tag:("in-enc-" + .name), listen:$l, port:.port, protocol:"vless",
-                 settings:{clients:[{id, email:.name, flow:"xtls-rprx-vision"}], decryption:$dec},
-                 streamSettings:{network:"raw", security:"none"}}' "$DRAFT" >> "$inb"
-            jq -c '.users[] | select((.port // 0) > 0) | {type:"field", inboundTag:["in-enc-" + .name], outboundTag:.out}' "$DRAFT" >> "$rules"
-        fi
     fi
 
     if scheme_has_ss "$s"; then
@@ -2995,106 +2505,6 @@ ACL
 }
 
 
-hy_resolve_masq() {
-    hy_on || return 0
-    local mode=direct hp
-    hp=$(st .hy.port)
-    if [[ $(st .hy.obfs) != none ]]; then
-        mode=off
-    elif needs_nginx && [[ $hp == "$(st .reality.port)" ]]; then
-        mode=local
-    elif scheme_has_reality "$(scheme)" && [[ $hp == "$(st .reality.port)" ]]; then
-        mode=off
-    elif [[ $hp == "$(st .enc.port)" || $hp == "$(st .ss.port)" ]] || jq -e --argjson p "$hp" '[.users[].port // 0] | index($p) != null' "$DRAFT" >/dev/null; then
-        mode=off
-    elif port_taken tcp "$hp"; then
-        mode=off
-    fi
-    st_sets .hy.masq_mode "$mode"
-    if [[ $mode != local ]]; then st_set .hy.masq_port 0; fi
-}
-
-render_hy() {
-    local out=$1
-    {
-        printf '%s\n' "$MANAGED_TAG"
-        printf 'listen: %s\n' "$(json_str ":$(st .hy.port)")"
-        case $(st .hy.cert) in
-            file)
-                printf 'tls:\n  cert: %s\n  key: %s\n  sniGuard: strict\n' "$(json_str "$(hy_cert_path cert)")" "$(json_str "$(hy_cert_path key)")" ;;
-            *)
-                printf 'acme:\n  domains:\n    - %s\n' "$(json_str "$(st .hy.domain)")"
-                [[ -z $(st .hy.email) ]] || printf '  email: %s\n' "$(json_str "$(st .hy.email)")"
-                printf '  ca: letsencrypt\n  dir: %s\n' "$(json_str "$HY_DIR/acme")"
-                if [[ $(st .hy.cert) == dns ]]; then
-                    printf '  type: dns\n  dns:\n    name: %s\n    config:\n' "$(st .hy.dns_provider)"
-                    jq -r '.hy.dns_config | to_entries[] | "      \(.key): \(.value | tojson)"' "$DRAFT"
-                else
-                    printf '  type: http\n'
-                fi ;;
-        esac
-        if [[ $(st .hy.ech) == 1 ]]; then printf 'ech:\n  keyPath: %s\n' "$(json_str "$HY_DIR/ech.pem")"; fi
-        printf 'auth:\n  type: password\n  password: %s\n' "$(json_str "$(st .hy.password)")"
-        case $(st .hy.obfs) in
-            salamander) printf 'obfs:\n  type: salamander\n  salamander:\n    password: %s\n' "$(json_str "$(st .hy.obfs_password)")" ;;
-            gecko) printf 'obfs:\n  type: gecko\n  gecko:\n    password: %s\n' "$(json_str "$(st .hy.obfs_password)")" ;;
-        esac
-        printf 'congestion:\n  type: bbr\n  bbrProfile: %s\n' "$(st .hy.profile)"
-        if [[ $(st .hy.brutal) == 1 ]]; then printf 'ignoreClientBandwidth: false\n'; else printf 'ignoreClientBandwidth: true\n'; fi
-        printf 'outbounds:\n  - name: direct\n    type: direct\n    direct:\n      mode: "%s"\n' "$(outbound_hy_mode "$(st .outbound)")"
-        printf 'acl:\n  inline:\n'
-        local r
-        for r in localhost 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 \
-            192.0.2.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 \
-            ::/128 ::1/128 fc00::/7 fe80::/10 ff00::/8 2001:db8::/32; do
-            printf '    - reject(%s)\n' "$r"
-        done
-        printf '    - reject(all, tcp/25)\n    - reject(all, tcp/465)\n    - reject(all, tcp/587)\n    - reject(all, tcp/2525)\n'
-        printf '    - direct(all)\n'
-        if [[ $(st .hy.obfs) == none ]]; then
-            printf 'masquerade:\n  type: file\n  file:\n    dir: %s\n' "$(json_str "$HY_DIR/www")"
-            case $(st .hy.masq_mode) in
-                local) printf '  listenHTTPS: %s\n' "$(json_str "127.0.0.1:$(st .hy.masq_port)")" ;;
-                direct) printf '  listenHTTPS: %s\n' "$(json_str ":$(st .hy.port)")" ;;
-            esac
-        fi
-    } > "$out"
-}
-
-render_hy_site() {
-    local dir=$1 d
-    d=$(st .hy.domain)
-    mkdir -p "$dir"
-    cat > "$dir/index.html" <<HTML
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>$d</title>
-<style>
-body{margin:0;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#222;background:#fafafa}
-main{max-width:640px;margin:18vh auto;padding:0 24px}
-h1{font-size:28px;font-weight:600;margin:0 0 12px}
-p{color:#555;margin:0 0 8px}
-footer{margin-top:48px;font-size:13px;color:#999}
-</style>
-</head>
-<body>
-<main>
-<h1>$d</h1>
-<p>This site is under construction.</p>
-<p>Please check back later.</p>
-<footer>&copy; $(date +%Y) $d</footer>
-</main>
-</body>
-</html>
-HTML
-    printf 'User-agent: *\nDisallow: /\n' > "$dir/robots.txt"
-}
-
-
-
 nginx_detect() {
     local build v
     build=$(nginx -V 2>&1)
@@ -3115,13 +2525,10 @@ nginx_detect() {
 }
 
 render_nginx() {
-    local out=$1 user group sni hy_line=''
+    local out=$1 user group sni
     user=nobody
     group=$(id -gn nobody 2>/dev/null || echo nogroup)
     sni=$(st .reality.sni)
-    if hy_on && [[ $(st .hy.masq_mode) == local ]]; then
-        hy_line="        $(st .hy.domain)   unix:$NGINX_RUN/hy.sock;"
-    fi
     {
         printf '%s\n' "$MANAGED_TAG"
         [[ -z $NGINX_MODULE_LINE ]] || printf '%s\n' "$NGINX_MODULE_LINE"
@@ -3139,9 +2546,6 @@ events {
 stream {
     map \$ssl_preread_server_name \$zxray_backend {
         $sni   127.0.0.1:$(st .reality.internal);
-EOF
-        [[ -z $hy_line ]] || printf '%s\n' "$hy_line"
-        cat <<EOF
         default   unix:$NGINX_RUN/reject.sock;
     }
     map \$remote_addr \$zxray_all {
@@ -3166,15 +2570,6 @@ EOF
         proxy_pass \$zxray_backend;
     }
 EOF
-        if [[ -n $hy_line ]]; then
-            cat <<EOF
-
-    server {
-        listen unix:$NGINX_RUN/hy.sock proxy_protocol;
-        proxy_pass 127.0.0.1:$(st .hy.masq_port);
-    }
-EOF
-        fi
         if (( ! NGINX_REJECT_TLS )); then
             cat <<EOF
 
@@ -3292,9 +2687,7 @@ render_nodes() {
             outtag=$(jq -r ".users[$i].out" "$DRAFT")
             [[ $s == enc || $outtag == direct ]] || continue
             id=$(jq -r ".users[$i].id" "$DRAFT")
-            if [[ $s != enc && -n $(st .enc.direct_id) ]]; then id=$(st .enc.direct_id); fi
-            port=$(jq -r ".users[$i].port // 0" "$DRAFT")
-            [[ $port != 0 ]] || port=$(st .enc.port)
+            port=$(st .enc.port)
             if [[ $s == enc-split ]]; then
                 local up down ex
                 read -r up down <<< "$(split_hosts)"
@@ -3330,17 +2723,6 @@ render_nodes() {
             done
         fi
     fi
-
-    if hy_on; then
-        local q
-        q="sni=$(url_encode "$(st .hy.domain)")"
-        case $(st .hy.obfs) in
-            salamander|gecko) q+="&obfs=$(st .hy.obfs)&obfs-password=$(url_encode "$(st .hy.obfs_password)")" ;;
-        esac
-        if [[ $(st .hy.ech) == 1 && -n $(st .hy.ech_config) ]]; then q+="&ech=$(url_encode "$(st .hy.ech_config)")"; fi
-        link="hysteria2://$(url_encode "$(st .hy.password)")@$(st .hy.domain):$(st .hy.port)/?$q#$(url_encode 'Hy2-zxray')"
-        node_add 'Hy2-zxray' "$link"
-    fi
 }
 
 render_info() {
@@ -3370,16 +2752,14 @@ render_info() {
         if [[ $s == ss && $(ss_core) == ss-rust ]]; then
             printf 'SS-Rust 已拦截私网地址；不含 Xray 的 SMTP 端口拦截\n'
         fi
-        if hy_on; then printf 'Hy2     证书：%s\n' "$(item_value cert)"; fi
     } > "$out"
 }
-
 
 
 installed_version() { jq -r ".installed.$1 // empty" "$STATE" 2>/dev/null || true; }
 
 plan_cores() {
-    USE_XRAY='' USE_SS='' USE_HY='' NEW_XRAY=0 NEW_SS=0 NEW_HY=0
+    USE_XRAY='' USE_SS='' NEW_XRAY=0 NEW_SS=0
     local want cur
     if needs_xray; then
         want=$(st .core.xray); cur=$(installed_version xray)
@@ -3391,11 +2771,6 @@ plan_cores() {
         want=$(st .core.ss); cur=$(installed_version ss)
         if [[ $MODE == modify && -x $SS_BIN && -n $cur && ( $want == latest || $want == "$cur" ) ]]; then USE_SS=$SS_BIN
         else NEW_SS=1; fi
-    fi
-    if hy_on; then
-        want=$(st .core.hy); cur=$(installed_version hy)
-        if [[ $MODE == modify && -x $HY_BIN && -n $cur && ( $want == latest || $want == "$cur" || app/$want == "$cur" ) ]]; then USE_HY=$HY_BIN
-        else NEW_HY=1; fi
     fi
 }
 
@@ -3410,21 +2785,6 @@ download_cores() {
         download_ss "$(st .core.ss)" "$dir/ss-pkg"
         USE_SS=$dir/ss-pkg/ssserver
     fi
-    if (( NEW_HY )); then
-        download_hy "$(st .core.hy)" "$dir/hy-pkg"
-        USE_HY=$dir/hy-pkg/hysteria
-    fi
-}
-
-ensure_ech() {
-    hy_on && [[ $(st .hy.ech) == 1 ]] || return 0
-    [[ -z $(st .hy.ech_config) || -z $(st .hy.ech_key) ]] || return 0
-    local out conf
-    rm -f -- "$STAGE/ech.pem"
-    out=$("$USE_HY" ech --public-name "$(st .hy.ech_name)" -o "$STAGE/ech.pem" 2>>"$STEP_LOG")
-    conf=$(awk '/^  ech: /{print $2; exit}' <<< "$out")
-    [[ -n $conf && -s $STAGE/ech.pem ]] || { die '生成 ECH 密钥失败。'; return 1; }
-    st_filter --arg c "$conf" --rawfile k "$STAGE/ech.pem" '.hy.ech_config = $c | .hy.ech_key = $k'
 }
 
 validate_xray_config() {
@@ -3491,7 +2851,7 @@ prepare_nginx() {
 
 
 configure_bbr() {
-    if [[ $(st .bbr) != 1 || $(scheme) == hy2 ]]; then
+    if [[ $(st .bbr) != 1 ]]; then
         if is_managed_file "$SYSCTL_FILE"; then rm -f -- "$SYSCTL_FILE"; restore_bbr_original; fi
         return 0
     fi
@@ -3541,14 +2901,11 @@ wanted_services() {
     if needs_xray; then printf 'xray\n'; fi
     if needs_ss_rust; then printf 'zxray-ss\n'; fi
     if needs_nginx; then printf 'zxray-nginx\n'; fi
-    if hy_on; then printf 'zxray-hy\n'; fi
 }
 
 stop_owned_services() {
     local s pid n
     for s in "${MANAGED_SERVICES[@]}"; do svc_stop_disable "$s"; done
-    if [[ $INIT == systemd ]]; then svc_stop_disable logrotate@xray.timer; fi
-    if [[ -f $DATA_DIR/.install_kind || -f $OPENRC_DIR/ssserver ]] && is_managed_legacy_ss; then svc_stop_disable ssserver; fi
     while read -r pid; do
         [[ -n $pid ]] || continue
         if pid_is_owned "$pid"; then
@@ -3556,44 +2913,18 @@ stop_owned_services() {
             for n in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
             if kill -0 "$pid" 2>/dev/null; then die "进程 $pid 未能停止。"; return 1; fi
         fi
-    done < <(pgrep -x 'xray|ssserver|hysteria|nginx' 2>/dev/null || true)
-}
-
-is_managed_legacy_ss() {
-    [[ -f $DATA_DIR/.install_kind && $(cat "$DATA_DIR/.install_kind") == alpine-ss2022 ]] ||
-        [[ $(jq -r '.meta.legacy_ss_package // 0' "$DRAFT" 2>/dev/null) == 1 ]]
+    done < <(pgrep -x 'xray|ssserver|nginx' 2>/dev/null || true)
 }
 
 remove_old_files() {
     local n
-    rm -rf -- "$CONFIG_DIR" "$ROOT/var/log/xray" "$ROOT/var/lib/xray" "$SS_CONFIG" "$SS_ACL" "$HY_CONFIG" \
-        "$NGINX_DIR" "$DATA_DIR/clients" "$DATA_DIR/xhttp_patches" "$HY_DIR/www" "$HY_DIR/ech.pem"
+    rm -rf -- "$CONFIG_DIR" "$SS_CONFIG" "$SS_ACL" "$NGINX_DIR" "$NGINX_RUN"
     for n in "${MANAGED_SERVICES[@]}"; do
         rm -f -- "$OPENRC_DIR/$n" "$SYSTEMD_DIR/$n.service" "$ROOT/etc/runlevels/default/$n"
-        rm -rf -- "$SYSTEMD_DIR/$n.service.d"
         rm -f -- "$SYSTEMD_DIR/multi-user.target.wants/$n.service"
     done
-    rm -f -- "$SYSTEMD_DIR/xray@.service" "$SYSTEMD_DIR/timers.target.wants/logrotate@xray.timer" "$ROOT/etc/logrotate.d/xray"
-    rm -rf -- "$SYSTEMD_DIR/xray@.service.d"
-    if is_managed_legacy_ss; then
-        rm -rf -- "$ROOT/etc/shadowsocks-rust"
-        rm -f -- "$OPENRC_DIR/ssserver" "$ROOT/etc/runlevels/default/ssserver"
-    fi
-    find "$DATA_DIR" -maxdepth 1 -type f \( -name '*.bak.*' -o -name 'last_failed*' -o -name '*_patch.json' \
-        -o -name '.install_kind' -o -name 'source-record' -o -name 'script-sources.ndjson' \) -delete 2>/dev/null || true
-    rm -rf -- "$NGINX_RUN"
     needs_xray || rm -rf -- "$XRAY_BIN" "$XRAY_ASSET_DIR"
     needs_ss_rust || rm -f -- "$SS_BIN"
-    if hy_on; then
-        if [[ $(st .hy.cert) != file ]] || ! hy_cert_copy; then rm -rf -- "$HY_DIR/tls"; fi
-    else
-        rm -f -- "$HY_BIN"
-        local f
-        for f in "$HY_DIR"/* "$HY_DIR"/.[!.]*; do
-            [[ -e $f || -L $f ]] || continue
-            [[ $f == "$HY_DIR/acme" ]] || rm -rf -- "$f"
-        done
-    fi
     return 0
 }
 
@@ -3601,66 +2932,13 @@ xray_needs_lowport() {
     local proto port label
     while read -r proto port label; do
         [[ -n $port ]] || continue
-        [[ $label != Hysteria2 ]] || continue
         if [[ $label == REALITY && $(st .reality.guard) == nginx ]]; then continue; fi
         if (( port < 1024 )); then return 0; fi
     done < <(public_ports)
     return 1
 }
-hy_needs_lowport() {
-    (( $(st .hy.port) < 1024 )) && return 0
-    [[ $(st .hy.cert) == http ]]
-}
-
-grant_cert_read() {
-    local f g m ug
-    ug=$(id -g "$SERVICE_USER")
-    for f in "$(st .hy.cert_file)" "$(st .hy.key_file)"; do
-        [[ -f $f ]] || continue
-        m=$(stat -L -c %a -- "$f")
-        (( (8#$m & 4) == 0 )) || continue
-        g=$(stat -L -c %g -- "$f")
-        [[ $g != "$ug" || $(( 8#$m & 32 )) == 0 ]] || continue
-        if [[ -d $TX ]]; then printf '%s\t%s\t%s\n' "$f" "$g" "$m" >> "$TX/cert-perms"; fi
-        if ! jq -e --arg p "$f" '.meta.cert_perms // [] | any(.path == $p)' "$DRAFT" >/dev/null; then
-            st_filter --arg p "$f" --arg g "$g" --arg m "$m" '.meta.cert_perms = ((.meta.cert_perms // []) + [{path: $p, group: $g, mode: $m}])'
-        fi
-        chgrp -- "$SERVICE_USER" "$f"
-        chmod g+r -- "$f"
-    done
-}
-
-restore_cert_perms() {
-    local keep=${1:-} n i p g m
-    n=$(jq '.meta.cert_perms // [] | length' "$DRAFT" 2>/dev/null || echo 0)
-    for (( i = n - 1; i >= 0; i-- )); do
-        p=$(jq -r ".meta.cert_perms[$i].path" "$DRAFT")
-        if [[ $keep == keep && $(st .hy.on) == 1 && $(st .hy.cert) == file ]] && ! hy_cert_copy &&
-            [[ $p == "$(st .hy.cert_file)" || $p == "$(st .hy.key_file)" ]]; then
-            continue
-        fi
-        g=$(jq -r ".meta.cert_perms[$i].group" "$DRAFT")
-        m=$(jq -r ".meta.cert_perms[$i].mode" "$DRAFT")
-        if [[ -f $p ]]; then
-            chgrp -- "$g" "$p" 2>/dev/null && chmod -- "$m" "$p" 2>/dev/null ||
-                ui_warn "没能恢复 $(basename -- "$p") 的原权限。"
-        fi
-        st_filter --argjson i "$i" '.meta.cert_perms |= del(.[$i])'
-    done
-    return 0
-}
-
-sync_cert_copy() {
-    mkdir -p "$HY_DIR/tls"
-    install -m 644 -- "$(st .hy.cert_file)" "$HY_DIR/tls/cert.pem"
-    install -m 640 -- "$(st .hy.key_file)" "$HY_DIR/tls/key.pem"
-    chown -R "root:$SERVICE_USER" "$HY_DIR/tls"
-    chmod 750 "$HY_DIR/tls"
-}
-
 install_files_and_services() {
-    local s low
-    s=$(scheme)
+    local low
     ensure_service_user
     if (( SERVICE_USER_CREATED )); then st_set .meta.created_user 1; fi
     mkdir -p "$DATA_DIR/log" "$SELF_DIR" "$ROOT/usr/local/bin"
@@ -3693,27 +2971,6 @@ install_files_and_services() {
         if (( $(st .ss.port) < 1024 )); then low=1; fi
         grant_lowport "$SS_BIN" "$low"
         write_service zxray-ss "$SS_BIN" "-c $SS_CONFIG --acl $SS_ACL" 'Shadowsocks Rust' "$SERVICE_USER" "$low"
-    fi
-    if hy_on; then
-        [[ $USE_HY == "$HY_BIN" ]] || install_bin "$USE_HY" "$HY_BIN"
-        mkdir -p "$HY_DIR/acme"
-        atomic_install "$STAGE/hy.yaml" "$HY_CONFIG" 640
-        render_hy_site "$HY_DIR/www"
-        if [[ $(st .hy.ech) == 1 ]]; then
-            jq -r '.hy.ech_key' "$DRAFT" | atomic_write "$HY_DIR/ech.pem" 600
-        fi
-        chown -R "$SERVICE_USER:$SERVICE_USER" "$HY_DIR"
-        chown "root:$SERVICE_USER" "$HY_CONFIG"
-        chmod 750 "$HY_DIR"
-        chmod -R a+rX "$HY_DIR/www"
-        if [[ $(st .hy.cert) == file ]]; then
-            if hy_cert_copy; then sync_cert_copy; else grant_cert_read; fi
-        fi
-        low=0
-        if hy_needs_lowport; then low=1; fi
-        grant_lowport "$HY_BIN" "$low"
-        write_service zxray-hy "$HY_BIN" "server -c $HY_CONFIG --disable-update-check -l warn" 'Hysteria 2' \
-            "$SERVICE_USER" "$low" "HYSTERIA_ACME_DIR=$HY_DIR/acme" "$HY_DIR"
     fi
     if needs_nginx; then
         mkdir -p "$NGINX_DIR/tmp" "$NGINX_RUN"
@@ -3755,18 +3012,11 @@ wait_active() {
 }
 
 health_check() {
-    local s line proto port label i
+    local s proto port label i
     while read -r s; do
         [[ -n $s ]] || continue
         if ! wait_active "$s" 10; then service_log_to_step "$s"; die "$s 没有正常运行。"; return 1; fi
     done < <(wanted_services)
-    if hy_on; then
-        for (( i = 0; i < 360; i++ )); do
-            if port_listening udp "$(st .hy.port)"; then break; fi
-            sleep 0.5
-        done
-        if ! port_listening udp "$(st .hy.port)"; then service_log_to_step zxray-hy; die 'Hysteria2 没有开始监听（证书可能申请失败）。'; return 1; fi
-    fi
     sleep 1
     while read -r proto port label; do
         [[ -n $port ]] || continue
@@ -3777,12 +3027,11 @@ health_check() {
         port_listening "$proto" "$port" || { die "$label 的 ${proto^^} $port 端口没有监听。"; return 1; }
     done < <(public_ports)
     if scheme_has_reality "$(scheme)"; then reality_check; fi
-    if hy_on && [[ $(st .hy.masq_mode) != off ]]; then hy_masq_check; fi
     return 0
 }
 
 reality_check() {
-    local rp sni ip rows
+    local rp sni rows
     rp=$(st .reality.port)
     sni=$(st .reality.sni)
     if [[ $(st .reality.guard) == nginx ]]; then
@@ -3803,33 +3052,19 @@ reality_check() {
     (( ok )) || { die '正确 SNI 的回落握手失败（服务器可能连不上目标站）。'; return 1; }
 }
 
-hy_masq_check() {
-    local port d code
-    d=$(st .hy.domain)
-    if [[ $(st .hy.masq_mode) == local ]]; then port=$(st .reality.port); else port=$(st .hy.port); fi
-    local extra=()
-    if [[ $(st .hy.cert) == file ]]; then extra=(-k); fi
-    code=$(curl --noproxy "*" -s -o /dev/null -w "%{http_code}" --max-time 10 "${extra[@]}" --resolve "$d:$port:127.0.0.1" "https://$d:$port/" 2>>"$STEP_LOG" || true)
-    [[ $code == 200 ]] || { die "Hysteria2 伪装站没有正常响应（HTTP $code）。"; return 1; }
-}
-
 
 record_installed_versions() {
     local v
     if needs_xray; then v=$(xray_version_of "$XRAY_BIN"); st_sets .installed.xray "v$v"; else st_sets .installed.xray ''; fi
     if needs_ss_rust; then v=$(ss_version_of "$SS_BIN"); st_sets .installed.ss "v$v"; else st_sets .installed.ss ''; fi
-    if hy_on; then v=$(hy_version_of "$HY_BIN"); st_sets .installed.hy "$v"; else st_sets .installed.hy ''; fi
 }
 
 apply_draft() {
-    local s
-    s=$(scheme)
-    hy_resolve_masq
     plan_cores
     STEP_NO=0
     STEP_TOTAL=4
     local dl=0
-    if (( NEW_XRAY || NEW_SS || NEW_HY )); then dl=1; STEP_TOTAL=$(( STEP_TOTAL + 1 )); fi
+    if (( NEW_XRAY || NEW_SS )); then dl=1; STEP_TOTAL=$(( STEP_TOTAL + 1 )); fi
     local ng=0
     if needs_nginx; then ng=1; STEP_TOTAL=$(( STEP_TOTAL + 1 )); fi
 
@@ -3843,8 +3078,6 @@ apply_draft() {
     ui_step '生成并校验配置'
     : > "$STEP_LOG"
     finalize_identity "$USE_XRAY"
-    decide_cert_mode
-    ensure_ech
     if needs_xray; then
         render_xray_config "$STAGE/config.json"
         validate_xray_config "$STAGE/config.json"
@@ -3853,7 +3086,6 @@ apply_draft() {
         render_ss_rust "$STAGE/ssserver.json" "$STAGE/ssserver.acl"
         validate_ss_rust "$STAGE/ssserver.json" "$STAGE/ssserver.acl"
     fi
-    if hy_on; then render_hy "$STAGE/hy.yaml"; fi
     render_nodes "$STAGE/nodes.ndjson"
     jq -s . "$STAGE/nodes.ndjson" > "$STAGE/nodes.json"
     ui_step_done
@@ -3867,11 +3099,7 @@ apply_draft() {
         ui_step_done
     fi
 
-    local label='切换并启动服务'
-    if hy_on && [[ $(st .hy.cert) != file ]] && ! compgen -G "$HY_DIR/acme/certificates/*/$(st .hy.domain)/*.crt" >/dev/null; then
-        label='启动服务（含申请证书）'
-    fi
-    ui_step "$label"
+    ui_step '切换并启动服务'
     : > "$STEP_LOG"
     stop_owned_services
     remove_old_files
@@ -3910,10 +3138,7 @@ write_node_files() {
 }
 
 post_commit_cleanup() {
-    DRAFT=$STATE restore_cert_perms keep
     if ! needs_nginx; then release_nginx_packages || true; fi
-    release_legacy_ss || true
-    cleanup_legacy_launchers
     return 0
 }
 
@@ -3933,39 +3158,11 @@ release_nginx_packages() {
     atomic_install "$STAGE/state-clean.json" "$STATE" 600
 }
 
-release_legacy_ss() {
-    [[ $(jq -r '.meta.legacy_ss_package // 0' "$STATE" 2>/dev/null) == 1 ]] || return 0
-    if [[ $PKG == apk ]] && pkg_installed shadowsocks-rust; then
-        pkg_remove shadowsocks-rust >/dev/null 2>&1 || return 1
-    fi
-    jq '.meta.legacy_ss_package = 0' "$STATE" > "$STAGE/state-clean-ss.json"
-    atomic_install "$STAGE/state-clean-ss.json" "$STATE" 600
-}
-
-cleanup_legacy_launchers() {
-    local dir name f
-    for dir in "$ROOT/usr/local/bin" "$ROOT/usr/bin" "$ROOT/usr/sbin" "$ROOT/root/bin" "$ROOT/root/.local/bin"; do
-        for name in zxray zdd doudou xray-manager; do
-            f=$dir/$name
-            [[ $f != "$QUICK_BIN" ]] || continue
-            if [[ -L $f && $(readlink "$f") == "$SELF_SCRIPT_PATH" ]]; then rm -f -- "$f"
-            elif [[ -f $f ]] && grep -q 'doudou-xray-manager\|xray_manager.sh' "$f" 2>/dev/null; then rm -f -- "$f"; fi
-        done
-    done
-    return 0
-}
-
 
 state_ok() { [[ -f $STATE ]] && [[ $(jq -r '.schema // 0' "$STATE" 2>/dev/null) == "$STATE_SCHEMA" ]]; }
 
-legacy_install_present() {
-    [[ -f $DATA_DIR/.install_kind ]] && return 0
-    [[ -f $STATE ]] && [[ $(jq -r '.schema // empty' "$STATE" 2>/dev/null) == zxray-2 ]]
-}
-
 foreign_install_present() {
     state_ok && return 1
-    legacy_install_present && return 1
     [[ -e $CONFIG_FILE || -e $XRAY_BIN ]]
 }
 
@@ -3998,7 +3195,7 @@ install_self() {
         fi
     fi
     [[ -f $SELF_SCRIPT_PATH ]] || return 0
-    if [[ -e $QUICK_BIN ]] && ! grep -q 'xray_manager\|doudou' "$QUICK_BIN" 2>/dev/null; then
+    if [[ -e $QUICK_BIN ]] && ! is_managed_file "$QUICK_BIN"; then
         ui_warn "$QUICK_BIN 已被其他程序占用，快捷命令未创建。"
         return 0
     fi
@@ -4053,7 +3250,7 @@ carry_meta_from_state() {
     local meta
     meta=$(jq -c '.meta // {}' "$STATE" 2>/dev/null || echo '{}')
     st_filter --argjson m "$meta" '.meta = (.meta + ($m
-        | {nginx_packages, nginx_hash, legacy_ss_package, created_user, cert_perms}
+        | {nginx_packages, nginx_hash, created_user}
         | with_entries(select(.value != null))))'
 }
 
@@ -4062,20 +3259,13 @@ action_install() {
         foreign_install_hint
         return 1
     fi
-    if legacy_install_present; then
-        ui_warn '检测到旧版安装，可以接管（节点不变）或覆盖安装。'
-        if ask_yes '接管旧版安装（节点不变）'; then
-            action_takeover
-            return 0
-        fi
-    fi
     ui_line '检测网络...'
     detect_public_ips
     DRAFT=$STAGE/draft.json
     local def=1
     if state_ok; then
         MODE=modify
-        cp "$STATE" "$DRAFT"
+        load_state_draft
         PREVIEW_NOTES=()
         refresh_net_in_draft
         def=$(scheme_index "$(scheme)")
@@ -4101,7 +3291,7 @@ action_install() {
         prepare_new_draft
         preview_loop
         if [[ $PREVIEW_RESULT != 0 ]]; then def=$(scheme_index "$s"); continue; fi
-        if state_ok || legacy_install_present; then
+        if state_ok; then
             if ! ask_no '覆盖安装会生成新节点，旧节点将失效。继续'; then continue; fi
         fi
         apply_draft
@@ -4117,7 +3307,6 @@ firewall_hints() {
         [[ -n $port ]] || continue
         lines+=("$port/$proto")
     done < <(public_ports)
-    if [[ $(st .hy.cert) == http ]] && hy_on; then lines+=("80/tcp"); fi
     mapfile -t lines < <(printf '%s\n' "${lines[@]}" | sort -u)
     ui_line "请在云服务商安全组放行：${lines[*]}"
     if have ufw && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -4253,17 +3442,11 @@ run_sub() {
 
 require_state() {
     STATE_READY=0
-    if legacy_install_present; then
-        ui_warn '检测到旧版安装，需要先接管（节点不变）。'
-        if ask_yes '现在接管'; then action_takeover; fi
-        return 0
-    fi
     if ! state_ok; then
-        ui_warn '还没有安装，请先在主页选择"安装"。'
+        ui_warn '还没有安装，请先在主页选择“安装”。'
         return 0
     fi
-    DRAFT=$STAGE/draft.json
-    cp "$STATE" "$DRAFT"
+    load_state_draft
     STATE_READY=1
 }
 
@@ -4326,16 +3509,6 @@ update_cores() {
             todo+=("SS-Rust $cur -> $new"); USE_SS=$dir/ss-pkg/ssserver
         fi
     fi
-    if hy_on; then
-        cur=$(installed_version hy)
-        tag=$(latest_tag_quiet apernet/hysteria || true)
-        tag=${tag#app/}
-        if [[ -z $tag || $tag != "$cur" ]]; then
-            download_hy latest "$dir/hy-pkg"
-            new=$(cat "$dir/hy-pkg/hy.version")
-            if [[ $new != "$cur" ]] && ver_ge "$new" "${cur:-0}"; then todo+=("Hy2 $cur -> $new"); USE_HY=$dir/hy-pkg/hysteria; fi
-        fi
-    fi
     if (( ${#todo[@]} == 0 )); then
         ui_step_skip '已是最新'
     else
@@ -4373,10 +3546,6 @@ replace_cores() {
         install_bin "$USE_SS" "$SS_BIN"
         if (( $(st .ss.port) < 1024 )); then grant_lowport "$SS_BIN" 1; fi
     fi
-    if [[ -n $USE_HY ]]; then
-        install_bin "$USE_HY" "$HY_BIN"
-        if hy_needs_lowport; then grant_lowport "$HY_BIN" 1; fi
-    fi
     start_services
     health_check
     record_installed_versions
@@ -4389,8 +3558,7 @@ replace_cores() {
 regenerate_from_state() {
     ui_blank
     ui_line '用新版脚本重新生成配置（节点不变）...'
-    DRAFT=$STAGE/draft.json
-    cp "$STATE" "$DRAFT"
+    load_state_draft
     MODE=modify
     PREVIEW_NOTES=()
     cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
@@ -4406,10 +3574,6 @@ action_restart() {
     STEP_NO=0 STEP_TOTAL=2
     ui_step '重启服务'
     : > "$STEP_LOG"
-    if hy_on && [[ $(st .hy.cert) == file ]] && hy_cert_copy; then
-        if [[ -r $(st .hy.cert_file) && -r $(st .hy.key_file) ]]; then sync_cert_copy
-        else ui_warn '找不到证书文件，继续使用上次复制的证书。'; fi
-    fi
     while read -r s; do
         [[ -n $s ]] || continue
         svc_do restart "$s" || svc_do start "$s" || true
@@ -4418,19 +3582,6 @@ action_restart() {
     ui_step '检查端口与防护'
     health_check
     ui_step_done
-}
-
-cert_days_left() {
-    local f=''
-    if [[ $(st .hy.cert) == file ]]; then f=$(st .hy.cert_file)
-    else f=$(compgen -G "$HY_DIR/acme/certificates/*/$(st .hy.domain)/$(st .hy.domain).crt" | head -n 1 || true); fi
-    [[ -n $f && -r $f ]] || { printf '未找到'; return 0; }
-    local end now
-    end=$(openssl x509 -in "$f" -noout -enddate 2>/dev/null | cut -d= -f2)
-    [[ -n $end ]] || { printf '无法读取'; return 0; }
-    end=$(date -d "$end" +%s 2>/dev/null || echo 0)
-    now=$(date +%s)
-    printf '%d 天' $(( (end - now) / 86400 ))
 }
 
 action_status() {
@@ -4446,25 +3597,12 @@ action_status() {
     done < <(wanted_services)
     [[ -z $(installed_version xray) ]] || ui_kv 'Xray' "$(installed_version xray)"
     [[ -z $(installed_version ss) ]] || ui_kv 'SS-Rust' "$(installed_version ss)"
-    [[ -z $(installed_version hy) ]] || ui_kv 'Hysteria' "$(installed_version hy)"
     local proto port label
     while read -r proto port label; do
         [[ -n $port ]] || continue
         if port_listening "$proto" "$port"; then v='监听中'; else v='未监听'; fi
         ui_kv "$port/${proto^^}" "$label $v"
     done < <(public_ports)
-    if hy_on; then
-        v=$(cert_days_left)
-        ui_kv '证书剩余' "$v"
-        if [[ $(st .hy.cert) == file ]]; then
-            if [[ $v =~ ^-?([0-9]+)\ 天$ ]] && (( ${v%% *} < 14 )); then ui_warn '证书即将到期，请续期证书文件。'; fi
-            if hy_cert_copy && ! cmp -s "$(st .hy.cert_file)" "$HY_DIR/tls/cert.pem"; then
-                ui_warn '证书文件已更新，重启服务后生效。'
-            fi
-        elif [[ $v =~ ^-?([0-9]+)\ 天$ ]] && (( ${v%% *} < 14 )); then
-            ui_warn '证书即将到期，请检查 Hysteria 能否正常续签。'
-        fi
-    fi
     ui_rule
     ui_line '最近日志'
     while read -r s; do
@@ -4510,7 +3648,7 @@ action_sni_pool() {
 
 
 action_uninstall() {
-    if ! state_ok && ! legacy_install_present; then
+    if ! state_ok; then
         ui_line '没有发现本脚本部署的服务。'
         if [[ -f $SELF_SCRIPT_PATH || -f $QUICK_BIN ]] && ask_no '只删除脚本自身和快捷命令'; then
             remove_self_files
@@ -4523,50 +3661,34 @@ action_uninstall() {
         jq -r '.path' "$DATA_DIR/sources.ndjson" 2>/dev/null | sed 's/^/    /' || true
     fi
     ask_no '完整卸载本脚本、核心、节点和防护配置' || return 0
-    DRAFT=$STAGE/draft.json
-    if state_ok; then cp "$STATE" "$DRAFT"; else echo '{"meta":{}}' > "$DRAFT"; fi
+    load_state_draft
     STEP_NO=0 STEP_TOTAL=3
     ui_blank
     ui_step '停止服务并删除文件'
     : > "$STEP_LOG"
     cp -f "$DATA_DIR/sources.ndjson" "$STAGE/sources.ndjson" 2>/dev/null || true
-    [[ ! -f $STATE ]] || cp -f "$STATE" "$STAGE/state-old.json"
-    local legacy_ss=0 own_user=0
-    if is_managed_legacy_ss; then legacy_ss=1; fi
+    cp -f "$STATE" "$STAGE/state-old.json"
+    local own_user=0
     if [[ $(jq -r '.meta.created_user // 0' "$DRAFT" 2>/dev/null) == 1 ]]; then own_user=1; fi
     tx_begin
     stop_owned_services
     if is_managed_file "$SYSCTL_FILE"; then rm -f -- "$SYSCTL_FILE"; fi
     restore_bbr_original
-    restore_legacy_system_files
     local p
     for p in "${MANAGED_PATHS[@]}"; do
-        case $p in
-            "$ROOT/etc/sysctl.d/99-bbr.conf"|"$SYSCTL_FILE"|"$QUICK_BIN"|"$ROOT/usr/local/bin/zdd") continue ;;
-            "$OPENRC_DIR/ssserver"|"$ROOT/etc/shadowsocks-rust") (( legacy_ss )) || continue ;;
-        esac
+        [[ $p != "$SYSCTL_FILE" && $p != "$QUICK_BIN" ]] || continue
         rm -rf -- "$p"
     done
-    if (( legacy_ss )); then rm -f -- "$ROOT/etc/runlevels/default/ssserver"; fi
-    rm -rf -- "$NGINX_RUN" "$ROOT/etc/runlevels/default/"{xray,zxray-ss,zxray-nginx,zxray-hy}
+    rm -rf -- "$NGINX_RUN" "$ROOT/etc/runlevels/default/"{xray,zxray-ss,zxray-nginx}
     svc_reload_units
     if [[ $INIT == systemd ]]; then
-        for p in "${MANAGED_SERVICES[@]}" ssserver; do systemctl reset-failed "$p" >/dev/null 2>&1 || true; done
+        for p in "${MANAGED_SERVICES[@]}"; do systemctl reset-failed "$p" >/dev/null 2>&1 || true; done
     fi
     tx_commit
     ui_step_done
     ui_step '清理软件包与用户'
-    if [[ -f $STAGE/state-old.json ]]; then
-        STATE=$STAGE/state-old.json release_nginx_packages || true
-        STATE=$STAGE/state-old.json release_legacy_ss || true
-    fi
-    if [[ -f $STAGE/state-old.json ]]; then DRAFT=$STAGE/state-old.json restore_cert_perms; fi
-    if [[ $PKG == apk ]] && pkg_installed shadowsocks-rust && [[ -f $STAGE/state-old.json ]] &&
-        [[ $(jq -r '.meta.legacy_ss_package // 0' "$STAGE/state-old.json") == 1 ]]; then
-        pkg_remove shadowsocks-rust >/dev/null 2>&1 || true
-    fi
+    STATE=$STAGE/state-old.json release_nginx_packages || true
     if (( own_user )); then remove_service_user; fi
-    cleanup_legacy_launchers
     ui_step_done
     ui_step '删除脚本'
     delete_recorded_sources
@@ -4576,28 +3698,9 @@ action_uninstall() {
     exit 20
 }
 
-restore_legacy_system_files() {
-    if [[ -f $DATA_DIR/sysctl_99-bbr.conf.original ]]; then
-        cp -f "$DATA_DIR/sysctl_99-bbr.conf.original" "$ROOT/etc/sysctl.d/99-bbr.conf"
-        sysctl -p "$ROOT/etc/sysctl.d/99-bbr.conf" >/dev/null 2>&1 || true
-    elif [[ -f $ROOT/etc/sysctl.d/99-bbr.conf ]] && grep -q 'Xray' "$ROOT/etc/sysctl.d/99-bbr.conf"; then
-        rm -f -- "$ROOT/etc/sysctl.d/99-bbr.conf"
-    fi
-    if [[ -f $DATA_DIR/alpine_repositories.original ]]; then
-        cp -f "$DATA_DIR/alpine_repositories.original" "$ROOT/etc/apk/repositories"
-    fi
-    if [[ -f $DATA_DIR/alpine_resolv.conf.bak ]]; then
-        cat "$DATA_DIR/alpine_resolv.conf.bak" > "$ROOT/etc/resolv.conf" 2>/dev/null || true
-    fi
-    return 0
-}
-
 remove_self_files() {
     rm -rf -- "$SELF_DIR" "$DATA_DIR"
-    if [[ -f $QUICK_BIN ]] && grep -q 'xray_manager\|doudou' "$QUICK_BIN" 2>/dev/null; then rm -f -- "$QUICK_BIN"; fi
-    if [[ -f $ROOT/usr/local/bin/zdd ]] && grep -q 'xray_manager\|doudou' "$ROOT/usr/local/bin/zdd" 2>/dev/null; then
-        rm -f -- "$ROOT/usr/local/bin/zdd"
-    fi
+    if is_managed_file "$QUICK_BIN"; then rm -f -- "$QUICK_BIN"; fi
     local d
     for d in "$STAGE_BASE".*; do
         [[ -d $d && $d != "$STAGE" ]] && rm -rf -- "$d"
@@ -4620,318 +3723,6 @@ delete_recorded_sources() {
 }
 
 
-legacy_links() {
-    local f
-    for f in "$SUB_FILE" "$INFO_FILE"; do
-        [[ -f $f ]] || continue
-        grep -oE '(vless|ss)://[^[:space:]]+' "$f" || true
-    done | awk '!seen[$0]++'
-}
-
-legacy_link_param() {
-    local port=$1 key=$2 l q
-    while IFS= read -r l; do
-        [[ $l == vless://* ]] || continue
-        [[ -z $port || $l == *":$port?"* ]] || continue
-        q=${l#*\?}
-        q=${q%%#*}
-        query_get "$q" "$key" && return 0
-    done < <(legacy_links)
-    return 1
-}
-
-legacy_landing_link() {
-    local n=$1 f
-    for f in "$INFO_FILE" "$SUB_FILE"; do
-        [[ -f $f ]] || continue
-        grep -oE "(落地原始链接 ?$n|落地 ?$n)[:：] ?(ss|vless)://[^[:space:]]+" "$f" 2>/dev/null |
-            grep -oE '(ss|vless)://[^[:space:]]+' | head -n 1 && return 0
-    done
-    return 1
-}
-
-split_enc_string() {
-    local s=$1 part pad='' key=''
-    local -a b=()
-    IFS=. read -r -a b <<< "$s"
-    [[ ${#b[@]} -ge 4 && ${b[0]} == mlkem768x25519plus ]] || return 1
-    for part in "${b[@]:3}"; do
-        if (( ${#part} < 20 )); then pad+=${pad:+.}$part; else key=$part; fi
-    done
-    printf '%s %s %s %s\n' "${b[1]}" "${b[2]}" "${pad:--}" "$key"
-}
-
-takeover_build_draft() {
-    local kind='' old_schema='' cfg=$CONFIG_FILE
-    [[ -f $DATA_DIR/.install_kind ]] && kind=$(cat "$DATA_DIR/.install_kind")
-    [[ -f $STATE ]] && old_schema=$(jq -r '.schema // empty' "$STATE" 2>/dev/null || true)
-
-    if [[ $kind == alpine-ss2022 ]]; then
-        local j=$ROOT/etc/shadowsocks-rust/ssserver.json
-        [[ -f $j ]] || { die "找不到 $j。"; return 1; }
-        draft_new ss
-        st_filter --slurpfile c "$j" '.ss.port = $c[0].server_port | .ss.method = $c[0].method | .ss.password = $c[0].password
-            | .meta.legacy_ss_package = 1'
-        takeover_common_fields
-        return 0
-    fi
-    if [[ $old_schema == zxray-2 && $(jq -r '.kind' "$STATE") == ss-rust ]]; then
-        [[ -f $SS_CONFIG ]] || { die "找不到 $SS_CONFIG。"; return 1; }
-        draft_new ss
-        st_filter --slurpfile c "$SS_CONFIG" '.ss.port = $c[0].server_port | .ss.method = $c[0].method | .ss.password = $c[0].password'
-        takeover_common_fields
-        return 0
-    fi
-
-    [[ -f $cfg ]] || { die "找不到 $cfg。"; return 1; }
-    jq -e . "$cfg" >/dev/null 2>&1 || { die "$cfg 不是有效的 JSON。"; return 1; }
-    local c
-    c=$(jq -c . "$cfg")
-    local R E XE S s=''
-    R=$(jq -c '[.inbounds[] | select(.streamSettings.security? == "reality")][0] // empty' <<< "$c")
-    E=$(jq -c '[.inbounds[] | select(.tag == "in-enc")][0] // empty' <<< "$c")
-    XE=$(jq -c '[.inbounds[] | select(.tag == "in-xhttp-enc")][0] // empty' <<< "$c")
-    S=$(jq -c '[.inbounds[] | select(.tag == "in-ss")][0] // empty' <<< "$c")
-    local rnet=''
-    [[ -z $R ]] || rnet=$(jq -r '.streamSettings.network // "tcp"' <<< "$R")
-    if [[ -n $R && -n $S && -n $E ]]; then s='triple'
-    elif [[ -n $R && ( $rnet == tcp || $rnet == raw ) ]]; then s='reality-raw'
-    elif [[ -n $R && $rnet == xhttp ]]; then
-        if [[ $(jq -r '.tag' <<< "$R") == in-xhttp-reality ]] || [[ $old_schema == zxray-2 && $(jq -r '.scenario' "$STATE") == split-reality ]]; then
-            s='reality-split'
-        else
-            s='reality-xhttp'
-        fi
-    elif [[ -n $XE ]]; then s='enc-split'
-    elif [[ -n $S && -n $E ]]; then s='dual'
-    elif [[ -n $S ]]; then s='ss'
-    elif [[ -n $E ]]; then s='enc'
-    else
-        die '无法识别现有配置的方案，接管已取消。'
-        return 1
-    fi
-    draft_new "$s"
-    st_set .users '[]'
-
-    local rules
-    rules=$(jq -c '[.routing.rules[]? | select(.outboundTag != null)]' <<< "$c")
-    route_of_user() { jq -r --arg u "$1" '[.[] | select((.user // []) | index($u))][0].outboundTag // "direct"' <<< "$rules"; }
-    route_of_inbound() { jq -r --arg t "$1" '[.[] | select((.inboundTag // []) | index($t)) | select(.user == null)][0].outboundTag // "direct"' <<< "$rules"; }
-
-    local ob n=0
-    while IFS= read -r ob; do
-        [[ -n $ob ]] || continue
-        local tag proto host port link='' label
-        tag=$(jq -r '.tag' <<< "$ob")
-        proto=$(jq -r '.protocol' <<< "$ob")
-        if [[ $proto == shadowsocks ]]; then
-            host=$(jq -r '.settings.servers[0].address' <<< "$ob"); port=$(jq -r '.settings.servers[0].port' <<< "$ob")
-        else
-            host=$(jq -r '.settings.vnext[0].address' <<< "$ob"); port=$(jq -r '.settings.vnext[0].port' <<< "$ob")
-        fi
-        link=$(legacy_landing_link "${tag#landing}" || true)
-        label="${tag/landing/落地 }"
-        st_filter --arg tag "$tag" --argjson ob "$(jq -c 'del(.tag)' <<< "$ob")" --arg kind "${proto/shadowsocks/ss}" \
-            --arg host "$host" --argjson port "${port:-0}" --arg link "$link" --arg label "$label" \
-            '.landings += [{tag:$tag, link:$link, outbound:$ob, kind:$kind, host:$host, port:$port, label:$label}]'
-        n=$(( n + 1 ))
-    done < <(jq -c '.outbounds[] | select(.tag | test("^landing[0-9]+$"))' <<< "$c")
-
-    if [[ -n $R ]]; then
-        local rs target limit
-        rs=$(jq -c '.streamSettings.realitySettings' <<< "$R")
-        target=$(jq -r '.target // .dest // empty' <<< "$rs")
-        st_sets .reality.sni "$(jq -r '.serverNames[0]' <<< "$rs")"
-        st_set .reality.sni_auto 0
-        st_sets .reality.private_key "$(jq -r '.privateKey' <<< "$rs")"
-        st_sets .reality.short_id "$(jq -r '.shortIds[0] // ""' <<< "$rs")"
-        if [[ $(jq -r '.listen' <<< "$R") == 127.0.0.1 ]]; then
-            st_sets .reality.guard nginx
-            st_set .reality.internal "$(jq -r '.port' <<< "$R")"
-            local pub=''
-            if [[ -f $NGINX_DIR/nginx.conf ]]; then
-                pub=$(awk '/^[[:space:]]*listen[[:space:]]+0\.0\.0\.0:[0-9]+/ {sub(/.*:/, "", $2); sub(/;.*/, "", $2); print $2; exit}' "$NGINX_DIR/nginx.conf")
-            fi
-            if ! valid_port "${pub:-x}" && [[ $old_schema == zxray-2 ]]; then pub=$(jq -r '.ports[0] // empty' "$STATE"); fi
-            valid_port "${pub:-x}" || pub=443
-            st_set .reality.port "$pub"
-            if [[ -f $NGINX_DIR/nginx.conf ]]; then
-                local ci ct
-                ci=$(awk '/limit_conn zxray_ip/{gsub(/;/,"",$3); print $3; exit}' "$NGINX_DIR/nginx.conf")
-                ct=$(awk '/limit_conn zxray_total/{gsub(/;/,"",$3); print $3; exit}' "$NGINX_DIR/nginx.conf")
-                [[ ! $ci =~ ^[0-9]+$ ]] || st_set .reality.conn_ip "$ci"
-                [[ ! $ct =~ ^[0-9]+$ ]] || st_set .reality.conn_total "$ct"
-            fi
-        else
-            st_sets .reality.guard xray
-            st_set .reality.port "$(jq -r '.port' <<< "$R")"
-            if [[ $target == 127.0.0.1:* ]]; then st_set .reality.gate "${target##*:}"; fi
-        fi
-        limit=$(jq -c '[.limitFallbackUpload.afterBytes, .limitFallbackUpload.bytesPerSec,
-            .limitFallbackDownload.afterBytes, .limitFallbackDownload.bytesPerSec]' <<< "$rs")
-        case $limit in
-            '[8192,1024,32768,2048]') st_sets .reality.limit orig ;;
-            '[262144,32768,1048576,65536]') st_sets .reality.limit std ;;
-            '[null,null,null,null]') st_sets .reality.limit orig ;;
-            *) st_filter --argjson l "$limit" '.reality.limit = "custom" | .reality.limit_custom = {ua:$l[0], ur:$l[1], da:$l[2], dr:$l[3]}' ;;
-        esac
-        local fp pbk
-        fp=$(legacy_link_param '' fp || true)
-        pbk=$(legacy_link_param '' pbk || true)
-        [[ -z $fp ]] || st_sets .reality.fp "$fp"
-        [[ -z $pbk ]] || st_sets .reality.public_key "$pbk"
-        if [[ $rnet == xhttp ]]; then
-            st_sets .xhttp.path "$(jq -r '.streamSettings.xhttpSettings.path' <<< "$R")"
-            if [[ $(jq -r '.settings.decryption' <<< "$R") != none ]]; then
-                st_set .xhttp.enc 1
-                takeover_enc_from "$(jq -r '.settings.decryption' <<< "$R")" "$(jq -r '.port' <<< "$R")"
-            fi
-        fi
-        local cl
-        while IFS= read -r cl; do
-            local email id out name
-            email=$(jq -r '.email // ""' <<< "$cl")
-            id=$(jq -r '.id' <<< "$cl")
-            out=$(route_of_user "$email")
-            if [[ $out == direct ]]; then name=direct; else name=$out; fi
-            local dup
-            dup=$(jq --arg n "$name" '[.users[] | select(.name == $n)] | length' "$DRAFT")
-            (( dup == 0 )) || name="$name$(( dup + 1 ))"
-            st_filter --arg n "$name" --arg id "$id" --arg o "$out" '.users += [{name:$n, id:$id, out:$o}]'
-        done < <(jq -c '.settings.clients[]' <<< "$R")
-    fi
-
-    local EN=${E:-$XE}
-    if [[ -n $EN ]]; then
-        st_set .enc.port "$(jq -r '.port' <<< "$EN")"
-        takeover_enc_from "$(jq -r '.settings.decryption' <<< "$EN")" "$(jq -r '.port' <<< "$EN")"
-        [[ $s != enc-split ]] || st_sets .xhttp.path "$(jq -r '.streamSettings.xhttpSettings.path' <<< "$EN")"
-        local eid
-        eid=$(jq -r '.settings.clients[0].id' <<< "$EN")
-        if [[ $(jq '[.users[] | select(.name == "direct")] | length' "$DRAFT") == 0 ]]; then
-            st_filter --arg id "$eid" '.users = [{name:"direct", id:$id, out:"direct"}] + .users'
-        elif [[ $(jq -r '[.users[] | select(.name == "direct")][0].id' "$DRAFT") != "$eid" ]]; then
-            st_sets .enc.direct_id "$eid"
-        fi
-        local ib
-        while IFS= read -r ib; do
-            [[ -n $ib ]] || continue
-            local t id out
-            t=$(jq -r '.tag' <<< "$ib")
-            id=$(jq -r '.settings.clients[0].id' <<< "$ib")
-            out=$(route_of_inbound "$t")
-            st_filter --arg id "$id" --arg o "$out" --argjson p "$(jq -r '.port' <<< "$ib")" \
-                '.users += [{name:$o, id:$id, out:$o, port:$p}]'
-        done < <(jq -c '.inbounds[] | select(.protocol == "vless" and (.tag | test("^in-enc-")))' <<< "$c")
-    fi
-
-    if [[ -n $S ]]; then
-        st_filter --argjson i "$S" '.ss.port = $i.port | .ss.method = $i.settings.method | .ss.password = $i.settings.password'
-        if [[ $(jq '[.users[] | select(.name == "direct")] | length' "$DRAFT") == 0 ]]; then
-            st_filter '.users = [{name:"direct", id:"", out:"direct"}] + .users'
-        fi
-        local ib
-        while IFS= read -r ib; do
-            [[ -n $ib ]] || continue
-            local t out
-            t=$(jq -r '.tag' <<< "$ib")
-            out=$(route_of_inbound "$t")
-            st_filter --arg pw "$(jq -r '.settings.password' <<< "$ib")" --arg o "$out" --argjson p "$(jq -r '.port' <<< "$ib")" \
-                '.users += [{name:$o, id:$pw, out:$o, port:$p}]'
-        done < <(jq -c '.inbounds[] | select(.protocol == "shadowsocks" and (.tag | test("^in-ss-")))' <<< "$c")
-    fi
-    if [[ $(jq '[.users[] | select(.name == "direct")] | length' "$DRAFT") == 0 ]]; then
-        st_filter '.users = [{name:"direct", id:"", out:"direct"}] + .users'
-    fi
-
-    local ds
-    ds=$(jq -r '[.outbounds[] | select(.tag == "direct")][0]
-        | (.streamSettings.sockopt.domainStrategy // .settings.targetStrategy // .settings.domainStrategy // "")' <<< "$c")
-    case ${ds,,} in
-        forceipv4) st_sets .outbound v4only ;;
-        forceipv6) st_sets .outbound v6only ;;
-        useipv6v4|useipv6|forceipv6v4) st_sets .outbound v6first ;;
-        *) st_sets .outbound v4first ;;
-    esac
-
-    if scheme_is_split "$s"; then
-        local first
-        first=$(legacy_links | grep -m1 '^vless://' || true)
-        if [[ $first == *'@['* ]]; then st_sets .xhttp.split v6_up_v4_down; else st_sets .xhttp.split v4_up_v6_down; fi
-        if grep -q 'v4 去 / v6 回\|v4去v6回\|v4_up_v6_down' "$INFO_FILE" 2>/dev/null; then st_sets .xhttp.split v4_up_v6_down; fi
-        if grep -q 'v6 去 / v4 回\|v6去v4回\|v6_up_v4_down' "$INFO_FILE" 2>/dev/null; then st_sets .xhttp.split v6_up_v4_down; fi
-    fi
-    takeover_common_fields
-    if [[ $old_schema == zxray-2 ]]; then
-        st_filter --slurpfile o "$STATE" '.meta.nginx_packages = ($o[0].nginx_packages // []) | .meta.nginx_hash = ($o[0].nginx_system_hash // "")'
-    fi
-}
-
-takeover_enc_from() {
-    local dec=$1 port=$2 shape ticket pad key
-    read -r shape ticket pad key <<< "$(split_enc_string "$dec")" || true
-    [[ -n $key ]] || { die '无法解析现有的 VLESS-ENC 参数。'; return 1; }
-    [[ $pad != - ]] || pad=''
-    st_filter --arg s "$shape" --arg t "$ticket" --arg k "$key" --arg p "$pad" \
-        '.enc.shape = $s | .enc.ticket = $t | .enc.server_key = $k | .enc.pad_server = $p'
-    local len
-    len=$(printf '%s' "$key" | tr '_-' '/+' | base64 -d 2>/dev/null | wc -c || true)
-    if (( len == 64 )); then st_sets .enc.auth mlkem768; else st_sets .enc.auth x25519; fi
-    local encq rtt cpad ckey
-    encq=$(legacy_link_param "$port" encryption || true)
-    if [[ -n $encq ]]; then
-        read -r _ rtt cpad ckey <<< "$(split_enc_string "$encq")" || true
-        [[ $cpad != - ]] || cpad=''
-        st_filter --arg r "$rtt" --arg p "$cpad" --arg k "$ckey" '.enc.rtt = $r | .enc.pad_client = $p | .enc.client_key = $k'
-    fi
-    local pc ps
-    pc=$(st .enc.pad_client); ps=$(st .enc.pad_server)
-    if [[ -z $pc && -z $ps ]]; then st_sets .enc.pad off
-    elif [[ $pc == "$(enc_padding_preset gentle client)" && $ps == "$(enc_padding_preset gentle server)" ]]; then st_sets .enc.pad gentle
-    elif [[ $pc == "$(enc_padding_preset aggressive client)" && $ps == "$(enc_padding_preset aggressive server)" ]]; then st_sets .enc.pad aggressive
-    else st_sets .enc.pad custom; fi
-}
-
-takeover_common_fields() {
-    local host=''
-    host=$(legacy_links | head -n 1 | sed -E 's#^[a-z]+://[^@]*@##; s#[:/?#].*$##; s#^\[##' || true)
-    local first
-    first=$(legacy_links | head -n 1 || true)
-    if [[ $first =~ @\[([0-9a-fA-F:]+)\]: ]]; then host=${BASH_REMATCH[1]}; fi
-    if [[ -n $host ]] && valid_host "$host"; then st_sets .net.host "$host"; fi
-    st_filter '.core = {xray: "latest", ss: "latest", hy: "latest"}'
-    return 0
-}
-
-action_takeover() {
-    ui_line '检测网络...'
-    detect_public_ips
-    DRAFT=$STAGE/draft.json
-    takeover_build_draft
-    MODE=modify
-    ui_clear
-    ui_title "接管：$(scheme_label "$(scheme)")"
-    local items i
-    mapfile -t items < <(preview_items)
-    for i in "${!items[@]}"; do
-        ui_item "$(( i + 1 ))" "$(item_label "${items[$i]}")" "$(item_value "${items[$i]}")"
-    done
-    ui_rule
-    ui_line '接管后换成新版目录和服务，UUID、密钥、端口、SNI 不变。'
-    ask_yes '开始接管' || return 0
-
-    apply_draft
-    ui_blank
-    ui_title '接管完成'
-    ui_ok '服务端身份信息没有变化，现有客户端可以继续使用。'
-    ui_line '新版链接如下，仅供参考：'
-    print_nodes
-    ui_rule
-    firewall_hints
-}
-
-
-
 usage() {
     cat <<EOF
 Xray Manager v$SCRIPT_VERSION
@@ -4939,13 +3730,12 @@ Xray Manager v$SCRIPT_VERSION
 用法：sh xray-manager.sh [选项]
       zxray [选项]
 
-不带选项打开主页：安装 / 节点 / 更新 / 卸载。
+不带选项打开主页：安装或修改配置 / 节点链接 / 更新与维护 / 卸载。
 
 选项：
   --install            安装（配合 --yes 时全部使用默认值）
   --scheme 名称        reality-raw | reality-xhttp | reality-split | ss | enc
-                       dual | triple | enc-split | hy2
-  --domain 域名        Hysteria2 使用的域名（hy2 方案配合 --yes 时必填）
+                       dual | triple | enc-split
   --update             更新脚本和核心，节点不变
   --uninstall          完整卸载
   --nodes              显示节点链接
@@ -4954,49 +3744,31 @@ Xray Manager v$SCRIPT_VERSION
   --force              跳过确认，并允许覆盖已有安装
   --version            显示脚本版本
   --help               显示帮助
-
-兼容旧参数：--quick-install / --quick-update / --quick-uninstall / --quick-scenario 1-8
 EOF
 }
 
 map_scheme_name() {
-    case $1 in
-        1|01|reality|reality-raw) printf 'reality-raw' ;;
-        reality-xhttp|xhttp) printf 'reality-xhttp' ;;
-        7|07|reality-split|split-reality) printf 'reality-split' ;;
-        2|02|5|05|ss|ss-rust|chain-ss|ss2022) printf 'ss' ;;
-        3|03|6|06|enc|vless-enc|chain-enc) printf 'enc' ;;
-        dual) printf 'dual' ;;
-        4|04|triple) printf 'triple' ;;
-        8|08|enc-split|split-enc) printf 'enc-split' ;;
-        hy2|hysteria2) printf 'hy2' ;;
-        *) return 1 ;;
-    esac
+    local s
+    for s in "${SCHEMES[@]}"; do
+        if [[ $s == "$1" ]]; then printf '%s' "$s"; return 0; fi
+    done
+    return 1
 }
 
 parse_args() {
     while (( $# )); do
         case $1 in
             -h|--help) usage; exit 0 ;;
-            --install|--quick-install) ACTION=install ;;
-            --update|--quick-update) ACTION=update ;;
+            --install) ACTION=install ;;
+            --update) ACTION=update ;;
             --update-cores) ACTION=update-cores ;;
-            --uninstall|--quick-uninstall) ACTION=uninstall ;;
-            --nodes|--subscriptions) ACTION=nodes ;;
+            --uninstall) ACTION=uninstall ;;
+            --nodes) ACTION=nodes ;;
             --yes|-y) ASSUME_YES=1; ASSUME_YES_FLAG=(--yes) ;;
             --force) ASSUME_YES=1 FORCE=1; ASSUME_YES_FLAG=(--yes) ;;
-            --scheme|--quick-scenario|--scenario)
-                (( $# >= 2 )) || fatal "$1 缺少参数。"
+            --scheme)
+                (( $# >= 2 )) || fatal '--scheme 缺少参数。'
                 CLI_SCHEME=$(map_scheme_name "$2") || fatal "未知方案：$2"
-                shift ;;
-            --domain)
-                (( $# >= 2 )) || fatal '--domain 缺少参数。'
-                valid_domain "$2" || fatal '域名格式不正确。'
-                CLI_DOMAIN=${2,,}
-                shift ;;
-            --transport)
-                (( $# >= 2 )) || fatal '--transport 缺少参数。'
-                if [[ $2 == xhttp ]]; then CLI_SCHEME=reality-xhttp; fi
                 shift ;;
             --core-version)
                 (( $# >= 2 )) || fatal '--core-version 缺少参数。'
@@ -5013,11 +3785,6 @@ parse_args() {
 
 action_install_cli() {
     if foreign_install_present; then foreign_install_hint; return 1; fi
-    if legacy_install_present; then
-        ui_line '检测到旧版安装，先接管（节点不变）。'
-        action_takeover
-        return 0
-    fi
     if state_ok && (( ! FORCE )); then
         die '已有安装，覆盖会生成新节点；确认要覆盖请加 --force。'
         return 1
@@ -5030,10 +3797,6 @@ action_install_cli() {
     draft_new "$s"
     carry_meta_from_state
     [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$(normalize_tag "$CLI_CORE_TAG")"
-    if hy_on; then
-        [[ -n $CLI_DOMAIN ]] || { die 'Hysteria2 需要 --domain。'; return 1; }
-        st_sets .hy.domain "$CLI_DOMAIN"
-    fi
     prepare_new_draft
     if scheme_has_reality "$s" && [[ -z $(st .reality.sni) ]]; then die '没有可用的 SNI。'; return 1; fi
     [[ -n $(st .net.host) ]] || { die '无法检测公网地址。'; return 1; }
@@ -5051,8 +3814,6 @@ system_running() {
             svc_active "$s" || return 1
         done < <(wanted_services)
         (( any ))
-    elif legacy_install_present; then
-        svc_active xray || svc_active ssserver
     else
         return 1
     fi
@@ -5064,17 +3825,15 @@ show_home() {
     if state_ok; then
         DRAFT=$STATE
         ui_kv '方案' "$(scheme_label "$(scheme)")"
-        if [[ $(scheme) == hy2 ]]; then ui_kv '地址' "$(st .hy.domain)"; else ui_kv '地址' "$(st .net.host)"; fi
+        ui_kv '地址' "$(st .net.host)"
         if system_running; then ui_kv '状态' "${C_GREEN}运行中${C_RESET}"; else ui_kv '状态' "${C_YELLOW}已停止${C_RESET}"; fi
-    elif legacy_install_present; then
-        ui_kv '状态' '旧版安装，待接管'
     else
         ui_kv '状态' '未安装'
     fi
     ui_rule
-    ui_item 1 '安装'
-    ui_item 2 '节点'
-    ui_item 3 '更新'
+    if state_ok; then ui_item 1 '修改配置'; else ui_item 1 '安装'; fi
+    ui_item 2 '节点链接'
+    ui_item 3 '更新与维护'
     ui_item 4 '卸载'
     ui_item 0 '退出'
     ui_rule
@@ -5132,17 +3891,6 @@ main() {
         uninstall) run_top action_uninstall; after_action "$TOP_RC"; exit "$TOP_RC" ;;
         nodes) run_top action_nodes; exit "$TOP_RC" ;;
     esac
-
-    if legacy_install_present; then
-        ui_clear
-        ui_title "XRAY MANAGER v$SCRIPT_VERSION"
-        ui_line '检测到旧版安装。接管后换成新版目录和服务，节点不变。'
-        if ask_yes '现在接管'; then
-            run_top action_takeover
-            after_action "$TOP_RC"
-            ui_pause
-        fi
-    fi
 
     local k
     while :; do
