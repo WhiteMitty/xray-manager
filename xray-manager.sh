@@ -310,21 +310,6 @@ input_eof() {
     exit 0
 }
 
-read_key() {
-    local __rk_p=$1 __rk_k=''
-    ui_flush
-    printf '  %s' "$__rk_p"
-    if input_is_tty; then
-        IFS= read -r -s -n 1 -u "$INPUT_FD" __rk_k || input_eof
-        printf '%s\n' "$__rk_k"
-    else
-        IFS= read -r -u "$INPUT_FD" __rk_k || input_eof
-        printf '%s\n' "$__rk_k"
-    fi
-    go_home_if_b "$__rk_k"
-    printf -v "$2" '%s' "$__rk_k"
-}
-
 go_home_if_b() {
     if [[ $1 == b || $1 == B ]] && [[ -n $ACTION_PID ]]; then exit 130; fi
     return 0
@@ -393,7 +378,7 @@ ask_choice() {
         ui_item "$((__ac_i + 1))" "${__ac_opts[$__ac_i]}"
     done
     while :; do
-        read_key "请选择（回车 $__ac_def，0 返回）：" __ac_k
+        read_line "请选择（回车 $__ac_def，0 返回）：" __ac_k
         [[ -n $__ac_k ]] || __ac_k=$__ac_def
         if [[ $__ac_k == 0 ]]; then
             printf -v "$__ac_var" '%s' ''
@@ -419,7 +404,7 @@ index_of() {
 
 ui_pause() {
     local k
-    read_key '按任意键返回：' k
+    read_line '回车返回：' k
 }
 
 
@@ -909,7 +894,7 @@ tx_rollback() {
     fi
     rm -rf -- "$TX"
     TX_ACTIVE=0
-    ui_line '已恢复到操作前的状态，原有节点仍可使用。'
+    if state_ok; then ui_line '已恢复到操作前的状态，原有节点仍可使用。'; else ui_line '已恢复到操作前的状态。'; fi
 }
 
 tx_commit() {
@@ -942,13 +927,16 @@ clean_stale_stages() {
 
 
 on_action_error() {
-    local code=$1 line=$2
+    local code=$1 line=$2 func=${3:-} cmd=${4:-}
     [[ $BASHPID == "${ACTION_PID:-$BASHPID}" ]] || exit "$code"
     trap - ERR INT TERM HUP
     set +e
     if (( STEP_OPEN )); then ui_step_fail; fi
-    if (( code != 130 )); then
-        ui_err "操作没有完成（位置 $line，状态 $code）。"
+    if (( code == 143 )); then
+        ui_err '操作被终止。'
+    elif (( code != 130 )); then
+        ui_err "操作没有完成（${func:-main} 第 $line 行，状态 $code）。"
+        [[ -z $cmd ]] || printf '        %s\n' "$cmd" >&2
         show_step_log
     fi
     [[ -z $CHECK_PID ]] || kill "$CHECK_PID" 2>/dev/null || true
@@ -973,14 +961,14 @@ show_step_log() {
     [[ -n $STEP_LOG && -s $STEP_LOG ]] || return 0
     local l
     while IFS= read -r l; do
-        printf '        %s\n' "${l:0:$(( UI_W - 8 ))}" >&2
+        printf '        %s\n' "$l" >&2
     done < <(tail -n 12 "$STEP_LOG")
 }
 
 run_action() (
     set -Eeuo pipefail
     ACTION_PID=$BASHPID
-    trap 'on_action_error $? $LINENO' ERR
+    trap 'on_action_error $? $LINENO "${FUNCNAME[0]:-}" "$BASH_COMMAND"' ERR
     trap 'on_action_error 130 $LINENO' INT
     trap 'on_action_error 143 $LINENO' TERM HUP
     trap on_action_exit EXIT
@@ -999,7 +987,7 @@ run_child() {
     CHILD_RC=$?
     CHILD_RUNNING=0
     set -e
-    if [[ -n $ACTION_PID ]]; then trap 'on_action_error $? $LINENO' ERR; fi
+    if [[ -n $ACTION_PID ]]; then trap 'on_action_error $? $LINENO "${FUNCNAME[0]:-}" "$BASH_COMMAND"' ERR; fi
     return 0
 }
 
@@ -1161,7 +1149,10 @@ download_hy() {
 }
 
 
-script_version_of() { awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' "$1" 2>/dev/null; }
+script_version_of() {
+    [[ -f $1 ]] || return 0
+    awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' "$1" 2>/dev/null || true
+}
 
 download_script() {
     local out=$1
@@ -1914,7 +1905,7 @@ choose_scheme() {
     done
     ui_footer "回车 选 $__cs_def   0 返回"
     while :; do
-        read_key '请选择：' __cs_k
+        read_line '请选择：' __cs_k
         [[ -n $__cs_k ]] || __cs_k=$__cs_def
         if [[ $__cs_k == 0 ]]; then printf -v "$__cs_var" '%s' ''; return 0; fi
         if [[ $__cs_k =~ ^[1-9]$ ]]; then
@@ -2070,11 +2061,11 @@ preview_loop() {
             ui_item "$(( i + 1 ))" "$(item_label "${items[$i]}")" "$(item_value "${items[$i]}")"
         done
         for i in "${!PREVIEW_NOTES[@]}"; do ui_warn "${PREVIEW_NOTES[$i]}"; done
-        if [[ $MODE == modify ]]; then ui_footer '回车 应用   数字 修改   n 换方案   0 返回'
-        else ui_footer '回车 安装   数字 修改   0 返回'; fi
-        read_key '请选择：' k
+        if [[ $MODE == modify ]]; then ui_footer 'y 应用   数字 修改   c 换方案   0 返回'
+        else ui_footer 'y 开始安装   数字 修改   0 返回'; fi
+        read_line '请选择：' k
         case $k in
-            '')
+            y|Y)
                 if hy_on && [[ -z $(st .hy.domain) ]]; then
                     ui_warn 'Hysteria2 需要先填写域名。'
                     edit_domain
@@ -2101,7 +2092,7 @@ preview_loop() {
                 PREVIEW_RESULT=0
                 return 0 ;;
             0) PREVIEW_RESULT=1; return 0 ;;
-            n|N) if [[ $MODE == modify ]]; then PREVIEW_RESULT=2; return 0; fi ;;
+            c|C) if [[ $MODE == modify ]]; then PREVIEW_RESULT=2; return 0; fi ;;
             [1-9])
                 if (( k <= ${#items[@]} )); then
                     key=${items[$((k - 1))]}
@@ -2169,11 +2160,7 @@ edit_port() {
         for i in "${!keys[@]}"; do
             ui_item "$(( i + 1 ))" "${labels[$i]}" "$(st "${keys[$i]}")"
         done
-        if (( ${#keys[@]} > 9 )); then
-            read_line '修改哪一个（编号，回车返回）：' k
-        else
-            read_key '修改哪一个（0 返回）：' k
-        fi
+        read_line '修改哪一个（编号，回车返回）：' k
         [[ $k =~ ^[0-9]+$ ]] && (( k >= 1 && k <= ${#keys[@]} )) || return 0
         idx=$(( k - 1 ))
     fi
@@ -2250,7 +2237,7 @@ edit_xhttp() {
         if [[ $(st .xhttp.enc) == 1 ]]; then v='开'; else v='关'; fi
         ui_item 3 'VLESS-ENC' "$v"
         if [[ $(st .xhttp.enc) == 1 ]]; then ui_item 4 '加密参数' "$(item_value encp)"; fi
-        read_key '修改哪一项（0 返回）：' c
+        read_line '修改哪一项（0 返回）：' c
         case $c in
             1) if confirm_identity_change '修改路径'; then ask_path; fi ;;
             2) edit_xmux ;;
@@ -2259,6 +2246,7 @@ edit_xhttp() {
                     if [[ $(st .xhttp.enc) == 1 ]]; then st_set .xhttp.enc 0; else st_set .xhttp.enc 1; fi
                 fi ;;
             4) if [[ $(st .xhttp.enc) == 1 ]]; then edit_encp; fi ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -2304,12 +2292,13 @@ edit_split() {
         ui_item 1 '路径' "$(st .xhttp.path)"
         if [[ $(st .xhttp.split) == v6_up_v4_down ]]; then v='v6 上行 / v4 下行'; else v='v4 上行 / v6 下行'; fi
         ui_item 2 '方向' "$v"
-        read_key '修改哪一项（0 返回）：' c
+        read_line '修改哪一项（0 返回）：' c
         case $c in
             1) if confirm_identity_change '修改路径'; then ask_path; fi ;;
             2)
                 if [[ $(st .xhttp.split) == v6_up_v4_down ]]; then st_sets .xhttp.split v4_up_v6_down
                 else st_sets .xhttp.split v6_up_v4_down; fi ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -2331,7 +2320,7 @@ edit_landings() {
                 "$(jq -r ".landings[$i] | \"\(.kind) \(.host):\(.port)\"" "$DRAFT")"
         done
         ui_footer 'a 添加落地   d 删除落地   0 返回'
-        read_key '请选择：' c
+        read_line '请选择：' c
         case $c in
             a|A)
                 if (( n >= 10 )); then ui_warn '最多 10 个落地。'; continue; fi
@@ -2355,6 +2344,7 @@ edit_landings() {
                     continue
                 fi
                 st_filter --arg t "$tag" '.landings |= map(select(.tag != $t)) | .users |= map(select(.out != $t))' ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -2423,7 +2413,7 @@ edit_guard() {
         if [[ $(st .reality.guard) == nginx ]]; then
             ui_item 3 '连接上限' "每 IP $(st .reality.conn_ip)，总计 $(st .reality.conn_total)"
         fi
-        read_key '修改哪一项（0 返回）：' c
+        read_line '修改哪一项（0 返回）：' c
         case $c in
             1)
                 if [[ $(st .reality.guard) == nginx ]]; then
@@ -2435,6 +2425,7 @@ edit_guard() {
                 st_sets .hy.masq_mode auto ;;
             2) edit_limit ;;
             3) if [[ $(st .reality.guard) == nginx ]]; then edit_conn; fi ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -2496,7 +2487,7 @@ edit_encp() {
         case $(st .enc.pad) in off) v='核心默认' ;; gentle) v='温和' ;; aggressive) v='激进' ;; custom) v='自定义' ;; esac
         ui_item 4 'padding' "$v"
         ui_item 5 '票据时长' "$(st .enc.ticket)"
-        read_key '修改哪一项（0 返回）：' c
+        read_line '修改哪一项（0 返回）：' c
         case $c in
             1)
                 confirm_identity_change '修改握手方式' || continue
@@ -2516,6 +2507,7 @@ edit_encp() {
             5)
                 ask_number '服务端票据有效期（秒）' 1 86400 "$(st .enc.ticket | tr -d s)" v
                 st_sets .enc.ticket "${v}s" ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -2567,7 +2559,8 @@ edit_other() {
         fi
         ui_item "$k" '核心版本' "$(other_core_text)"
         keys+=(core)
-        read_key '修改哪一项（0 返回）：' c
+        read_line '修改哪一项（0 返回）：' c
+        [[ -n $c ]] || continue
         [[ $c =~ ^[1-9]$ ]] && (( c <= ${#keys[@]} )) || return 0
         case ${keys[$((c - 1))]} in
             outbound) edit_outbound ;;
@@ -2646,7 +2639,7 @@ edit_hyadd() {
         else
             ui_item 1 '附加 Hy2' '关'
         fi
-        read_key '修改哪一项（0 返回）：' c
+        read_line '修改哪一项（0 返回）：' c
         case $c in
             1)
                 PREVIEW_NOTES=()
@@ -2660,6 +2653,7 @@ edit_hyadd() {
             4) if hy_on; then edit_cert; fi ;;
             5) if hy_on; then edit_obfs; fi ;;
             6) if hy_on; then edit_cong; fi ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -4196,9 +4190,9 @@ action_nodes() {
         fi
         print_nodes
         n=$(jq 'length' "$NODES_JSON" 2>/dev/null || echo 0)
-        if (( n == 0 )); then ui_footer '按任意键返回'; read_key '' k; return 0; fi
+        if (( n == 0 )); then ui_footer '回车返回'; read_line '' k; return 0; fi
         ui_footer '序号 显示二维码   回车 返回'
-        if (( n > 9 )); then read_line '请输入序号：' k; else read_key '请选择：' k; fi
+        read_line '序号：' k
         [[ $k =~ ^[1-9][0-9]?$ ]] && (( k <= n )) || return 0
         show_qr "$(jq -r ".[$((k - 1))].link" "$NODES_JSON")" "$(jq -r ".[$((k - 1))].label" "$NODES_JSON")"
     done
@@ -4233,7 +4227,7 @@ action_maintain() {
         ui_item 3 '状态与日志'
         ui_item 4 'SNI 候选池'
         ui_footer '0 返回'
-        read_key '请选择：' k
+        read_line '请选择：' k
         case $k in
             1)
                 run_sub action_update
@@ -4242,6 +4236,7 @@ action_maintain() {
             2) run_sub action_restart ;;
             3) run_sub action_status ;;
             4) run_sub action_sni_pool ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -4491,7 +4486,7 @@ action_sni_pool() {
         if [[ -f $SNI_POOL_FILE ]]; then ui_line '当前使用自定义候选池：'; else ui_line '当前使用默认候选池：'; fi
         sni_pool | sed 's/^/    /'
         ui_footer 'a 添加   d 删除   r 恢复默认   0 返回'
-        read_key '请选择：' k
+        read_line '请选择：' k
         case $k in
             a|A)
                 read_line '添加域名：' d
@@ -4507,6 +4502,7 @@ action_sni_pool() {
                 if [[ -s $SNI_POOL_FILE.new ]]; then mv -f "$SNI_POOL_FILE.new" "$SNI_POOL_FILE"
                 else rm -f "$SNI_POOL_FILE.new"; ui_warn '候选池不能为空。'; fi ;;
             r|R) rm -f -- "$SNI_POOL_FILE"; ui_ok '已恢复默认候选池。' ;;
+            '') continue ;;
             *) return 0 ;;
         esac
     done
@@ -5151,7 +5147,7 @@ main() {
     local k
     while :; do
         show_home
-        read_key '请选择：' k
+        read_line '请选择：' k
         case $k in
             1) run_top action_install ;;
             2) run_top action_nodes; after_action "$TOP_RC"; continue ;;
