@@ -5085,7 +5085,7 @@ show_qr() {
     fi
     ui_page "$label" '用客户端扫码，或复制下面的链接'
     [[ -z $warn ]] || ui_warn "$warn"
-    [[ -z $qr ]] || printf '\033[30;107m%s\033[0m\n' "$qr" >&4
+    [[ -z $qr ]] || printf '\033[0m\033[30;107m%s\033[0m\n' "$qr" >&4
     printf '%s\n' "$link" >&4
     ui_rule
     ui_pause
