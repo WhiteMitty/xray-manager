@@ -105,10 +105,10 @@ NGINX_MODULE_LINE='' NGINX_REJECT_TLS=1
 USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
 NEW_XRAY=0 NEW_SS=0
 UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1
-TUI=0 TUI_KEY='' TUI_CUR=0 TUI_TOP=0 TUI_HEAD=0 TUI_MSG='' TUI_RESIZED=0 TUI_HELP_H=0 TUI_HELP_DIM=1 TUI_FOOT='' TUI_FOOT_PLAIN=''
-UI_BUF_ON=0 SPIN_PID=''
-UI_BUF=() TUI_ITEMS=() TUI_IKEYS=() TUI_HELPS=()
-C_KEY='' C_GROUP='' C_RULE='' C_DIM='' C_BOLD='' C_GREEN='' C_YELLOW='' C_RED='' C_RESET='' C_BAR='' C_BAR_OK=''
+TUI=0 TUI_KEY='' TUI_CUR=0 TUI_TOP=0 TUI_HEAD=0 TUI_PREV_OK=0 INPUT_DIRTY=0 STEP_PW=0 TUI_MSG='' TUI_RESIZED=0 TUI_HELP_H=0 TUI_HELP_DIM=1 TUI_FOOT='' TUI_FOOT_PLAIN=''
+UI_BUF_ON=0 SPIN_PID='' QR_DECLINED=0
+UI_BUF=() TUI_ITEMS=() TUI_IKEYS=() TUI_HELPS=() TUI_PREV=()
+C_KEY='' C_GROUP='' C_RULE='' C_DIM='' C_BOLD='' C_GREEN='' C_YELLOW='' C_RED='' C_RESET='' C_TITLE='' C_TITLE_OK=''
 
 ui_setup_locale() {
     local loc
@@ -126,6 +126,7 @@ ui_measure() {
     if input_is_tty; then sz=$(stty size <&"$INPUT_FD" 2>/dev/null || true); fi
     if [[ ! $sz =~ ^[0-9]+\ [0-9]+$ && -t 1 ]]; then sz="$(tput lines 2>/dev/null || true) $(tput cols 2>/dev/null || true)"; fi
     [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]] || return 0
+    (( BASH_REMATCH[1] > 0 && BASH_REMATCH[2] > 0 )) || return 0
     UI_H=${BASH_REMATCH[1]}
     UI_W=${BASH_REMATCH[2]}
     (( UI_W <= 60 )) || UI_W=60
@@ -146,8 +147,8 @@ ui_setup() {
         C_YELLOW=$'\e[33m'
         C_RED=$'\e[31m'
         C_RESET=$'\e[0m'
-        C_BAR=$'\e[1;30;103m'
-        C_BAR_OK=$'\e[1;30;102m'
+        C_TITLE=$'\e[1;93m'
+        C_TITLE_OK=$'\e[1;92m'
     fi
     if [[ -t 1 ]] && input_is_tty && [[ -n ${TERM:-} && ${TERM:-} != dumb ]] && (( ! ASSUME_YES )); then TUI=1; fi
     return 0
@@ -245,19 +246,22 @@ ui_emit() {
 rule_line() {
     local __rl_l
     printf -v __rl_l '%*s' "$UI_W" ''
-    printf -v "$1" '%s%s%s' "$C_RULE" "${__rl_l// /-}" "$C_RESET"
+    printf -v "$1" '%s%s%s' "$C_RULE" "${__rl_l// /${2:--}}" "$C_RESET"
 }
 
 ui_rule() { local l; rule_line l; ui_emit "$l"; }
-ui_line() { step_break; ui_emit "  $*"; }
+ui_rule_thick() { local l; rule_line l '='; ui_emit "$l"; }
+ui_line() { ui_colored '' 4 "$*"; }
+ui_code() { step_break; ui_emit "  $*"; }
 ui_blank() { step_break; ui_emit ''; }
 
 ui_colored() {
-    local c=$1 fd=$2 t=$3 l
+    local c=$1 fd=$2 t=$3 l r=$C_RESET
     step_break
+    [[ -n $c ]] || r=''
     if [[ $t != *$'\e'* ]]; then wrap_text "$t" $(( UI_W - 2 )) t; fi
     while IFS= read -r l; do
-        if (( UI_BUF_ON )); then UI_BUF+=("  $c$l$C_RESET"); else printf '  %s%s%s\n' "$c" "$l" "$C_RESET" >&"$fd"; fi
+        if (( UI_BUF_ON )); then UI_BUF+=("  $c$l$r"); else printf '  %s%s%s\n' "$c" "$l" "$r" >&"$fd"; fi
     done <<< "$t"
 }
 
@@ -282,28 +286,26 @@ die() {
 fatal() { ui_err "$*"; exit 1; }
 
 ui_banner() {
-    local t="XRAY MANAGER  v$SCRIPT_VERSION" w l r line
-    str_width "$t" w
+    local t='XRAY MANAGER' v="  v$SCRIPT_VERSION" w l line
+    str_width "$t$v" w
     l=$(( (UI_W - w) / 2 ))
-    r=$(( UI_W - w - l ))
-    if [[ -n $C_BAR ]]; then
-        printf -v line '%s%*s%s%*s%s' "$C_BAR" "$l" '' "$t" "$r" '' "$C_RESET"
-        ui_emit "$line"
-    else
-        ui_rule
-        printf -v line '%*s%s' "$l" '' "$t"
-        ui_emit "$line"
-        ui_rule
-    fi
+    ui_rule_thick
+    printf -v line '%*s%s%s%s%s%s%s' "$l" '' "$C_TITLE" "$t" "$C_RESET" "$C_DIM" "$v" "$C_RESET"
+    ui_emit "$line"
+    ui_rule_thick
     (( ! UI_BUF_ON )) || TUI_HEAD=${#UI_BUF[@]}
 }
 
 ui_title() {
-    local text=$1 sub=${2:-} bar=$C_BAR h0=${#UI_BUF[@]}
-    [[ ${3:-} != ok ]] || bar=$C_BAR_OK
-    ui_rule
-    if [[ -n $bar ]]; then ui_emit "  $bar $text $C_RESET${sub:+   $C_DIM$sub$C_RESET}"
-    else ui_emit "  $text${sub:+   $sub}"; fi
+    local text=$1 sub=${2:-} c=$C_TITLE h0=${#UI_BUF[@]} w tw
+    [[ ${3:-} != ok ]] || c=$C_TITLE_OK
+    if [[ -n $sub ]]; then
+        str_width "$text" tw
+        str_width "$sub" w
+        (( tw + 4 + w <= UI_W - 2 )) || fit_width "$sub" $(( UI_W - 6 - tw )) sub
+    fi
+    ui_rule_thick
+    ui_emit "  $c$text$C_RESET${sub:+    $C_DIM$sub$C_RESET}"
     ui_rule
     (( ! UI_BUF_ON || h0 > 0 )) || TUI_HEAD=${#UI_BUF[@]}
 }
@@ -373,7 +375,7 @@ ui_option() {
 }
 
 footer_line() {
-    local s=$1 seg key out=''
+    local s=$1 seg key out='' plain='' w
     local -a segs=()
     [[ -z $ACTION_PID ]] || s+='   b 主页'
     while [[ $s == *'   '* ]]; do
@@ -382,6 +384,9 @@ footer_line() {
     done
     segs+=("$s")
     for seg in "${segs[@]}"; do
+        str_width "$plain${plain:+   }$seg" w
+        (( w + 2 <= UI_W )) || break
+        plain+="${plain:+   }$seg"
         key=${seg%% *}
         out+="${out:+   }$C_KEY$key$C_RESET${seg#"$key"}"
     done
@@ -390,7 +395,7 @@ footer_line() {
 
 ui_footer() {
     local l
-    ui_rule
+    ui_rule_thick
     footer_line "$*" l
     ui_emit "$l"
 }
@@ -399,20 +404,24 @@ step_mark() { [[ -z $STAGE || ! -d $STAGE ]] || : > "$STAGE/.step$STEP_NO-$1"; }
 step_has() { [[ -n $STAGE && -e $STAGE/.step$STEP_NO-$1 ]]; }
 
 step_prefix() {
-    local w d dots
+    local w d dots col n
     str_width "$STEP_LABEL" w
-    dots=$(( 28 - w - 1 ))
+    col=$(( UI_W - 18 ))
+    (( col <= 28 )) || col=28
+    dots=$(( col - w - 1 ))
     (( dots >= 3 )) || dots=3
     printf -v d '%*s' "$dots" ''
-    printf '  %s[%d/%d]%s %s %s%s%s ' "$C_KEY" "$STEP_NO" "$STEP_TOTAL" "$C_RESET" "$STEP_LABEL" \
-        "$C_RULE" "${d// /.}" "$C_RESET" >&4
+    n="[$STEP_NO/$STEP_TOTAL]"
+    STEP_PW=$(( 2 + ${#n} + 1 + w + 1 + dots + 1 ))
+    printf '  %s%s%s %s %s%s%s ' "$C_KEY" "$n" "$C_RESET" "$STEP_LABEL" "$C_RULE" "${d// /.}" "$C_RESET" >&4
 }
 
 spin_start() {
     (( TUI )) || return 0
-    local owner=$BASHPID
+    local owner=$BASHPID room=$(( UI_W - STEP_PW ))
+    (( room >= 2 )) || return 0
     (
-        trap - ERR INT TERM HUP EXIT
+        trap - ERR INT TERM HUP EXIT TSTP
         set +e
         i=0 t0=$SECONDS
         f=('|' '/' '-' '\')
@@ -420,7 +429,7 @@ spin_start() {
             kill -0 "$owner" 2>/dev/null || exit 0
             i=$(( i + 1 ))
             e=$(( SECONDS - t0 ))
-            if (( e >= 2 )); then printf '\e7%s %ds\e8' "${f[i % 4]}" "$e"
+            if (( e >= 2 && room >= 7 )); then printf '\e7%s %ds\e8' "${f[i % 4]}" "$e"
             else printf '\e7%s\e8' "${f[i % 4]}"; fi
         done
     ) >&4 2>/dev/null 3>&- 9>&- &
@@ -448,13 +457,16 @@ step_end() {
     spin_stop
     if step_has end; then STEP_OPEN=0; return 0; fi
     if (( STEP_OPEN == 2 )) || step_has break; then step_prefix; fi
-    printf '%s\n' "$1" >&4
+    local r=$1
+    fit_width "$r" $(( UI_W - STEP_PW )) r
+    printf '%s\n' "$r" >&4
     STEP_OPEN=0
     step_mark end
 }
 
 ui_step() {
     tty_echo -echo
+    INPUT_DIRTY=1
     STEP_NO=$(( STEP_NO + 1 ))
     STEP_LABEL=$1
     step_prefix
@@ -495,11 +507,22 @@ tty_echo() {
 }
 
 ui_flush() {
+    INPUT_DIRTY=0
     input_is_tty || return 0
-    while read -r -s -t 0 -u "$INPUT_FD" 2>/dev/null; do
-        read -r -s -n 256 -t 0.05 -u "$INPUT_FD" || break
-    done
+    local _f
+    while IFS= read -r -s -n 64 -t 0.02 -u "$INPUT_FD" _f 2>/dev/null; do :; done
     return 0
+}
+
+on_tstp() {
+    tui_cursor on
+    trap - TSTP
+    kill -TSTP "$BASHPID"
+    trap on_tstp TSTP
+    tty_echo -echo
+    tui_cursor off
+    TUI_PREV_OK=0
+    TUI_RESIZED=1
 }
 
 input_eof() {
@@ -550,11 +573,12 @@ read_line() {
 
 tui_read_key() {
     local __k='' __c='' __seq='' __rc
+    trap on_tstp TSTP
     while :; do
         __rc=0
         IFS= read -rsn1 -t 1 -u "$INPUT_FD" __k || __rc=$?
         if (( __rc > 128 )); then
-            if (( TUI_RESIZED )); then TUI_RESIZED=0; printf -v "$1" '%s' RESIZE; return 0; fi
+            if (( TUI_RESIZED )); then TUI_RESIZED=0; trap - TSTP; printf -v "$1" '%s' RESIZE; return 0; fi
             continue
         fi
         (( __rc == 0 )) || input_eof
@@ -563,7 +587,7 @@ tui_read_key() {
     case $__k in
         $'\e')
             __rc=0
-            IFS= read -rsn1 -t 0.05 -u "$INPUT_FD" __c || __rc=$?
+            IFS= read -rsn1 -t 0.1 -u "$INPUT_FD" __c || __rc=$?
             if [[ $__c == '[' || $__c == O ]]; then
                 while IFS= read -rsn1 -t 0.05 -u "$INPUT_FD" __c; do
                     __seq+=$__c
@@ -582,6 +606,7 @@ tui_read_key() {
         $'\t') __k=TAB ;;
         $'\x7f'|$'\b') __k=ESC ;;
     esac
+    trap - TSTP
     printf -v "$1" '%s' "$__k"
 }
 
@@ -615,6 +640,10 @@ tui_build() {
     UI_BUF_ON=1
     "$__tb_fn" "$@"
     UI_BUF_ON=0
+    for __tb_i in "${!UI_BUF[@]}"; do
+        str_width "${UI_BUF[$__tb_i]}" __tb_n
+        (( __tb_n <= UI_W )) || { fit_width "${UI_BUF[$__tb_i]}" "$UI_W" __tb_w; UI_BUF[__tb_i]=$__tb_w; }
+    done
     (( TUI_HELP_H > 0 )) || return 0
     for __tb_i in "${!TUI_HELPS[@]}"; do
         wrap_text "${TUI_HELPS[$__tb_i]}" $(( UI_W - 2 )) __tb_w
@@ -659,15 +688,15 @@ wrap_text() {
 }
 
 tui_draw() {
-    local out=$'\e[H' i line sel=-1 se n avail top end rl fl h hd=$TUI_HEAD scroll=0 ind
-    local -a help=()
+    local i line sel=-1 se n avail top end rl rt fl h hd=$TUI_HEAD scroll=0 ind out='' mv
+    local -a help=() F=()
     n=${#UI_BUF[@]}
     (( ${#TUI_ITEMS[@]} == 0 )) || sel=${TUI_ITEMS[$TUI_CUR]}
     avail=$(( UI_H - 3 ))
     if (( TUI_HELP_H > 0 )); then avail=$(( avail - TUI_HELP_H - 1 )); fi
     [[ -z $TUI_MSG ]] || avail=$(( avail - 1 ))
     (( hd + 4 <= avail )) || hd=0
-    for (( i = 0; i < hd; i++ )); do out+=${UI_BUF[$i]}$'\e[K\n'; done
+    for (( i = 0; i < hd; i++ )); do F+=("${UI_BUF[$i]}"); done
     avail=$(( avail - hd ))
     (( avail >= 3 )) || avail=3
     top=$hd
@@ -675,10 +704,13 @@ tui_draw() {
         scroll=1
         avail=$(( avail - 1 ))
         se=$sel
-        if (( sel >= 0 && TUI_CUR + 1 < ${#TUI_ITEMS[@]} )); then se=$(( TUI_ITEMS[TUI_CUR + 1] - 1 )); fi
+        if (( sel >= 0 )); then
+            if (( TUI_CUR + 1 < ${#TUI_ITEMS[@]} )); then se=$(( TUI_ITEMS[TUI_CUR + 1] - 1 )); else se=$(( n - 1 )); fi
+        fi
         (( se - sel < avail )) || se=$(( sel + avail - 1 ))
         top=$TUI_TOP
         (( top >= hd )) || top=$hd
+        (( TUI_CUR > 0 )) || top=$hd
         (( sel < 0 || sel >= top )) || top=$sel
         (( se < top + avail )) || top=$(( se - avail + 1 ))
         (( top + avail <= n )) || top=$(( n - avail ))
@@ -690,26 +722,42 @@ tui_draw() {
     for (( i = top; i < end; i++ )); do
         line=${UI_BUF[$i]}
         (( i != sel )) || tui_hl "$line" line
-        out+=$line$'\e[K\n'
+        F+=("$line")
     done
     if (( scroll )); then
         if (( top > hd && end < n )); then ind='^ v 上下还有内容'
         elif (( end < n )); then ind='v 下面还有内容'
         else ind='^ 上面还有内容'; fi
-        out+="  $C_DIM$ind$C_RESET"$'\e[K\n'
+        F+=("  $C_DIM$ind$C_RESET")
     fi
     rule_line rl
+    rule_line rt '='
     if (( TUI_HELP_H > 0 )); then
-        out+=$rl$'\e[K\n'
+        F+=("$rl")
         mapfile -t help <<< "${TUI_HELPS[$TUI_CUR]:-}"
         for (( h = 0; h < TUI_HELP_H; h++ )); do
-            if (( TUI_HELP_DIM )); then out+="  $C_DIM${help[$h]:-}$C_RESET"$'\e[K\n'
-            else out+="  ${help[$h]:-}"$'\e[K\n'; fi
+            if (( TUI_HELP_DIM )); then F+=("  $C_DIM${help[$h]:-}$C_RESET"); else F+=("  ${help[$h]:-}"); fi
         done
     fi
-    if [[ -n $TUI_MSG ]]; then fit_width "$TUI_MSG" $(( UI_W - 2 )) line; out+="  $C_YELLOW$line$C_RESET"$'\e[K\n'; fi
+    if [[ -n $TUI_MSG ]]; then fit_width "$TUI_MSG" $(( UI_W - 2 )) line; F+=("  $C_YELLOW$line$C_RESET"); fi
     footer_line "${TUI_FOOT:-上下键 移动   回车 选择   Esc 返回}" fl
-    out+=$rl$'\e[K\n'$fl$'\e[K\n\e[J'
+    F+=("$rt" "$fl")
+    if (( TUI_PREV_OK )); then
+        for i in "${!F[@]}"; do
+            [[ ${F[$i]} != "${TUI_PREV[$i]-}" ]] || continue
+            printf -v mv '\e[%d;1H\e[2K' $(( i + 1 ))
+            out+=$mv${F[$i]}
+        done
+        if (( ${#F[@]} < ${#TUI_PREV[@]} )); then printf -v mv '\e[%d;1H\e[J' $(( ${#F[@]} + 1 )); out+=$mv; fi
+    else
+        out=$'\e[H'
+        for line in "${F[@]}"; do out+=$'\e[2K'$line$'\n'; done
+        out+=$'\e[J'
+    fi
+    printf -v mv '\e[%d;1H' $(( ${#F[@]} + 1 ))
+    out+=$mv
+    TUI_PREV=("${F[@]}")
+    TUI_PREV_OK=1
     printf '%s' "$out" >&4
 }
 
@@ -729,10 +777,14 @@ tui_menu() {
     shift $(( $# < 3 ? $# : 3 ))
     TUI_KEY=''
     if (( ! TUI )); then tui_plain "$__tm_fn" "$__tm_keys" "$@"; return 0; fi
+    ui_measure
+    TUI_RESIZED=0
+    (( ! INPUT_DIRTY )) || ui_flush
     tui_build "$__tm_fn" "$@"
     __tm_n=${#TUI_ITEMS[@]}
     (( TUI_CUR >= 0 && TUI_CUR < __tm_n )) || TUI_CUR=0
     TUI_TOP=0
+    TUI_PREV_OK=0
     tty_echo -echo
     tui_cursor off
     while :; do
@@ -740,7 +792,7 @@ tui_menu() {
         TUI_MSG=''
         tui_read_key __tm_k
         case $__tm_k in
-            RESIZE) ui_measure; tui_build "$__tm_fn" "$@"; __tm_n=${#TUI_ITEMS[@]}; (( TUI_CUR < __tm_n )) || TUI_CUR=0 ;;
+            RESIZE) ui_measure; tui_build "$__tm_fn" "$@"; __tm_n=${#TUI_ITEMS[@]}; (( TUI_CUR < __tm_n )) || TUI_CUR=0; TUI_PREV_OK=0 ;;
             UP) (( __tm_n == 0 )) || TUI_CUR=$(( (TUI_CUR + __tm_n - 1) % __tm_n )) ;;
             DOWN|TAB) (( __tm_n == 0 )) || TUI_CUR=$(( (TUI_CUR + 1) % __tm_n )) ;;
             HOME|PGUP) TUI_CUR=0 ;;
@@ -752,6 +804,7 @@ tui_menu() {
                     go_home_if_b b || true
                     tty_echo -echo
                     tui_cursor off
+                    TUI_PREV_OK=0
                 fi ;;
             *)
                 if [[ ${#__tm_k} == 1 && -n $__tm_keys && $__tm_keys == *"$__tm_k"* ]]; then TUI_KEY=$__tm_k; break; fi
@@ -797,12 +850,20 @@ key_range() {
 }
 
 tui_confirm() {
-    local p=$1 sel=$2 k yes no
+    local p=$1 sel=$2 k yes no t last l w
+    local -a pl=()
+    ui_flush
     tty_echo -echo
     tui_cursor off
+    wrap_text "$p" $(( UI_W - 2 )) t
+    mapfile -t pl <<< "$t"
+    last=${pl[${#pl[@]} - 1]}
+    for l in "${pl[@]:0:${#pl[@]} - 1}"; do printf '\r\e[2K  %s\n' "$l" >&4; done
+    str_width "$last" w
+    if (( w + 15 > UI_W )); then printf '\r\e[2K  %s\n' "$last" >&4; last=''; fi
     while :; do
         if (( sel )); then yes=$'\e[7m 是 \e[0m' no=' 否 '; else yes=' 是 ' no=$'\e[7m 否 \e[0m'; fi
-        printf '\r  %s   %s  %s\e[K' "$p" "$yes" "$no" >&4
+        printf '\r\e[2K  %s%s%s  %s' "$last" "${last:+   }" "$yes" "$no" >&4
         tui_read_key k
         case $k in
             LEFT|RIGHT|UP|DOWN|TAB) sel=$(( 1 - sel )) ;;
@@ -1131,7 +1192,6 @@ pkg_install() {
 pkg_refresh() {
     case $PKG in
         apt) pkg_run apt-get -o DPkg::Lock::Timeout=180 update -qq ;;
-        pacman) pkg_run pacman -Sy --noconfirm ;;
         *) : ;;
     esac
 }
@@ -1324,7 +1384,14 @@ grant_lowport() {
     local bin=$1 want=$2
     [[ $INIT == openrc ]] || return 0
     if (( want )); then
-        have setcap || pkg_install libcap-setcap >/dev/null 2>&1 || true
+        if ! have setcap; then
+            local added=''
+            pkg_install_tracked added libcap-setcap >/dev/null 2>&1 || true
+            if [[ -n $added ]]; then
+                [[ ! -d $TX ]] || tr -s ' ' '\n' <<< "$added" >> "$TX/new-packages"
+                st_filter --argjson add "$(json_words "$added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)'
+            fi
+        fi
         have setcap || { die '缺少 setcap，服务没法以普通用户监听 1024 以下的端口。'; return 1; }
         setcap 'cap_net_bind_service=+ep' "$bin"
     elif have setcap; then
@@ -1396,7 +1463,7 @@ fw_kind() {
 
 fw_has() {
     case $1 in
-        ufw) ufw status 2>/dev/null | awk -v r="$2" -v p="${2%/*}" '($1 == r || $1 == p) && $2 == "ALLOW" {f = 1} END {exit !f}' ;;
+        ufw) ufw status 2>/dev/null | awk -v r="$2" -v p="${2%/*}" '($1 == r || $1 == p) && $2 == "ALLOW" && ($3 == "Anywhere" || $3 == "IN") {f = 1} END {exit !f}' ;;
         firewalld) firewall-cmd -q --query-port="$2" 2>/dev/null && firewall-cmd -q --permanent --query-port="$2" 2>/dev/null ;;
         *) return 1 ;;
     esac
@@ -1414,11 +1481,19 @@ fw_add() {
 
 fw_del() {
     case $1 in
-        ufw) have ufw && ufw delete allow "$2" >/dev/null 2>&1 ;;
+        ufw)
+            have ufw || return 0
+            ufw delete allow "$2" >/dev/null 2>&1 || true ;;
         firewalld)
             have firewall-cmd || return 0
-            firewall-cmd -q --permanent --remove-port="$2" >/dev/null 2>&1 || true
-            firewall-cmd -q --remove-port="$2" >/dev/null 2>&1 ;;
+            if [[ $(firewall-cmd --state 2>/dev/null || true) == running ]]; then
+                firewall-cmd -q --permanent --remove-port="$2" >/dev/null 2>&1 || true
+                firewall-cmd -q --remove-port="$2" >/dev/null 2>&1 || true
+            elif have firewall-offline-cmd; then
+                firewall-offline-cmd -q --remove-port="$2" >/dev/null 2>&1 || return 1
+            else
+                return 1
+            fi ;;
     esac
     return 0
 }
@@ -1436,11 +1511,12 @@ fw_sync() {
     for r in "${old[@]}"; do
         [[ -n $r ]] || continue
         if [[ ${r%%:*} == "$kind" ]] && in_list "${r#*:}" "${want[@]}"; then
+            fw_has "$kind" "${r#*:}" || fw_add "$kind" "${r#*:}" || true
             keep+=("$r")
             continue
         fi
-        fw_del "${r%%:*}" "${r#*:}"
-        printf '%s\n' "$r" >> "$TX/fw-removed"
+        if fw_del "${r%%:*}" "${r#*:}"; then printf '%s\n' "$r" >> "$TX/fw-removed"
+        else keep+=("$r"); fi
     done
     for r in "${want[@]}"; do
         [[ -n $r ]] || continue
@@ -1468,7 +1544,7 @@ fw_undo_tx() {
 fw_remove_recorded() {
     local r
     while IFS= read -r r; do
-        [[ -z $r ]] || fw_del "${r%%:*}" "${r#*:}"
+        [[ -z $r ]] || fw_del "${r%%:*}" "${r#*:}" || ui_warn "防火墙规则 $r 没能删除（firewalld 没在运行），请启动 firewalld 后手动删除。"
     done < <(jq -r '.meta.fw_rules // [] | .[]' "$1" 2>/dev/null)
     return 0
 }
@@ -1496,11 +1572,20 @@ tx_begin() {
     mkdir -p "$TX/backup"
     chmod 700 "$TX"
     : > "$TX/created-dirs"
-    local i p s
+    local i p s c
+    printf '%s\n' "${MANAGED_PATHS[@]}" > "$TX/paths"
     for i in "${!MANAGED_PATHS[@]}"; do
         p=${MANAGED_PATHS[$i]}
         if [[ -e $p || -L $p ]]; then cp -a -- "$p" "$TX/backup/$i"; fi
     done
+    : > "$TX/caps"
+    if [[ $INIT == openrc ]] && have getcap; then
+        for p in "$XRAY_BIN" "$SS_BIN"; do
+            [[ -f $p ]] || continue
+            c=$(getcap "$p" 2>/dev/null | sed -E 's/^[^ ]+ (= )?//' || true)
+            [[ -z $c ]] || printf '%s\t%s\n' "$p" "$c" >> "$TX/caps"
+        done
+    fi
     : > "$TX/services"
     for s in "${MANAGED_SERVICES[@]}"; do
         if svc_exists "$s"; then svc_state_line "$s" >> "$TX/services"; fi
@@ -1517,20 +1602,30 @@ tx_rollback() {
     [[ -f $TX/ready ]] || { rm -rf -- "$TX"; TX_ACTIVE=0; return 0; }
     ui_warn '正在恢复到操作前的状态...'
     local i p s active enabled failed=0
+    local -a paths=()
+    if [[ -s $TX/paths ]]; then mapfile -t paths < "$TX/paths"; else paths=("${MANAGED_PATHS[@]}"); fi
     for s in "${MANAGED_SERVICES[@]}"; do
         if svc_exists "$s"; then
             svc_do stop "$s" >/dev/null 2>&1 || true
             svc_do disable "$s" >/dev/null 2>&1 || true
         fi
     done
-    for i in "${!MANAGED_PATHS[@]}"; do
-        p=${MANAGED_PATHS[$i]}
+    for i in "${!paths[@]}"; do
+        p=${paths[$i]}
+        [[ -n $p ]] || continue
         rm -rf -- "$p" || failed=1
         if [[ -e $TX/backup/$i || -L $TX/backup/$i ]]; then
             (umask 022 && mkdir -p -- "$(dirname -- "$p")")
             cp -a -- "$TX/backup/$i" "$p" || failed=1
         fi
     done
+    if [[ -s $TX/caps ]] && have setcap; then
+        while IFS=$'\t' read -r p s; do
+            [[ ! -f $p ]] || setcap "$s" "$p" 2>/dev/null || failed=1
+        done < "$TX/caps"
+    fi
+    if [[ -f $TX/nginx-masked && $INIT == systemd ]]; then systemctl unmask nginx >/dev/null 2>&1 || true; fi
+    if [[ -f $TX/pkgs-before ]]; then comm -13 "$TX/pkgs-before" <(pkg_snapshot) >> "$TX/new-packages" 2>/dev/null || true; fi
     svc_reload_units || failed=1
     while read -r s active enabled; do
         [[ -n $s ]] || continue
@@ -1553,12 +1648,14 @@ tx_rollback() {
         ui_note "快照目录：$TX"
         return 1
     fi
+    rm -f -- "$TX/ready"
     rm -rf -- "$TX"
     TX_ACTIVE=0
     if state_ok; then ui_line '已恢复到操作前的状态，原有节点照常可用。'; else ui_line '已恢复到操作前的状态。'; fi
 }
 
 tx_commit() {
+    rm -f -- "$TX/ready"
     rm -rf -- "$TX"
     TX_ACTIVE=0
 }
@@ -1592,6 +1689,7 @@ on_action_error() {
     [[ $BASHPID == "${ACTION_PID:-$BASHPID}" ]] || exit "$code"
     trap - ERR INT TERM HUP
     set +e
+    UI_BUF_ON=0
     case $code in
         130) step_end '已取消' ;;
         143) ui_step_fail; ui_err '操作被中止。' ;;
@@ -1615,6 +1713,7 @@ on_action_exit() {
     [[ $BASHPID == "${ACTION_PID:-$BASHPID}" ]] || exit "$rc"
     trap - EXIT
     set +e
+    UI_BUF_ON=0
     if (( rc != 0 )); then ui_step_fail; fi
     kill_jobs
     if (( TX_ACTIVE && ! KEEP_TX )); then tx_rollback; fi
@@ -1711,7 +1810,7 @@ xray_newest_tag() {
     if [[ -z $tag ]]; then
         while read -r upd t; do
             [[ $t =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
-            ts=$(date -d "$upd" +%s 2>/dev/null || echo "$now")
+            ts=$(jq -rn --arg u "$upd" '$u | sub("\\.[0-9]+"; "") | sub("[+]00:00$"; "Z") | fromdateiso8601' 2>/dev/null || echo "$now")
             (( ts <= now - XRAY_SETTLE_DAYS * 86400 )) && settled+=("$t")
         done <<< "$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 \
             https://github.com/XTLS/Xray-core/releases.atom 2>>"${STEP_LOG:-/dev/null}" | awk '
@@ -1907,6 +2006,17 @@ port_taken() {
     return 1
 }
 
+port_foreign() {
+    local rows pid
+    rows=$(listeners "$1" "$2")
+    [[ -n $rows ]] || return 1
+    while read -r pid; do
+        [[ -n $pid ]] || continue
+        pid_is_owned "$pid" || return 0
+    done <<< "$(grep -oE 'pid=[0-9]+' <<< "$rows" | cut -d= -f2 || true)"
+    return 1
+}
+
 port_owner_name() {
     local rows
     rows=$(listeners "$1" "$2")
@@ -2088,8 +2198,13 @@ parse_ss_link() {
     frag=''
     [[ $body == *#* ]] && frag=${body#*#}
     if [[ $main == *\?* ]]; then
-        PARSE_ERR='不支持带插件参数的 SS 链接'
-        return 1
+        query=${main#*\?}
+        main=${main%%\?*}
+        local qv
+        qv=$(query_get "$query" plugin || true)
+        [[ -z $qv ]] || { PARSE_ERR='不支持带插件（plugin）的 SS 链接'; return 1; }
+        qv=$(query_get "$query" type || true)
+        case $qv in ''|tcp|raw) ;; *) PARSE_ERR="只支持 TCP 类型的 SS 落地（当前 $qv）"; return 1 ;; esac
     fi
     main=${main%/}
     if [[ $main == *@* ]]; then
@@ -2117,13 +2232,15 @@ parse_ss_link() {
         local -a keys=()
         IFS=: read -r -a keys <<< "$password"
         for key in "${keys[@]}"; do
-            [[ $(printf '%s' "$key" | base64 -d 2>/dev/null | wc -c) == "$klen" ]] && continue
+            if [[ $key =~ ^[A-Za-z0-9+/]+={0,2}$ ]] && (( ${#key} % 4 == 0 )) \
+                && [[ $(printf '%s' "$key" | base64 -d 2>/dev/null | wc -c) == "$klen" ]]; then continue; fi
             PARSE_ERR="$method 的密码应是 $klen 字节密钥的 Base64，这个链接的密码不对"
             return 1
         done
     fi
     PARSED_KIND=ss
     PARSED_LABEL=$(uri_decode "$frag" 2>/dev/null || true)
+    PARSED_LABEL=${PARSED_LABEL//[[:cntrl:]]/}
     [[ -n $PARSED_LABEL ]] || PARSED_LABEL='SS 落地'
     PARSED_OUTBOUND_JSON=$(jq -cn --arg h "$PARSED_HOST" --argjson p "$PARSED_PORT" --arg m "$method" --arg pw "$password" \
         '{protocol:"shadowsocks",settings:{servers:[{address:$h,port:$p,method:$m,password:$pw}]}}')
@@ -2185,10 +2302,23 @@ parse_vless_link() {
         return 1
     fi
     [[ -n $encryption ]] || encryption=none
+    case $flow in
+        '') ;;
+        xtls-rprx-vision|xtls-rprx-vision-udp443)
+            [[ $security == reality || $encryption != none ]] || { PARSE_ERR='flow 只能配合 REALITY 或 VLESS-ENC 使用'; return 1; } ;;
+        *) PARSE_ERR="暂不支持的 flow：$flow"; return 1 ;;
+    esac
     local stream
     if [[ $security == reality ]]; then
         [[ -n $sni && -n $pbk ]] || { PARSE_ERR='REALITY 落地缺少 sni 或 pbk'; return 1; }
+        valid_domain "$sni" || { PARSE_ERR="sni 不是合法的域名：$sni"; return 1; }
+        [[ $pbk =~ ^[A-Za-z0-9_-]{43}$ ]] || { PARSE_ERR='pbk 格式不对'; return 1; }
+        [[ -z $sid || ( $sid =~ ^[0-9a-fA-F]{2,16}$ && $(( ${#sid} % 2 )) == 0 ) ]] || { PARSE_ERR='sid 应是 2-16 位十六进制'; return 1; }
         [[ -n $fp ]] || fp=chrome
+        case $fp in
+            chrome|firefox|safari|ios|android|edge|360|qq|random|randomized|randomizednoalpn) ;;
+            *) PARSE_ERR="不认识的指纹：$fp"; return 1 ;;
+        esac
         stream=$(jq -cn --arg sni "$sni" --arg pbk "$pbk" --arg sid "$sid" --arg fp "$fp" \
             '{network:"raw", security:"reality",
               realitySettings:({serverName:$sni, publicKey:$pbk, fingerprint:$fp, spiderX:"/"}
@@ -2198,6 +2328,7 @@ parse_vless_link() {
     fi
     PARSED_KIND=vless
     PARSED_LABEL=$(uri_decode "$frag" 2>/dev/null || true)
+    PARSED_LABEL=${PARSED_LABEL//[[:cntrl:]]/}
     [[ -n $PARSED_LABEL ]] || PARSED_LABEL='VLESS 落地'
     PARSED_OUTBOUND_JSON=$(jq -cn --arg h "$PARSED_HOST" --argjson p "$PARSED_PORT" --arg id "$id" --arg enc "$encryption" \
         --arg flow "$flow" --argjson stream "$stream" \
@@ -2435,7 +2566,7 @@ enc_string() {
 
 valid_padding() {
     local p=$1 seg idx=0 prob min max total=0
-    [[ -n $p && $p != *[[:space:]]* ]] || return 1
+    [[ $p =~ ^[0-9]+-[0-9]+-[0-9]+(\.[0-9]+-[0-9]+-[0-9]+)*$ ]] || return 1
     local -a segs=()
     IFS=. read -r -a segs <<< "$p"
     for seg in "${segs[@]}"; do
@@ -2592,7 +2723,7 @@ name_example() {
 }
 
 v6_links_on() {
-    [[ -n $(st .net.v6) && $(st '.net.v6_link // 1') == 1 ]]
+    [[ -n $(st .net.v6) && $(st '.net.v6_link // 1') == 1 && $(st .net.host) == "$(st .net.v4)" ]]
 }
 
 note_add() { PREVIEW_NOTES+=("$1"); }
@@ -2600,7 +2731,7 @@ note_add() { PREVIEW_NOTES+=("$1"); }
 
 CS_DEF=1 CS_MARK=0
 PV_KEYS=()
-declare -A PV_ORIG=()
+declare -A PV_ORIG=() PV_FP=()
 
 cs_build() {
     local i
@@ -2700,7 +2831,7 @@ item_help() {
 }
 
 item_value() {
-    local s v n
+    local s v n note
     s=$(scheme)
     case $1 in
         port)
@@ -2736,7 +2867,13 @@ item_value() {
         name) printf '%s\t%s' "$(node_name)" "$(name_example)" ;;
         landings)
             n=$(jq '.landings | length' "$DRAFT")
-            if (( n == 0 )); then printf '本机直连'; else printf '本机直连 + %d 个落地' "$n"; fi ;;
+            if (( n == 0 )); then printf '本机直连'
+            else
+                printf '本机直连 + %d 个落地' "$n"
+                while IFS=$'\t' read -r v note; do printf '\n\t%s  %s' "${v/landing/落地}" "$note"; done < <(jq -r '.landings[:3][]
+                    | [.tag, "\(.kind) \(if (.host | test(":")) then "[\(.host)]" else .host end):\(.port)"] | @tsv' "$DRAFT")
+                (( n <= 3 )) || printf '\n\t还有 %d 个' $(( n - 3 ))
+            fi ;;
         xhttp)
             v="XMUX $(xmux_label)，VLESS 加密"
             if [[ $(st .xhttp.enc) == 1 ]]; then v+=' 开'; else v+=' 关'; fi
@@ -2780,20 +2917,22 @@ first_value() {
 pv_snapshot() {
     local src=${1:-$DRAFT} saved=$DRAFT key
     local -a rows=()
-    PV_ORIG=()
+    PV_ORIG=() PV_FP=()
     DRAFT=$src
     mapfile -t rows < <(preview_items)
     for key in "${rows[@]}"; do
         [[ $key != @* ]] || continue
         PV_ORIG[$key]=$(item_value "$key")
+        PV_FP[$key]=$(item_fp "$key")
     done
     DRAFT=$saved
     cp -f -- "$src" "$STAGE/pv-base.json"
 }
 
 link_fields() {
-    jq -S -c '{scheme, name, net: (.net | {host, v4, v6, v6_link}),
+    jq -S -c '{scheme, name, net: (.net | {host, v4, v6}),
         reality: (.reality | {port, sni, fp, public_key, short_id}), xhttp, enc: (.enc | del(.ticket)), ss,
+        v6_link: (if .net.host == .net.v4 and (.net.v6 // "") != "" then (.net.v6_link // 1) else null end),
         users: [.users[] | {name, id, port}], landings: [.landings[] | .tag]}' "$1"
 }
 
@@ -2802,19 +2941,43 @@ links_will_change() {
     [[ $(link_fields "$STAGE/pv-base.json") != "$(link_fields "$DRAFT")" ]]
 }
 
+item_fp() {
+    local f
+    case $1 in
+        port) f='[.reality.port, .ss.port, .enc.port, [.users[] | .port // 0]]' ;;
+        sni) f='[.reality.sni]' ;;
+        addr) f='[.net.host, .net.v4, .net.v6]' ;;
+        name) f='[.name]' ;;
+        landings) f='[.landings, [.users[] | {name, out}]]' ;;
+        xhttp) f='[.xhttp, (if .xhttp.enc == 1 then (.enc | del(.port)) else null end)]' ;;
+        split) f='[.xhttp]' ;;
+        ssm) f='[.ss.method, .ss.password, [.users[] | .id]]' ;;
+        encp) f='[.enc | del(.port)]' ;;
+        guard) f='[.reality.guard]' ;;
+        conn) f='[.reality.conn_ip, .reality.conn_total]' ;;
+        limit) f='[.reality.limit, .reality.limit_custom, .reality.limit_jitter]' ;;
+        system) f='[.outbound, .bbr, .reality.fp, .net.v6_link, .firewall, .core]' ;;
+        *) f='null' ;;
+    esac
+    jq -c "$f" "$DRAFT"
+}
+
+item_changed() {
+    [[ -n ${PV_ORIG[$1]+x} ]] || return 1
+    ! same_item "$1" "$2" "${PV_ORIG[$1]}" || [[ $(item_fp "$1") != "${PV_FP[$1]:-}" ]]
+}
+
 pv_changed_count() {
-    local key n=0 cur
+    local key n=0
     for key in "${PV_KEYS[@]}"; do
-        [[ -n ${PV_ORIG[$key]+x} ]] || continue
-        cur=$(item_value "$key")
-        same_item "$key" "$cur" "${PV_ORIG[$key]}" || n=$(( n + 1 ))
+        item_changed "$key" "$(item_value "$key")" && n=$(( n + 1 ))
     done
     printf '%d' "$n"
 }
 
 pv_build() {
-    local key v note n=0 i full orig changed
-    local -a rows=() vals=() olds=()
+    local key v note n=0 i full orig
+    local -a rows=() vals=() olds=() marks=()
     mapfile -t rows < <(preview_items)
     for key in "${rows[@]}"; do [[ $key == @* ]] || n=$(( n + 1 )); done
     if [[ $MODE == modify ]]; then ui_page '当前配置' "$(scheme_label "$(scheme)")"
@@ -2826,22 +2989,22 @@ pv_build() {
         PV_KEYS+=("$key")
         full=$(item_value "$key")
         mapfile -t vals <<< "$full"
-        olds=()
-        changed=0
-        if [[ $MODE == modify && -n ${PV_ORIG[$key]+x} ]] && ! same_item "$key" "$full" "${PV_ORIG[$key]}"; then
-            changed=1
+        olds=() marks=()
+        if [[ $MODE == modify ]] && item_changed "$key" "$full"; then
             mapfile -t olds <<< "${PV_ORIG[$key]}"
+            for i in "${!vals[@]}"; do same_item "$key" "${vals[$i]}" "${olds[$i]:-}" || marks[i]=1; done
+            (( ${#marks[@]} )) || marks[0]=2
         fi
         for i in "${!vals[@]}"; do
             split_vn "${vals[$i]}" v note
-            if (( changed )) && { ! same_item "$key" "${vals[$i]}" "${olds[$i]:-}" || (( changed == 1 && i == ${#vals[@]} - 1 )); }; then
-                changed=2
+            if [[ -n ${marks[$i]:-} ]]; then
                 first_value "${olds[$i]:-}" orig
                 note=${note#"${note%%[! ]*}"}
                 [[ -z $note ]] || v+=${v:+  }$note
                 v="$C_YELLOW* $v$C_RESET"
                 note=''
-                if (( i == 0 )) && [[ -n $orig && $orig != "${vals[$i]%%$'\t'*}" ]]; then note="原 $orig"; fi
+                if [[ ${marks[$i]} == 2 ]]; then note='细节参数有改动'
+                elif (( i == 0 )) && [[ -n $orig && $orig != "${vals[$i]%%$'\t'*}" ]]; then note="原 $orig"; fi
             fi
             if (( i == 0 )); then tui_item "${#PV_KEYS[@]}" "$(item_label "$key")" "$v" "$note" "$(item_help "$key")"
             else ui_cont "$v" "$note"; fi
@@ -2901,9 +3064,8 @@ pc_build() {
         n=1
     else
         for key in "${PV_KEYS[@]}"; do
-            [[ -n ${PV_ORIG[$key]+x} ]] || continue
             cur=$(item_value "$key")
-            ! same_item "$key" "$cur" "${PV_ORIG[$key]}" || continue
+            item_changed "$key" "$cur" || continue
             n=$(( n + 1 ))
             mapfile -t ol <<< "${PV_ORIG[$key]}"
             mapfile -t nl <<< "$cur"
@@ -2912,7 +3074,7 @@ pc_build() {
             (( ${#nl[@]} <= m )) || m=${#nl[@]}
             shown=0
             for (( i = 0; i < m; i++ )); do
-                if (( shown || i < m - 1 )) && same_item "$key" "${ol[$i]:-}" "${nl[$i]:-}"; then continue; fi
+                if same_item "$key" "${ol[$i]:-}" "${nl[$i]:-}"; then continue; fi
                 line_text "${ol[$i]:-}" o
                 line_text "${nl[$i]:-}" v
                 if [[ $o == "$v" ]]; then o=${ol[$i]//$'\t'/ } v=${nl[$i]//$'\t'/ }; fi
@@ -2920,6 +3082,7 @@ pc_build() {
                 lab=''
                 shown=1
             done
+            (( shown )) || ui_kv "$lab" "${C_YELLOW}已修改$C_RESET" '细节参数有改动'
         done
     fi
     if (( n == 0 )); then ui_line '没有修改，会按当前设置重新生成配置并重启服务。'; fi
@@ -2965,7 +3128,9 @@ pv_confirm() {
 preview_loop() {
     local key cur=0
     draft_watch_start
-    if [[ $MODE == modify ]]; then pv_snapshot; else PV_ORIG=(); fi
+    if [[ $MODE == modify && -f $STATE ]]; then pv_snapshot "$STATE"
+    elif [[ $MODE == modify ]]; then pv_snapshot
+    else PV_ORIG=() PV_FP=(); fi
     while :; do
         tui_menu pv_build "$cur" ''
         cur=$TUI_CUR
@@ -3238,7 +3403,7 @@ edit_path() {
     while :; do
         read_line '新路径：' p "$cur"
         [[ -n $p && $p != "$cur" ]] || return 0
-        if [[ $p =~ ^/[A-Za-z0-9._/-]{1,64}$ ]]; then st_sets .xhttp.path "$p"; return 0; fi
+        if [[ $p =~ ^/[A-Za-z0-9._/-]{1,63}$ ]]; then st_sets .xhttp.path "$p"; return 0; fi
         ui_warn '格式不对：以 / 开头，只用字母、数字和 . _ - /'
     done
 }
@@ -3302,7 +3467,7 @@ edit_xmux() {
             done
             while :; do
                 read_line '每条连接最长复用几秒：' s "$s0"
-                [[ -n $s ]] || s=1800-3000
+                [[ -n $s ]] || s=$s0
                 [[ $s =~ ^[0-9]{1,6}(-[0-9]{1,6})?$ ]] && break
                 ui_warn '请填写数字或区间，例如 1800-3000。'
             done
@@ -3351,6 +3516,10 @@ edit_ssm() {
     st_sets .ss.method "$want"
     st_sets .ss.password ''
     if [[ $(scheme) == ss ]]; then st_filter '.users |= map(if .name != "direct" then .id = "" else . end)'; fi
+    if [[ $MODE == modify && -f $STAGE/pv-base.json && $(jq -r .ss.method "$STAGE/pv-base.json") == "$want" ]]; then
+        st_filter --slurpfile b "$STAGE/pv-base.json" '.ss.password = $b[0].ss.password
+            | .users |= map(. as $u | if .id == "" then .id = ([$b[0].users[] | select(.name == $u.name) | .id][0] // "") else . end)'
+    fi
 }
 
 ec_build() {
@@ -3383,7 +3552,10 @@ edit_encp() {
                 [[ -n $v && $v != "$cur" ]] || continue
                 confirm_identity_change '更换认证方式会生成新密钥' || continue
                 if [[ $v == 1 ]]; then st_sets .enc.auth x25519; else st_sets .enc.auth mlkem768; fi
-                st_filter '.enc.server_key = "" | .enc.client_key = ""' ;;
+                st_filter '.enc.server_key = "" | .enc.client_key = ""'
+                if [[ $MODE == modify && -f $STAGE/pv-base.json && $(jq -r .enc.auth "$STAGE/pv-base.json") == "$(st .enc.auth)" ]]; then
+                    st_filter --slurpfile b "$STAGE/pv-base.json" '.enc.server_key = $b[0].enc.server_key | .enc.client_key = $b[0].enc.client_key'
+                fi ;;
             3)
                 index_of cur "$(st .enc.shape)" random xorpub native
                 option_page v "$cur" '握手外观' '握手数据在网络上看起来的样子。' \
@@ -3492,7 +3664,7 @@ sy_build() {
         SYS_KEYS+=(fp)
         tui_item "${#SYS_KEYS[@]}" 'TLS 指纹' "$(st .reality.fp)" '客户端模仿的浏览器' 'chrome 兼容性最好，各种客户端都能用。'
     fi
-    if [[ -n $(st .net.v6) ]] && ! scheme_is_split "$(scheme)"; then
+    if [[ -n $(st .net.v6) && $(st .net.host) == "$(st .net.v4)" ]] && ! scheme_is_split "$(scheme)"; then
         SYS_KEYS+=(v6link)
         if [[ $(st '.net.v6_link // 1') == 1 ]]; then v='附带'; else v='不附带'; fi
         tui_item "${#SYS_KEYS[@]}" 'IPv6 链接' "$v" '每个节点另给一条 IPv6 链接' '本机有 IPv6 时，每个节点另外生成一条用 IPv6 连接的链接。'
@@ -3534,8 +3706,10 @@ edit_outbound() {
     [[ -n $c && $c != "$cur" ]] || return 0
     if [[ ${opts[$((c - 1))]} == *不可选* ]]; then ui_warn '本机没有对应的公网地址，不能选这一项。'; ui_pause; return 0; fi
     m=${modes[$((c - 1))]}
+    local old_core=''
+    [[ $(scheme) != ss ]] || old_core=$(ss_core)
     st_sets .outbound "$m"
-    if [[ $(scheme) == ss && $(ss_core) == xray && ( $m == v4only || $m == v6only ) ]]; then
+    if [[ $old_core == ss-rust && $(ss_core) == xray ]]; then
         ui_note 'SS-Rust 不支持这种出站方式，SS2022 将改用 Xray 核心。'
         ui_pause
     fi
@@ -4146,15 +4320,25 @@ prepare_nginx() {
         local had_nginx=0 rc=0 added=''
         if have nginx || svc_exists nginx; then had_nginx=1; fi
         pkg_refresh >> "$STEP_LOG" 2>&1 || true
-        if (( ! had_nginx )) && [[ $INIT == systemd ]]; then systemctl mask nginx >> "$STEP_LOG" 2>&1 || true; fi
+        pkg_snapshot > "$TX/pkgs-before"
+        if (( ! had_nginx )) && [[ $INIT == systemd ]]; then
+            : > "$TX/nginx-masked"
+            systemctl mask nginx >> "$STEP_LOG" 2>&1 || true
+        fi
         pkg_install_tracked added "${missing[@]}" >> "$STEP_LOG" 2>&1 || rc=$?
-        if (( ! had_nginx )) && [[ $INIT == systemd ]]; then systemctl unmask nginx >> "$STEP_LOG" 2>&1 || true; fi
-        if (( ! had_nginx )) && [[ -n $added ]]; then tr -s ' ' '\n' <<< "$added" >> "$TX/new-packages"; fi
+        if [[ -f $TX/nginx-masked ]]; then
+            systemctl unmask nginx >> "$STEP_LOG" 2>&1 || true
+            rm -f -- "$TX/nginx-masked"
+        fi
+        [[ -z $added ]] || tr -s ' ' '\n' <<< "$added" >> "$TX/new-packages"
+        rm -f -- "$TX/pkgs-before"
         (( rc == 0 )) || { die 'Nginx 安装失败，原因见下方日志。'; return 1; }
         if (( ! had_nginx )); then
             svc_stop_disable nginx
             st_filter --argjson add "$(json_words "$added")" '.meta.nginx_packages = ((.meta.nginx_packages + $add) | unique)'
             if [[ -z $(st .meta.nginx_hash) ]]; then st_sets .meta.nginx_hash "$(nginx_system_hash)"; fi
+        elif [[ -n $added ]]; then
+            st_filter --argjson add "$(json_words "$added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)'
         fi
     fi
     nginx_detect
@@ -4353,9 +4537,13 @@ health_check() {
     while read -r proto port label; do
         [[ -n $port ]] || continue
         for (( i = 0; i < 20; i++ )); do
-            if port_listening "$proto" "$port"; then break; fi
+            if port_listening "$proto" "$port" && ! port_foreign "$proto" "$port"; then break; fi
             sleep 0.5
         done
+        if port_foreign "$proto" "$port"; then
+            die "${proto^^} $port 被 $(port_owner_label "$proto" "$port") 占用了。"
+            return 1
+        fi
         if ! port_listening "$proto" "$port"; then
             owner=$(port_service "$label")
             service_log_to_step "$owner"
@@ -4432,6 +4620,7 @@ apply_draft() {
     fi
     render_nodes "$STAGE/nodes.ndjson"
     jq -s . "$STAGE/nodes.ndjson" > "$STAGE/nodes.json"
+    ports_preflight
     ui_step_done
 
     tx_begin
@@ -4452,8 +4641,8 @@ apply_draft() {
     install_logrotate
     install_self
     st_sets .script "$SCRIPT_VERSION"
-    [[ -n $(st .installed_at) ]] || st_sets .installed_at "$(date -Is)"
-    st_sets .updated_at "$(date -Is)"
+    [[ -n $(st .installed_at) ]] || st_sets .installed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    st_sets .updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     write_node_files
     fw_sync
     start_services
@@ -4472,6 +4661,18 @@ apply_draft() {
     tx_commit
     post_commit_cleanup
     ui_step_done
+}
+
+ports_preflight() {
+    local proto port label
+    while read -r proto port label; do
+        [[ -n $port ]] || continue
+        if port_foreign "$proto" "$port"; then
+            die "${proto^^} $port（$label）已被 $(port_owner_label "$proto" "$port") 占用。" '请在「修改配置」里换一个端口，或先停掉占用它的程序。'
+            return 1
+        fi
+    done <<< "$(public_ports)"
+    return 0
 }
 
 record_created_dirs() {
@@ -4524,18 +4725,21 @@ release_extra_packages() {
 state_ok() { [[ -f $STATE ]] && [[ $(jq -r '.schema // 0' "$STATE" 2>/dev/null) == "$STATE_SCHEMA" ]]; }
 
 migrate_state() {
-    [[ -f $STATE ]] || return 0
-    [[ $(jq -r '.schema // 0' "$STATE" 2>/dev/null || true) == 4 ]] || return 0
-    local tmp
-    tmp=$(mktemp "$STATE.XXXXXX")
-    if jq --argjson s "$STATE_SCHEMA" --argjson j "$(limit_jitter_new)" '.schema = $s
-        | (if .core.xray == "latest" then .core.xray = "compat" else . end)
-        | .reality.limit_jitter = (.reality.limit_jitter // $j)' "$STATE" > "$tmp"; then
-        chmod 600 "$tmp"
-        mv -f -- "$tmp" "$STATE"
-    else
-        rm -f -- "$tmp"
-    fi
+    local f tmp
+    for f in "$STATE" "$DATA_DIR/state.prev.json"; do
+        [[ -f $f ]] || continue
+        [[ $(jq -r '.schema // 0' "$f" 2>/dev/null || true) == 4 ]] || continue
+        tmp=$(mktemp "$f.XXXXXX")
+        if jq --argjson s "$STATE_SCHEMA" --argjson j "$(limit_jitter_new)" '.schema = $s
+            | (if .core.xray == "latest" then .core.xray = "compat" else . end)
+            | .reality.limit_jitter = (.reality.limit_jitter // $j)' "$f" > "$tmp"; then
+            chmod 600 "$tmp"
+            mv -f -- "$tmp" "$f"
+        else
+            rm -f -- "$tmp"
+        fi
+    done
+    return 0
 }
 
 foreign_install_present() {
@@ -4549,13 +4753,13 @@ foreign_install_hint() {
     if [[ -f $OLD_DATA_DIR/state.json ]]; then
         ui_err '发现旧版 Xray Manager 的安装，新版不能直接接管。'
         ui_line '请先卸载旧版，再重新运行本脚本：'
-        if [[ -f $OLD_SELF_SCRIPT ]]; then ui_line "  bash $OLD_SELF_SCRIPT --uninstall"
+        if [[ -f $OLD_SELF_SCRIPT ]]; then ui_code "  bash $OLD_SELF_SCRIPT --uninstall"
         else ui_line '  zxray --uninstall'; fi
         return 1
     fi
     ui_err '发现不是由本脚本安装的 Xray，为避免破坏它，已停止。'
     for p in "$CONFIG_FILE" "$XRAY_BIN" "$STATE"; do
-        [[ ! -e $p ]] || ui_line "  $p"
+        [[ ! -e $p ]] || ui_code "  $p"
     done
     ui_note '确认这些文件不再需要后，把它们删除再重新运行。'
     return 1
@@ -4575,7 +4779,7 @@ install_self() {
         if [[ $src != /proc/* && $src != /dev/* ]]; then
             make_dir "$DATA_DIR"
             jq -cn --arg p "$src" --arg h "$(sha256_of "$src")" '{path:$p, sha256:$h}' >> "$DATA_DIR/sources.ndjson"
-            jq -sc 'unique_by(.path) | .[]' "$DATA_DIR/sources.ndjson" > "$DATA_DIR/sources.ndjson.new" &&
+            jq -sc 'unique_by([.path, .sha256]) | .[]' "$DATA_DIR/sources.ndjson" > "$DATA_DIR/sources.ndjson.new" &&
                 mv -f "$DATA_DIR/sources.ndjson.new" "$DATA_DIR/sources.ndjson"
         fi
     fi
@@ -4662,10 +4866,14 @@ action_install() {
             1) exit "$RC_QUIET" ;;
         esac
     fi
+    local cli_first=1
+    [[ -z $CLI_SCHEME ]] || def=$(scheme_index "$CLI_SCHEME")
     while :; do
         MODE=new
         local s
-        choose_scheme s "$def" "$curidx"
+        if (( cli_first )) && [[ -n $CLI_SCHEME ]]; then s=$CLI_SCHEME
+        else choose_scheme s "$def" "$curidx"; fi
+        cli_first=0
         [[ -n $s ]] || exit "$RC_QUIET"
         if scheme_is_split "$s" && [[ -z $NET_V4 || -z $NET_V6 ]]; then
             ui_warn '上下行分离需要本机同时有公网 IPv4 和 IPv6。'
@@ -4675,6 +4883,7 @@ action_install() {
         fi
         draft_new "$s"
         carry_meta_from_state
+        [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
         prepare_new_draft
         preview_loop
         if [[ $PREVIEW_RESULT != 0 ]]; then def=$(scheme_index "$s"); continue; fi
@@ -4700,8 +4909,8 @@ firewall_hints() {
         if (( ${#missing[@]} )); then
             ui_kv '本机防火墙' "${C_YELLOW}$kind 还没放行${C_RESET}" '可以执行下面的命令'
             for l in "${missing[@]}"; do
-                if [[ $kind == ufw ]]; then ui_line "  ufw allow $l"
-                else ui_line "  firewall-cmd --permanent --add-port=$l && firewall-cmd --add-port=$l"; fi
+                if [[ $kind == ufw ]]; then ui_code "  ufw allow $l"
+                else ui_code "  firewall-cmd --permanent --add-port=$l && firewall-cmd --add-port=$l"; fi
             done
         elif [[ $(jq -r '.meta.fw_rules // [] | length' "$DRAFT") != 0 ]]; then
             ui_kv '本机防火墙' "$kind 已自动放行" '卸载时撤销'
@@ -4726,14 +4935,22 @@ show_install_result() {
 }
 
 show_modify_result() {
-    local changed l
+    local changed removed l
     ui_blank
     ui_title "${1:-修改已生效}" "$(scheme_label "$(scheme)")" ok
     changed=$(jq -rn --slurpfile a "$STAGE/nodes-before.json" --slurpfile b "$NODES_JSON" '
         ($a[0] | map({(.label): .link}) | add // {}) as $old
         | $b[0][] | select($old[.label] != .link) | .label')
-    if [[ -z $changed ]]; then
+    removed=$(jq -rn --slurpfile a "$STAGE/nodes-before.json" --slurpfile b "$NODES_JSON" '
+        ([$b[0][].label]) as $now | $a[0][] | select(.label as $l | $now | index($l) | not) | .label')
+    if [[ -n $removed ]]; then
+        ui_warn '下面这些节点已删除，客户端里可以删掉：'
+        while IFS= read -r l; do ui_line "  $l"; done <<< "$removed"
+    fi
+    if [[ -z $changed && -z $removed ]]; then
         ui_ok '节点链接没有变化，客户端不用改动。'
+    elif [[ -z $changed ]]; then
+        ui_ok '其余节点的链接没有变化。'
     else
         ui_warn '下面这些节点的链接变了，需要在客户端重新导入：'
         while IFS= read -r l; do ui_line "  $l"; done <<< "$changed"
@@ -4796,7 +5013,8 @@ nd_build() {
 osc52_copy() {
     local b
     b=$(printf '%s' "$1" | base64 | tr -d '\r\n')
-    if [[ -n ${TMUX:-} ]]; then printf '\ePtmux;\e\e]52;c;%s\a\e\\' "$b" >&4
+    if [[ -n ${TMUX:-} || ${TERM:-} == tmux* ]]; then printf '\ePtmux;\e\e]52;c;%s\a\e\\' "$b" >&4
+    elif [[ -n ${STY:-} ]]; then printf '\eP\e]52;c;%s\a\e\\' "$b" >&4
     else printf '\e]52;c;%s\a' "$b" >&4; fi
 }
 
@@ -4829,25 +5047,44 @@ action_nodes() {
 }
 
 show_qr() {
-    local link=$1 label=$2 added=''
-    if ! have qrencode; then
+    local link=$1 label=$2 added='' qr='' warn='' sz rows=0 cols=0 l w h
+    if ! have qrencode && (( ! QR_DECLINED )); then
         ui_blank
         ui_note '显示二维码要用到 qrencode，卸载时会一并删除。'
         if ask_yes '现在安装 qrencode'; then
             ui_note '正在安装 qrencode...'
+            pkg_refresh >/dev/null 2>&1 || true
             pkg_install_tracked added "$(qr_package)" >/dev/null 2>&1 || true
             if [[ -n $added ]] && state_ok; then
                 jq --argjson add "$(json_words "$added")" '.meta.extra_packages = ((.meta.extra_packages // []) + $add | unique)' \
                     "$STATE" > "$STAGE/state-pkg.json"
                 atomic_install "$STAGE/state-pkg.json" "$STATE" 600
             fi
-            have qrencode || ui_warn 'qrencode 安装失败，下面只显示链接。'
+            have qrencode || warn='qrencode 安装失败，下面只显示链接。'
+        else
+            QR_DECLINED=1
+        fi
+    fi
+    if have qrencode; then
+        qr=$(qrencode -t ANSIUTF8 -m 1 "$link" 2>/dev/null) || { qr=''; warn='链接太长，生成不了二维码。'; }
+        if [[ -n $qr ]]; then
+            sz=$(stty size <&"$INPUT_FD" 2>/dev/null || true)
+            if [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]]; then rows=${BASH_REMATCH[1]} cols=${BASH_REMATCH[2]}; fi
+            l=${qr%%$'\n'*}
+            strip_ansi "$l" l
+            w=${#l}
+            h=$(grep -c '' <<< "$qr")
+            if (( cols > 0 && w > cols )); then
+                warn="终端太窄，二维码需要 $w 列宽。把窗口拉宽或把字体调小后再试。"
+                qr=''
+            elif (( rows > 0 && h + 6 > rows )); then
+                warn='终端不够高，二维码可能显示不全，可以把窗口拉高后再试。'
+            fi
         fi
     fi
     ui_page "$label" '用客户端扫码，或复制下面的链接'
-    if have qrencode; then
-        qrencode -t ANSIUTF8 -m 1 "$link" >&4 2>/dev/null || ui_warn '链接太长，生成不了二维码。'
-    fi
+    [[ -z $warn ]] || ui_warn "$warn"
+    [[ -z $qr ]] || printf '%s\n' "$qr" >&4
     printf '%s\n' "$link" >&4
     ui_rule
     ui_pause
@@ -4864,7 +5101,7 @@ mt_build() {
     tui_item 2 '重启' '' '重启服务并检查运行状态'
     tui_item 3 '运行状态' '' '服务、端口、防火墙和最近日志'
     tui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
-    if [[ -f $DATA_DIR/state.prev.json ]]; then
+    if prev_state_ok; then
         tui_item 5 '回滚配置' '' "恢复到 $(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M') 那次修改之前"
     fi
     TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
@@ -4892,7 +5129,7 @@ action_rollback() {
     local prev=$DATA_DIR/state.prev.json
     require_state
     (( STATE_READY )) || return 0
-    [[ -f $prev ]] || { ui_warn '没有可以回滚的配置。'; return 0; }
+    prev_state_ok || { ui_warn '没有可以回滚的配置。'; return 0; }
     MODE=modify
     DRAFT=$STAGE/draft.json
     jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
@@ -4903,6 +5140,26 @@ action_rollback() {
     pv_confirm '回滚配置' || exit "$RC_QUIET"
     apply_draft
     show_modify_result '已回滚'
+}
+
+check_state_file() {
+    [[ -f $STATE ]] || return 0
+    state_ok && return 0
+    local sv
+    sv=$(jq -r '.schema // 0' "$STATE" 2>/dev/null || true)
+    if [[ $sv =~ ^[0-9]+$ ]] && (( sv > STATE_SCHEMA )); then
+        fatal "这台服务器的配置是更新版本的脚本写的（格式 $sv），当前脚本 v$SCRIPT_VERSION 无法识别，请下载最新版脚本再运行。"
+    fi
+    ui_err "状态文件无法识别：$STATE"
+    if prev_state_ok; then
+        ui_note '上一次的配置还在，可以用下面的命令恢复后再运行：'
+        ui_code "  cp $DATA_DIR/state.prev.json $STATE"
+    fi
+    exit 1
+}
+
+prev_state_ok() {
+    [[ -f $DATA_DIR/state.prev.json ]] && [[ $(jq -r '.schema // 0' "$DATA_DIR/state.prev.json" 2>/dev/null) == "$STATE_SCHEMA" ]]
 }
 
 save_prev_state() {
@@ -4946,6 +5203,8 @@ action_update() {
     (( rc != 0 )) || remote_v=$(script_version_of "$STAGE/remote.sh")
     if (( rc == 1 )); then
         step_end "${C_YELLOW}连不上 GitHub，跳过${C_RESET}"
+    elif (( rc == 2 )); then
+        step_end "${C_YELLOW}下载到的不是本脚本，跳过${C_RESET}"
     elif (( rc == 3 )); then
         step_end "${C_YELLOW}下载的文件不完整，跳过${C_RESET}"
     elif [[ -z $remote_v ]] || ver_ge "$SCRIPT_VERSION" "$remote_v"; then
@@ -4956,6 +5215,7 @@ action_update() {
         install_self
         ui_step_skip "v$SCRIPT_VERSION -> v$remote_v"
         ui_line '接下来由新版脚本继续更新核心...'
+        trap 'rc=130' INT TERM HUP
         ZX_REEXEC=1 bash "$SELF_SCRIPT_PATH" --update-cores "${ASSUME_YES_FLAG[@]}" <&"$INPUT_FD" 2>&5 || rc=$?
         if (( rc != 0 )); then
             ui_warn '核心没有更新成功，节点仍按原来的配置运行。'
@@ -4994,8 +5254,10 @@ update_cores() {
     fi
     if needs_ss_rust; then
         cur=$(installed_version ss)
-        new=$(latest_tag shadowsocks/shadowsocks-rust)
-        if [[ $new != "$cur" ]] && ver_ge "$new" "${cur:-0}"; then
+        want=$(st .core.ss)
+        if [[ $want == latest ]]; then new=$(latest_tag shadowsocks/shadowsocks-rust)
+        else new=''; notes+=("SS-Rust 已固定为 $want"); fi
+        if [[ -n $new && $new != "$cur" ]] && ver_ge "$new" "${cur:-0}"; then
             download_ss "$new" "$dir/ss-pkg"
             todo+=("SS-Rust ${cur:-未知} -> $new")
             USE_SS=$dir/ss-pkg/ssserver
@@ -5187,6 +5449,12 @@ action_uninstall() {
     local -a progs=()
     ui_page '卸载'
     if ! state_ok; then
+        if [[ -e $STATE || -e $CONFIG_FILE || -e $XRAY_BIN || -e $SS_BIN ]]; then
+            ui_warn '找到了部署留下的文件，但状态记录无法识别（损坏，或是别的版本的脚本写的）。'
+            ui_note '为避免只删一半，这里不做卸载。请用安装时那个版本的脚本卸载，或先恢复状态文件：'
+            ui_code "  $STATE"
+            return 1
+        fi
         ui_line '没有检测到本脚本部署的服务。'
         if [[ -f $SELF_SCRIPT_PATH || -f $QUICK_BIN ]]; then
             ui_rule
@@ -5200,6 +5468,11 @@ action_uninstall() {
         return 0
     fi
     DRAFT=$STATE
+    cp -f "$DATA_DIR/sources.ndjson" "$STAGE/sources.ndjson" 2>/dev/null || : > "$STAGE/sources.ndjson"
+    if [[ -n $SOURCE_PATH && -f $SOURCE_PATH && $SOURCE_PATH != "$SELF_DIR"/* && $SOURCE_PATH != /proc/* && $SOURCE_PATH != /dev/* ]] \
+        && grep -q "$SCRIPT_MARKER" "$SOURCE_PATH" 2>/dev/null; then
+        jq -cn --arg p "$SOURCE_PATH" --arg h "$(sha256_of "$SOURCE_PATH")" '{path:$p, sha256:$h}' >> "$STAGE/sources.ndjson"
+    fi
     ui_hint '会删除下面这些内容，客户端将无法再连接：'
     ui_blank
     ui_kv '节点' "$(jq 'length' "$NODES_JSON" 2>/dev/null || echo 0) 条" '链接和配置全部删除'
@@ -5207,24 +5480,34 @@ action_uninstall() {
     ui_kv '程序' "$(join_by '、' "${progs[@]}")"
     ui_kv '系统改动' "$(uninstall_changes)"
     ui_kv '本脚本' 'zxray 命令和脚本文件'
-    if [[ -s $DATA_DIR/sources.ndjson ]]; then
+    if [[ -s $STAGE/sources.ndjson ]]; then
         local lab='下载的脚本'
-        while IFS= read -r p; do ui_kv "$lab" "$p"; lab=''; done < <(jq -r '.path' "$DATA_DIR/sources.ndjson" 2>/dev/null)
+        while IFS= read -r p; do ui_kv "$lab" "$p"; lab=''; done < <(jq -r '.path' "$STAGE/sources.ndjson" 2>/dev/null | sort -u)
     fi
     ui_rule
     ask_no '确定完整卸载' || exit "$RC_QUIET"
-    load_state_draft
+    if [[ $(jq -r '.meta.created_user // 0' "$STATE" 2>/dev/null) == 1 ]]; then own_user=1; fi
     STEP_NO=0 STEP_TOTAL=3
     ui_blank
-    ui_step '停止服务并删除文件'
+    ui_step '停止服务'
     : > "$STEP_LOG"
-    cp -f "$DATA_DIR/sources.ndjson" "$STAGE/sources.ndjson" 2>/dev/null || true
-    cp -f "$STATE" "$STAGE/state-old.json"
-    if [[ $(jq -r '.meta.created_user // 0' "$DRAFT" 2>/dev/null) == 1 ]]; then own_user=1; fi
-    tx_begin
     stop_owned_services
+    ui_step_done
+    ui_step '清理系统改动'
+    : > "$STEP_LOG"
+    fw_remove_recorded "$STATE"
+    state_update '.meta.fw_rules = []'
+    release_nginx_packages || true
+    release_extra_packages "$STATE"
+    state_update '.meta.extra_packages = []'
     if is_managed_file "$SYSCTL_FILE"; then rm -f -- "$SYSCTL_FILE"; fi
     restore_bbr_original
+    if (( own_user )); then remove_service_user; state_update '.meta.created_user = 0'; fi
+    ui_step_done
+    ui_step '删除文件和脚本'
+    : > "$STEP_LOG"
+    cp -f "$STATE" "$STAGE/state-old.json"
+    tx_begin
     for p in "${MANAGED_PATHS[@]}"; do
         [[ $p != "$SYSCTL_FILE" && $p != "$QUICK_BIN" ]] || continue
         rm -rf -- "$p"
@@ -5235,21 +5518,17 @@ action_uninstall() {
         for p in "${MANAGED_SERVICES[@]}"; do systemctl reset-failed "$p" >/dev/null 2>&1 || true; done
     fi
     tx_commit
-    ui_step_done
-    ui_step '清理系统改动'
-    : > "$STEP_LOG"
-    fw_remove_recorded "$STAGE/state-old.json"
-    STATE=$STAGE/state-old.json release_nginx_packages || true
-    release_extra_packages "$STAGE/state-old.json"
-    if (( own_user )); then remove_service_user; fi
-    ui_step_done
-    ui_step '删除脚本'
     delete_recorded_sources
     remove_self_files
     jq -r '.meta.created_dirs // [] | .[]' "$STAGE/state-old.json" 2>/dev/null | remove_created_dirs
     ui_step_done
     ui_ok '卸载完成。curl、jq 等通用工具没有删除。'
     exit 20
+}
+
+state_update() {
+    jq "$1" "$STATE" > "$STAGE/state-upd.json"
+    atomic_install "$STAGE/state-upd.json" "$STATE" 600
 }
 
 uninstall_changes() {
@@ -5350,7 +5629,7 @@ parse_args() {
         esac
         shift
     done
-    if [[ -n $CLI_SCHEME && $ACTION == menu ]]; then ACTION=install; fi
+    if [[ ( -n $CLI_SCHEME || -n $CLI_CORE_TAG ) && $ACTION == menu ]]; then ACTION=install; fi
     return 0
 }
 
@@ -5421,18 +5700,109 @@ home_alerts() {
     for f in "${a[@]}"; do ui_kv '' "$C_YELLOW! $f$C_RESET"; done
 }
 
+proc_pid() {
+    local d
+    [[ -e $1 ]] || return 1
+    for d in /proc/[0-9]*; do
+        if [[ $d/exe -ef $1 ]]; then printf '%s' "${d#/proc/}"; return 0; fi
+    done
+    return 1
+}
+
+proc_uptime() {
+    local st up hz
+    local -a fs=()
+    read -r st 2>/dev/null < "/proc/$1/stat" || return 1
+    st=${st##*) }
+    read -r -a fs <<< "$st"
+    [[ ${fs[19]:-} =~ ^[0-9]+$ ]] || return 1
+    hz=$(getconf CLK_TCK 2>/dev/null || true)
+    [[ $hz =~ ^[0-9]+$ ]] && (( hz > 0 )) || hz=100
+    read -r up _ 2>/dev/null < /proc/uptime || return 1
+    up=${up%%.*}
+    printf '%d' $(( up - fs[19] / hz < 0 ? 0 : up - fs[19] / hz ))
+}
+
+human_uptime() {
+    local t=$1 d h m
+    d=$(( t / 86400 )) h=$(( t % 86400 / 3600 )) m=$(( t % 3600 / 60 ))
+    if (( d > 0 )); then printf '%d 天 %d 小时' "$d" "$h"
+    elif (( h > 0 )); then printf '%d 小时 %d 分钟' "$h" "$m"
+    else printf '%d 分钟' "$m"; fi
+}
+
+proc_rss_mb() {
+    local k v u
+    while read -r k v u; do
+        if [[ $k == VmRSS: && $v =~ ^[0-9]+$ ]]; then printf '%d' $(( (v + 512) / 1024 )); return 0; fi
+    done 2>/dev/null < "/proc/$1/status"
+    return 1
+}
+
+tcp_conn_count() {
+    local ports
+    ports=$(public_ports | awk '$1 == "tcp" {printf " %s", $2}')
+    [[ -n $ports ]] || { printf '0'; return 0; }
+    ss -Htn state established 2>/dev/null | awk -v ps="$ports " '{n = split($3, a, ":"); if (index(ps, " " a[n] " ")) c++} END {print c + 0}'
+}
+
+home_status() {
+    local host v4 v6 bin name ver pid up mem conn res=''
+    host=$(st .net.host) v4=$(st .net.v4) v6=$(st .net.v6)
+    ui_kv '方案' "$(scheme_label "$(scheme)")"
+    if scheme_is_split "$(scheme)"; then
+        ui_kv '节点' "$(node_name)"
+        ui_cont_kv "IPv4 ${v4:-无}"
+        ui_cont_kv "IPv6 ${v6:-无}"
+    else
+        ui_kv '节点' "$(node_name)" "$host"
+        if [[ $host == "$v4" && -n $v6 ]]; then ui_cont_kv "$C_DIM$v6$C_RESET"
+        elif [[ $host == "$v6" && -n $v4 ]]; then ui_cont_kv "$C_DIM$v4$C_RESET"
+        elif [[ $host != "$v4" && $host != "$v6" ]]; then
+            [[ -z $v4 ]] || ui_cont_kv "${C_DIM}IPv4 $v4$C_RESET"
+            [[ -z $v6 ]] || ui_cont_kv "${C_DIM}IPv6 $v6$C_RESET"
+        fi
+    fi
+    if needs_ss_rust; then bin=$SS_BIN name=SS-Rust ver=$(installed_version ss)
+    else bin=$XRAY_BIN name=Xray ver=$(installed_version xray); fi
+    pid=$(proc_pid "$bin" || true)
+    if system_running; then
+        up=''
+        [[ -z $pid ]] || up=$(proc_uptime "$pid" || true)
+        if [[ -n $up ]]; then ui_kv '状态' "${C_GREEN}运行中${C_RESET}" "已运行 $(human_uptime "$up")"
+        else ui_kv '状态' "${C_GREEN}运行中${C_RESET}"; fi
+    else
+        ui_kv '状态' "${C_YELLOW}已停止${C_RESET}"
+    fi
+    res="$name ${ver:-未知}"
+    if [[ -n $pid ]]; then
+        mem=$(proc_rss_mb "$pid" || true)
+        conn=$(tcp_conn_count || true)
+        [[ -z $mem ]] || kv_append res "  ${C_DIM}内存$C_RESET $mem MB"
+        [[ -z $conn ]] || kv_append res "  ${C_DIM}连接$C_RESET $conn"
+    fi
+    ui_kv '核心' "$res"
+}
+
+kv_append() {
+    local __ka_w
+    str_width "${!1}$2" __ka_w
+    (( __ka_w > UI_W - 2 - LABEL_W )) || printf -v "$1" '%s%s' "${!1}" "$2"
+}
+
+ui_cont_kv() {
+    local pad fitted
+    printf -v pad '%*s' $(( LABEL_W + 2 )) ''
+    fit_width "$1" $(( UI_W - 2 - LABEL_W )) fitted
+    ui_emit "$pad$fitted"
+}
+
 home_build() {
-    local core=''
     ui_banner
     ui_blank
     if state_ok; then
         DRAFT=$STATE
-        ui_kv '方案' "$(scheme_label "$(scheme)")"
-        ui_kv '节点' "$(node_name)" "$(st .net.host)"
-        [[ -z $(installed_version xray) ]] || core="Xray $(installed_version xray)"
-        [[ -z $(installed_version ss) ]] || core+="${core:+，}SS-Rust $(installed_version ss)"
-        if system_running; then ui_kv '状态' "${C_GREEN}运行中${C_RESET}" "$core"
-        else ui_kv '状态' "${C_YELLOW}已停止${C_RESET}" "$core"; fi
+        home_status
         home_alerts
     else
         ui_kv '状态' '未安装'
@@ -5470,6 +5840,7 @@ update_check_bg() {
             s=$(awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' <<< "$body")
         fi
         if [[ $(jq -r '.core.xray // empty' "$STATE" 2>/dev/null) == latest ]]; then x=$(STEP_LOG=/dev/null xray_newest_tag); fi
+        [[ -n $s || -n $x ]] || exit 0
         [[ -d $DATA_DIR ]] || exit 0
         tmp=$(mktemp "$DATA_DIR/.update-check.XXXXXX") || exit 0
         jq -n --arg s "$s" --arg x "$x" '{script: $s, xray: $x}' > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$f"
@@ -5500,7 +5871,7 @@ after_action() {
     local rc=$1
     case $rc in
         20) exit 0 ;;
-        21|23) ui_pause; exec bash "$SELF_SCRIPT_PATH" ;;
+        21|23) ui_pause; on_main_exit; exec bash "$SELF_SCRIPT_PATH" ;;
     esac
     if [[ -e $TX ]]; then
         ui_err '有一次操作没能恢复完，重新运行脚本会继续恢复。'
@@ -5525,6 +5896,7 @@ main() {
     if [[ -f $SOURCE_PATH ]]; then SOURCE_PATH=$(readlink -f -- "$SOURCE_PATH"); fi
     tx_recover_if_needed
     migrate_state
+    check_state_file
     if [[ ${ZX_REEXEC:-0} != 1 ]]; then clean_stale_stages; fi
 
     case $ACTION in
