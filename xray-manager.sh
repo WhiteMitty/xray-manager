@@ -5066,7 +5066,7 @@ show_qr() {
         fi
     fi
     if have qrencode; then
-        qr=$(qrencode -t ANSI -m 4 "$link" 2>/dev/null) || { qr=''; warn='链接太长，生成不了二维码。'; }
+        qr=$(qrencode -t ANSIUTF8 -m 4 "$link" 2>/dev/null) || { qr=''; warn='链接太长，生成不了二维码。'; }
         if [[ -n $qr ]]; then
             sz=$(stty size <&"$INPUT_FD" 2>/dev/null || true)
             if [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]]; then rows=${BASH_REMATCH[1]} cols=${BASH_REMATCH[2]}; fi
