@@ -16,14 +16,14 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```bash
 zxray
 ```
-- 选择自动或手动安装
+- 快速调用脚本
 <br>
 
 ### 卸载
 ```bash
 zxray
 ```
-- 选择完整卸载完成卸载
+- 选择完整卸载
 <br>
 
 ### 其他
