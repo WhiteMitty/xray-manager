@@ -37,7 +37,10 @@ readonly SCRIPT_VERSION="0.2.0"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
 readonly SCRIPT_REMOTE_URL="https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh"
 readonly XRAY_MIN_VERSION="26.3.27"
-readonly STATE_SCHEMA=4
+readonly XRAY_COMPAT_VERSION="v26.7.28"
+readonly XRAY_SETTLE_DAYS=3
+readonly XRAY_MLKEM_VERSION=26.9.8
+readonly STATE_SCHEMA=5
 readonly SERVICE_USER="zxray"
 readonly MANAGED_TAG="# Managed by Xray Manager"
 readonly RC_QUIET=10
@@ -101,8 +104,11 @@ SERVICE_USER_CREATED=0
 NGINX_MODULE_LINE='' NGINX_REJECT_TLS=1
 USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
 NEW_XRAY=0 NEW_SS=0
-UI_W=60 LABEL_W=12 KEY_W=1
-C_TITLE='' C_KEY='' C_CUR='' C_RULE='' C_DIM='' C_BOLD='' C_GREEN='' C_YELLOW='' C_RED='' C_RESET=''
+UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1
+TUI=0 TUI_KEY='' TUI_CUR=0 TUI_TOP=0 TUI_HEAD=0 TUI_MSG='' TUI_RESIZED=0 TUI_HELP_H=0 TUI_HELP_DIM=1 TUI_FOOT='' TUI_FOOT_PLAIN=''
+UI_BUF_ON=0 SPIN_PID=''
+UI_BUF=() TUI_ITEMS=() TUI_IKEYS=() TUI_HELPS=()
+C_KEY='' C_GROUP='' C_RULE='' C_DIM='' C_BOLD='' C_GREEN='' C_YELLOW='' C_RED='' C_RESET='' C_BAR='' C_BAR_OK=''
 
 ui_setup_locale() {
     local loc
@@ -115,21 +121,24 @@ ui_setup_locale() {
     export LC_ALL=C.UTF-8
 }
 
+ui_measure() {
+    local sz=''
+    if input_is_tty; then sz=$(stty size <&"$INPUT_FD" 2>/dev/null || true); fi
+    if [[ ! $sz =~ ^[0-9]+\ [0-9]+$ && -t 1 ]]; then sz="$(tput lines 2>/dev/null || true) $(tput cols 2>/dev/null || true)"; fi
+    [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]] || return 0
+    UI_H=${BASH_REMATCH[1]}
+    UI_W=${BASH_REMATCH[2]}
+    (( UI_W <= 60 )) || UI_W=60
+    (( UI_W >= 40 )) || UI_W=40
+    (( UI_H >= 12 )) || UI_H=12
+}
+
 ui_setup() {
     ui_setup_locale
-    local cols=''
-    if [[ -t 1 ]]; then
-        cols=$(tput cols 2>/dev/null || true)
-        [[ $cols =~ ^[0-9]+$ ]] || cols=$(stty size 2>/dev/null | awk '{print $2}' || true)
-    fi
-    if [[ $cols =~ ^[0-9]+$ ]]; then
-        UI_W=$(( cols < 60 ? cols : 60 ))
-        (( UI_W >= 40 )) || UI_W=40
-    fi
+    ui_measure
     if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
-        C_TITLE=$'\e[1;36m'
         C_KEY=$'\e[36m'
-        C_CUR=$'\e[1;32m'
+        C_GROUP=$'\e[1;36m'
         C_RULE=$'\e[90m'
         C_DIM=$'\e[90m'
         C_BOLD=$'\e[1m'
@@ -137,14 +146,24 @@ ui_setup() {
         C_YELLOW=$'\e[33m'
         C_RED=$'\e[31m'
         C_RESET=$'\e[0m'
+        C_BAR=$'\e[1;30;103m'
+        C_BAR_OK=$'\e[1;30;102m'
     fi
+    if [[ -t 1 ]] && input_is_tty && [[ -n ${TERM:-} && ${TERM:-} != dumb ]] && (( ! ASSUME_YES )); then TUI=1; fi
+    return 0
 }
 
 byte_len() { local LC_ALL=C; printf -v "$2" '%d' "${#1}"; }
 
+strip_ansi() {
+    local __sa_s=$1
+    while [[ $__sa_s =~ $'\e'\[[0-9\;]*m ]]; do __sa_s=${__sa_s/"${BASH_REMATCH[0]}"/}; done
+    printf -v "$2" '%s' "$__sa_s"
+}
+
 str_width() {
-    local __sw_s=$1 __sw_c __sw_b
-    while [[ $__sw_s =~ $'\e'\[[0-9\;]*m ]]; do __sw_s=${__sw_s/"${BASH_REMATCH[0]}"/}; done
+    local __sw_s __sw_c __sw_b
+    strip_ansi "$1" __sw_s
     __sw_c=${#__sw_s}
     byte_len "$__sw_s" __sw_b
     printf -v "$2" '%d' $(( __sw_c + (__sw_b - __sw_c) / 2 ))
@@ -167,11 +186,21 @@ fit_width() {
         printf -v "$3" '%s' "$__fw_s"
         return 0
     fi
+    strip_ansi "$__fw_s" __fw_s
     if (( __fw_max < 8 )); then
-        printf -v "$3" '%s' "${__fw_s:0:__fw_max}"
+        __fw_out='' __fw_acc=0
+        for (( __fw_i = 0; __fw_i < ${#__fw_s}; __fw_i++ )); do
+            __fw_ch=${__fw_s:__fw_i:1}
+            str_width "$__fw_ch" __fw_w
+            (( __fw_acc + __fw_w <= __fw_max )) || break
+            __fw_out+=$__fw_ch
+            __fw_acc=$(( __fw_acc + __fw_w ))
+        done
+        printf -v "$3" '%s' "$__fw_out"
         return 0
     fi
     __fw_head=$(( (__fw_max - 3) * 3 / 5 ))
+    [[ ${4:-} != end ]] || __fw_head=$(( __fw_max - 3 ))
     __fw_tail=$(( __fw_max - 3 - __fw_head ))
     __fw_out='' __fw_acc=0
     for (( __fw_i = 0; __fw_i < ${#__fw_s}; __fw_i++ )); do
@@ -195,32 +224,47 @@ fit_width() {
 fit_value_note() {
     local __fv_v=$1 __fv_n=$2 __fv_max=$3 __fv_vw __fv_out
     str_width "$__fv_v" __fv_vw
-    if [[ -z $__fv_n ]] || (( __fv_vw + 8 > __fv_max )); then
+    if [[ -z $__fv_n ]] || (( __fv_vw + 10 > __fv_max )); then
         fit_width "$__fv_v" "$__fv_max" __fv_out
         printf -v "$4" '%s' "$__fv_out"
         return 0
     fi
     if [[ -z $__fv_v ]]; then
-        fit_width "$__fv_n" "$__fv_max" __fv_out
+        fit_width "$__fv_n" "$__fv_max" __fv_out end
         printf -v "$4" '%s%s%s' "$C_DIM" "$__fv_out" "$C_RESET"
         return 0
     fi
-    fit_width "$__fv_n" $(( __fv_max - __fv_vw - 2 )) __fv_out
+    fit_width "$__fv_n" $(( __fv_max - __fv_vw - 2 )) __fv_out end
     printf -v "$4" '%s  %s%s%s' "$__fv_v" "$C_DIM" "$__fv_out" "$C_RESET"
 }
 
-ui_rule() {
-    local l
-    printf -v l '%*s' "$UI_W" ''
-    printf '%s%s%s\n' "$C_RULE" "${l// /-}" "$C_RESET" >&4
+ui_emit() {
+    if (( UI_BUF_ON )); then UI_BUF+=("$1"); else printf '%s\n' "$1" >&4; fi
 }
 
-ui_line() { step_break; printf '  %s\n' "$*" >&4; }
-ui_note() { step_break; printf '  %s%s%s\n' "$C_DIM" "$*" "$C_RESET" >&4; }
-ui_blank() { step_break; printf '\n' >&4; }
-ui_ok() { step_break; printf '  %s%s%s\n' "$C_GREEN" "$*" "$C_RESET" >&4; }
-ui_warn() { step_break; printf '  %s%s%s\n' "$C_YELLOW" "$*" "$C_RESET" >&5; }
-ui_err() { step_break; printf '  %s%s%s\n' "$C_RED" "$*" "$C_RESET" >&5; }
+rule_line() {
+    local __rl_l
+    printf -v __rl_l '%*s' "$UI_W" ''
+    printf -v "$1" '%s%s%s' "$C_RULE" "${__rl_l// /-}" "$C_RESET"
+}
+
+ui_rule() { local l; rule_line l; ui_emit "$l"; }
+ui_line() { step_break; ui_emit "  $*"; }
+ui_blank() { step_break; ui_emit ''; }
+
+ui_colored() {
+    local c=$1 fd=$2 t=$3 l
+    step_break
+    if [[ $t != *$'\e'* ]]; then wrap_text "$t" $(( UI_W - 2 )) t; fi
+    while IFS= read -r l; do
+        if (( UI_BUF_ON )); then UI_BUF+=("  $c$l$C_RESET"); else printf '  %s%s%s\n' "$c" "$l" "$C_RESET" >&"$fd"; fi
+    done <<< "$t"
+}
+
+ui_note() { ui_colored "$C_DIM" 4 "$*"; }
+ui_ok() { ui_colored "$C_GREEN" 4 "$*"; }
+ui_warn() { ui_colored "$C_YELLOW" 5 "$*"; }
+ui_err() { ui_colored "$C_RED" 5 "$*"; }
 
 ui_hint() {
     local l
@@ -237,15 +281,31 @@ die() {
 }
 fatal() { ui_err "$*"; exit 1; }
 
-ui_title() {
-    local text=$1 sub=${2:-} color=${3:-$C_TITLE}
-    ui_rule
-    if [[ -n $sub ]]; then
-        printf '  %s%s%s   %s%s%s\n' "$color" "$text" "$C_RESET" "$C_DIM" "$sub" "$C_RESET" >&4
+ui_banner() {
+    local t="XRAY MANAGER  v$SCRIPT_VERSION" w l r line
+    str_width "$t" w
+    l=$(( (UI_W - w) / 2 ))
+    r=$(( UI_W - w - l ))
+    if [[ -n $C_BAR ]]; then
+        printf -v line '%s%*s%s%*s%s' "$C_BAR" "$l" '' "$t" "$r" '' "$C_RESET"
+        ui_emit "$line"
     else
-        printf '  %s%s%s\n' "$color" "$text" "$C_RESET" >&4
+        ui_rule
+        printf -v line '%*s%s' "$l" '' "$t"
+        ui_emit "$line"
+        ui_rule
     fi
+    (( ! UI_BUF_ON )) || TUI_HEAD=${#UI_BUF[@]}
+}
+
+ui_title() {
+    local text=$1 sub=${2:-} bar=$C_BAR h0=${#UI_BUF[@]}
+    [[ ${3:-} != ok ]] || bar=$C_BAR_OK
     ui_rule
+    if [[ -n $bar ]]; then ui_emit "  $bar $text $C_RESET${sub:+   $C_DIM$sub$C_RESET}"
+    else ui_emit "  $text${sub:+   $sub}"; fi
+    ui_rule
+    (( ! UI_BUF_ON || h0 > 0 )) || TUI_HEAD=${#UI_BUF[@]}
 }
 
 ui_page() {
@@ -254,32 +314,32 @@ ui_page() {
     ui_title "$@"
 }
 
-ui_group() { printf '  %s%s%s\n' "$C_BOLD" "$1" "$C_RESET" >&4; }
+ui_group() { ui_emit "  $C_GROUP$1$C_RESET"; }
 
 ui_item() {
     local key=$1 label=$2 value=${3:-} note=${4:-} padded fitted
     printf -v key '%*s' "$KEY_W" "$key"
     if [[ -z $value && -z $note ]]; then
-        printf '  %s%s%s  %s\n' "$C_KEY" "$key" "$C_RESET" "$label" >&4
+        ui_emit "   $C_KEY$key$C_RESET  $label"
         return 0
     fi
     pad_to "$label" "$LABEL_W" padded
-    fit_value_note "$value" "$note" $(( UI_W - 4 - KEY_W - LABEL_W )) fitted
-    printf '  %s%s%s  %s%s\n' "$C_KEY" "$key" "$C_RESET" "$padded" "$fitted" >&4
+    fit_value_note "$value" "$note" $(( UI_W - 5 - KEY_W - LABEL_W )) fitted
+    ui_emit "   $C_KEY$key$C_RESET  $padded$fitted"
 }
 
 ui_cont() {
     local pad fitted
-    printf -v pad '%*s' $(( KEY_W + LABEL_W + 4 )) ''
-    fit_value_note "$1" "${2:-}" $(( UI_W - 4 - KEY_W - LABEL_W )) fitted
-    printf '%s%s\n' "$pad" "$fitted" >&4
+    printf -v pad '%*s' $(( KEY_W + LABEL_W + 5 )) ''
+    fit_value_note "$1" "${2:-}" $(( UI_W - 5 - KEY_W - LABEL_W )) fitted
+    ui_emit "$pad$fitted"
 }
 
 ui_kv() {
     local label=$1 value=${2:-} note=${3:-} padded fitted
     pad_to "$label" "$LABEL_W" padded
     fit_value_note "$value" "$note" $(( UI_W - 2 - LABEL_W )) fitted
-    printf '  %s%s\n' "$padded" "$fitted" >&4
+    ui_emit "  $padded$fitted"
 }
 
 ui_kv_words() {
@@ -289,29 +349,31 @@ ui_kv_words() {
     for word in "$@"; do
         str_width "$line $word" w
         if [[ -n $line ]] && (( w > UI_W - 2 - LABEL_W )); then
-            printf '  %s%s\n' "$padded" "$line" >&4
+            ui_emit "  $padded$line"
             printf -v padded '%*s' "$LABEL_W" ''
             line=$word
         else
             line+=${line:+ }$word
         fi
     done
-    printf '  %s%s\n' "$padded" "$line" >&4
+    ui_emit "  $padded$line"
 }
 
 ui_option() {
-    local key=$1 label=$2 desc=$3 cur=$4 lw=$5 padded fitted
+    local key=$1 label=$2 desc=$3 cur=$4 lw=$5 padded fitted room w tag=''
     pad_to "$label" "$lw" padded
-    fit_value_note '' "$desc" $(( UI_W - 7 - ${#key} - lw )) fitted
+    room=$(( UI_W - 5 - ${#key} - lw ))
+    (( cur )) && room=$(( room - 6 ))
+    fit_value_note '' "$desc" "$room" fitted
     if (( cur )); then
-        printf '  %s> %s  %s%s%s\n' "$C_CUR" "$key" "$padded" "$C_RESET" "$fitted" >&4
-    else
-        printf '    %s%s%s  %s%s\n' "$C_KEY" "$key" "$C_RESET" "$padded" "$fitted" >&4
+        str_width "$fitted" w
+        printf -v tag '%*s%s当前%s' $(( room - w + 2 )) '' "$C_GREEN" "$C_RESET"
     fi
+    ui_emit "   $C_KEY$key$C_RESET  $padded$fitted$tag"
 }
 
-ui_footer() {
-    local s="$*" seg key out=''
+footer_line() {
+    local s=$1 seg key out=''
     local -a segs=()
     [[ -z $ACTION_PID ]] || s+='   b 主页'
     while [[ $s == *'   '* ]]; do
@@ -323,8 +385,14 @@ ui_footer() {
         key=${seg%% *}
         out+="${out:+   }$C_KEY$key$C_RESET${seg#"$key"}"
     done
+    printf -v "$2" '  %s' "$out"
+}
+
+ui_footer() {
+    local l
     ui_rule
-    printf '  %s\n' "$out" >&4
+    footer_line "$*" l
+    ui_emit "$l"
 }
 
 step_mark() { [[ -z $STAGE || ! -d $STAGE ]] || : > "$STAGE/.step$STEP_NO-$1"; }
@@ -340,8 +408,36 @@ step_prefix() {
         "$C_RULE" "${d// /.}" "$C_RESET" >&4
 }
 
+spin_start() {
+    (( TUI )) || return 0
+    local owner=$BASHPID
+    (
+        trap - ERR INT TERM HUP EXIT
+        set +e
+        i=0 t0=$SECONDS
+        f=('|' '/' '-' '\')
+        while sleep 0.25; do
+            kill -0 "$owner" 2>/dev/null || exit 0
+            i=$(( i + 1 ))
+            e=$(( SECONDS - t0 ))
+            if (( e >= 2 )); then printf '\e7%s %ds\e8' "${f[i % 4]}" "$e"
+            else printf '\e7%s\e8' "${f[i % 4]}"; fi
+        done
+    ) >&4 2>/dev/null 3>&- 9>&- &
+    SPIN_PID=$!
+}
+
+spin_stop() {
+    [[ -n $SPIN_PID ]] || return 0
+    kill "$SPIN_PID" 2>/dev/null || true
+    wait "$SPIN_PID" 2>/dev/null || true
+    SPIN_PID=''
+    printf '\e[K' >&4
+}
+
 step_break() {
     (( STEP_OPEN == 1 )) || return 0
+    spin_stop
     step_has break || printf '\n' >&4
     STEP_OPEN=2
     step_mark break
@@ -349,6 +445,7 @@ step_break() {
 
 step_end() {
     (( STEP_OPEN )) || return 0
+    spin_stop
     if step_has end; then STEP_OPEN=0; return 0; fi
     if (( STEP_OPEN == 2 )) || step_has break; then step_prefix; fi
     printf '%s\n' "$1" >&4
@@ -362,15 +459,20 @@ ui_step() {
     STEP_LABEL=$1
     step_prefix
     STEP_OPEN=1
+    spin_start
 }
 ui_step_done() { step_end "${C_GREEN}完成${C_RESET}"; }
 ui_step_fail() { step_end "${C_RED}失败${C_RESET}"; }
 ui_step_skip() { step_end "${C_DIM}${1:-跳过}${C_RESET}"; }
 
 ui_clear() {
-    if [[ -t 1 ]]; then
-        printf '\e[H\e[2J' >&4
-    fi
+    (( ! UI_BUF_ON )) || return 0
+    [[ ! -t 1 ]] || printf '\e[H\e[2J' >&4
+}
+
+tui_cursor() {
+    [[ -t 1 ]] || return 0
+    if [[ $1 == on ]]; then printf '\e[?25h' >&4; else printf '\e[?25l' >&4; fi
 }
 
 
@@ -429,21 +531,293 @@ go_home_if_b() {
 }
 
 read_line() {
-    local __rl_p=$1 __rl_v=''
+    local __rl_p=$1 __rl_v='' __rl_pre=${3:-}
     ui_flush
     tty_echo echo
-    printf '  %s' "$__rl_p" >&4
-    IFS= read -r -u "$INPUT_FD" __rl_v || input_eof
-    input_is_tty || printf '%s\n' "$__rl_v" >&4
+    tui_cursor on
+    if (( TUI )) && [[ -n $__rl_pre ]]; then
+        IFS= read -r -e -i "$__rl_pre" -p "  $__rl_p" -u "$INPUT_FD" __rl_v 2>&4 || input_eof
+    else
+        printf '  %s' "$__rl_p" >&4
+        IFS= read -r -u "$INPUT_FD" __rl_v || input_eof
+        input_is_tty || printf '%s\n' "$__rl_v" >&4
+    fi
     __rl_v=${__rl_v#"${__rl_v%%[![:space:]]*}"}
     __rl_v=${__rl_v%"${__rl_v##*[![:space:]]}"}
     go_home_if_b "$__rl_v" || __rl_v=''
     printf -v "$2" '%s' "$__rl_v"
 }
 
+tui_read_key() {
+    local __k='' __c='' __seq='' __rc
+    while :; do
+        __rc=0
+        IFS= read -rsn1 -t 1 -u "$INPUT_FD" __k || __rc=$?
+        if (( __rc > 128 )); then
+            if (( TUI_RESIZED )); then TUI_RESIZED=0; printf -v "$1" '%s' RESIZE; return 0; fi
+            continue
+        fi
+        (( __rc == 0 )) || input_eof
+        break
+    done
+    case $__k in
+        $'\e')
+            __rc=0
+            IFS= read -rsn1 -t 0.05 -u "$INPUT_FD" __c || __rc=$?
+            if [[ $__c == '[' || $__c == O ]]; then
+                while IFS= read -rsn1 -t 0.05 -u "$INPUT_FD" __c; do
+                    __seq+=$__c
+                    [[ $__c != [A-Za-z~] ]] || break
+                done
+                case $__seq in
+                    A) __k=UP ;; B) __k=DOWN ;; C) __k=RIGHT ;; D) __k=LEFT ;;
+                    H|1~|7~) __k=HOME ;; F|4~|8~) __k=END ;; 5~) __k=PGUP ;; 6~) __k=PGDN ;;
+                    *) __k=NONE ;;
+                esac
+            else
+                __k=ESC
+            fi ;;
+        ''|$'\r'|$'\n') __k=ENTER ;;
+        $'\x04') input_eof ;;
+        $'\t') __k=TAB ;;
+        $'\x7f'|$'\b') __k=ESC ;;
+    esac
+    printf -v "$1" '%s' "$__k"
+}
+
+tui_hl() {
+    local __h_s __h_w
+    strip_ansi "$1" __h_s
+    [[ ${__h_s:0:2} != '  ' ]] || __h_s=" >${__h_s:2}"
+    str_width "$__h_s" __h_w
+    (( __h_w >= UI_W )) || printf -v __h_s '%s%*s' "$__h_s" $(( UI_W - __h_w )) ''
+    printf -v "$2" '\e[7m%s\e[0m' "$__h_s"
+}
+
+tui_item() {
+    TUI_ITEMS+=("${#UI_BUF[@]}")
+    TUI_IKEYS+=("$1")
+    TUI_HELPS+=("${5:-}")
+    ui_item "$1" "$2" "${3:-}" "${4:-}"
+}
+
+tui_opt() {
+    TUI_ITEMS+=("${#UI_BUF[@]}")
+    TUI_IKEYS+=("$1")
+    TUI_HELPS+=("${6:-}")
+    ui_option "$1" "$2" "$3" "$4" "$5"
+}
+
+tui_build() {
+    local __tb_fn=$1 __tb_i __tb_w __tb_n
+    shift
+    UI_BUF=() TUI_ITEMS=() TUI_IKEYS=() TUI_HELPS=() TUI_FOOT='' TUI_FOOT_PLAIN='' TUI_HELP_H=0 TUI_HELP_DIM=1 KEY_W=1 TUI_HEAD=0
+    UI_BUF_ON=1
+    "$__tb_fn" "$@"
+    UI_BUF_ON=0
+    (( TUI_HELP_H > 0 )) || return 0
+    for __tb_i in "${!TUI_HELPS[@]}"; do
+        wrap_text "${TUI_HELPS[$__tb_i]}" $(( UI_W - 2 )) __tb_w
+        TUI_HELPS[__tb_i]=$__tb_w
+        __tb_n=1
+        while [[ $__tb_w == *$'\n'* ]]; do __tb_w=${__tb_w#*$'\n'}; __tb_n=$(( __tb_n + 1 )); done
+        (( __tb_n <= TUI_HELP_H )) || TUI_HELP_H=$__tb_n
+    done
+}
+
+wrap_text() {
+    local __wt_in=$1 __wt_max=$2 __wt_out='' __wt_line __wt_w __wt_cur __wt_acc __wt_i __wt_ch __wt_b __wt_hold
+    local -a __wt_lines=()
+    mapfile -t __wt_lines <<< "$__wt_in"
+    for __wt_line in "${__wt_lines[@]}"; do
+        str_width "$__wt_line" __wt_w
+        if (( __wt_w <= __wt_max )); then __wt_out+=${__wt_out:+$'\n'}$__wt_line; continue; fi
+        __wt_cur='' __wt_acc=0
+        for (( __wt_i = 0; __wt_i < ${#__wt_line}; __wt_i++ )); do
+            __wt_ch=${__wt_line:__wt_i:1}
+            byte_len "$__wt_ch" __wt_b
+            if (( __wt_b > 1 )); then __wt_w=2; else __wt_w=1; fi
+            if (( __wt_acc + __wt_w > __wt_max )); then
+                __wt_hold=''
+                if [[ $__wt_ch == [A-Za-z0-9._/:-] || $__wt_ch == [，。；：、）！？」] ]]; then
+                    if [[ $__wt_cur =~ [A-Za-z0-9._/:-]+$ ]]; then __wt_hold=${BASH_REMATCH[0]}
+                    elif [[ $__wt_ch != [A-Za-z0-9._/:-] ]]; then __wt_hold=${__wt_cur: -1}; fi
+                    (( ${#__wt_hold} < ${#__wt_cur} && ${#__wt_hold} + 4 <= __wt_max )) || __wt_hold=''
+                    __wt_cur=${__wt_cur:0:${#__wt_cur}-${#__wt_hold}}
+                fi
+                __wt_out+=${__wt_out:+$'\n'}${__wt_cur%' '}
+                __wt_cur=$__wt_hold
+                str_width "$__wt_hold" __wt_acc
+                [[ $__wt_ch != ' ' ]] || continue
+            fi
+            __wt_cur+=$__wt_ch
+            __wt_acc=$(( __wt_acc + __wt_w ))
+        done
+        __wt_out+=${__wt_out:+$'\n'}$__wt_cur
+    done
+    printf -v "$3" '%s' "$__wt_out"
+}
+
+tui_draw() {
+    local out=$'\e[H' i line sel=-1 se n avail top end rl fl h hd=$TUI_HEAD scroll=0 ind
+    local -a help=()
+    n=${#UI_BUF[@]}
+    (( ${#TUI_ITEMS[@]} == 0 )) || sel=${TUI_ITEMS[$TUI_CUR]}
+    avail=$(( UI_H - 3 ))
+    if (( TUI_HELP_H > 0 )); then avail=$(( avail - TUI_HELP_H - 1 )); fi
+    [[ -z $TUI_MSG ]] || avail=$(( avail - 1 ))
+    (( hd + 4 <= avail )) || hd=0
+    for (( i = 0; i < hd; i++ )); do out+=${UI_BUF[$i]}$'\e[K\n'; done
+    avail=$(( avail - hd ))
+    (( avail >= 3 )) || avail=3
+    top=$hd
+    if (( n - hd > avail )); then
+        scroll=1
+        avail=$(( avail - 1 ))
+        se=$sel
+        if (( sel >= 0 && TUI_CUR + 1 < ${#TUI_ITEMS[@]} )); then se=$(( TUI_ITEMS[TUI_CUR + 1] - 1 )); fi
+        (( se - sel < avail )) || se=$(( sel + avail - 1 ))
+        top=$TUI_TOP
+        (( top >= hd )) || top=$hd
+        (( sel < 0 || sel >= top )) || top=$sel
+        (( se < top + avail )) || top=$(( se - avail + 1 ))
+        (( top + avail <= n )) || top=$(( n - avail ))
+        (( top >= hd )) || top=$hd
+    fi
+    TUI_TOP=$top
+    end=$(( top + avail ))
+    (( end <= n )) || end=$n
+    for (( i = top; i < end; i++ )); do
+        line=${UI_BUF[$i]}
+        (( i != sel )) || tui_hl "$line" line
+        out+=$line$'\e[K\n'
+    done
+    if (( scroll )); then
+        if (( top > hd && end < n )); then ind='^ v 上下还有内容'
+        elif (( end < n )); then ind='v 下面还有内容'
+        else ind='^ 上面还有内容'; fi
+        out+="  $C_DIM$ind$C_RESET"$'\e[K\n'
+    fi
+    rule_line rl
+    if (( TUI_HELP_H > 0 )); then
+        out+=$rl$'\e[K\n'
+        mapfile -t help <<< "${TUI_HELPS[$TUI_CUR]:-}"
+        for (( h = 0; h < TUI_HELP_H; h++ )); do
+            if (( TUI_HELP_DIM )); then out+="  $C_DIM${help[$h]:-}$C_RESET"$'\e[K\n'
+            else out+="  ${help[$h]:-}"$'\e[K\n'; fi
+        done
+    fi
+    if [[ -n $TUI_MSG ]]; then fit_width "$TUI_MSG" $(( UI_W - 2 )) line; out+="  $C_YELLOW$line$C_RESET"$'\e[K\n'; fi
+    footer_line "${TUI_FOOT:-上下键 移动   回车 选择   Esc 返回}" fl
+    out+=$rl$'\e[K\n'$fl$'\e[K\n\e[J'
+    printf '%s' "$out" >&4
+}
+
+tui_jump() {
+    local __j_k=$1 __j_i
+    for __j_i in "${!TUI_IKEYS[@]}"; do
+        [[ ${TUI_IKEYS[$__j_i],,} == "${__j_k,,}" ]] || continue
+        TUI_CUR=$__j_i
+        return 0
+    done
+    return 1
+}
+
+tui_menu() {
+    local __tm_fn=$1 __tm_keys=${3:-} __tm_k __tm_n __tm_dg='' __tm_dt=0 __tm_now
+    TUI_CUR=${2:-0}
+    shift $(( $# < 3 ? $# : 3 ))
+    TUI_KEY=''
+    if (( ! TUI )); then tui_plain "$__tm_fn" "$__tm_keys" "$@"; return 0; fi
+    tui_build "$__tm_fn" "$@"
+    __tm_n=${#TUI_ITEMS[@]}
+    (( TUI_CUR >= 0 && TUI_CUR < __tm_n )) || TUI_CUR=0
+    TUI_TOP=0
+    tty_echo -echo
+    tui_cursor off
+    while :; do
+        tui_draw
+        TUI_MSG=''
+        tui_read_key __tm_k
+        case $__tm_k in
+            RESIZE) ui_measure; tui_build "$__tm_fn" "$@"; __tm_n=${#TUI_ITEMS[@]}; (( TUI_CUR < __tm_n )) || TUI_CUR=0 ;;
+            UP) (( __tm_n == 0 )) || TUI_CUR=$(( (TUI_CUR + __tm_n - 1) % __tm_n )) ;;
+            DOWN|TAB) (( __tm_n == 0 )) || TUI_CUR=$(( (TUI_CUR + 1) % __tm_n )) ;;
+            HOME|PGUP) TUI_CUR=0 ;;
+            END|PGDN) (( __tm_n == 0 )) || TUI_CUR=$(( __tm_n - 1 )) ;;
+            ENTER) (( __tm_n == 0 )) || { TUI_KEY=ENTER; break; } ;;
+            ESC|LEFT) TUI_KEY=ESC; break ;;
+            b|B)
+                if [[ -n $ACTION_PID ]]; then
+                    go_home_if_b b || true
+                    tty_echo -echo
+                    tui_cursor off
+                fi ;;
+            *)
+                if [[ ${#__tm_k} == 1 && -n $__tm_keys && $__tm_keys == *"$__tm_k"* ]]; then TUI_KEY=$__tm_k; break; fi
+                if [[ $__tm_k == q || $__tm_k == Q ]]; then TUI_KEY=ESC; break; fi
+                if [[ $__tm_k == [0-9] ]]; then
+                    __tm_now=$(now_ms)
+                    if [[ -n $__tm_dg ]] && (( __tm_now - __tm_dt < 1000 )) && tui_jump "$__tm_dg$__tm_k"; then __tm_dg=''
+                    else tui_jump "$__tm_k" || true; __tm_dg=$__tm_k; fi
+                    __tm_dt=$__tm_now
+                elif [[ ${#__tm_k} == 1 ]]; then
+                    tui_jump "$__tm_k" || true
+                fi ;;
+        esac
+    done
+    return 0
+}
+
+tui_plain() {
+    local __tp_fn=$1 __tp_keys=$2 __tp_k
+    shift 2
+    UI_BUF_ON=0 TUI_ITEMS=() TUI_IKEYS=() TUI_HELPS=() TUI_FOOT='' TUI_FOOT_PLAIN='' TUI_HELP_H=0 KEY_W=1
+    "$__tp_fn" "$@"
+    ui_footer "${TUI_FOOT_PLAIN:-$(key_range ${#TUI_IKEYS[@]}) 选择   回车 返回}"
+    while :; do
+        read_line '请选择：' __tp_k
+        if [[ -z $__tp_k ]]; then TUI_KEY=ESC; return 0; fi
+        if tui_jump "$__tp_k"; then TUI_KEY=ENTER; return 0; fi
+        if [[ ${#__tp_k} == 1 && -n $__tp_keys && $__tp_keys == *"$__tp_k"* ]]; then TUI_KEY=$__tp_k; return 0; fi
+        if [[ $__tp_k == 0 ]]; then TUI_KEY=ESC; return 0; fi
+        ui_warn '没有这个选项，请重新输入。'
+    done
+}
+
+key_range() {
+    local n=$1 k lo='' hi=''
+    for k in "${TUI_IKEYS[@]}"; do
+        [[ $k =~ ^[0-9]+$ ]] || continue
+        if [[ -z $lo ]] || (( k < lo )); then lo=$k; fi
+        if [[ -z $hi ]] || (( k > hi )); then hi=$k; fi
+    done
+    if [[ -z $lo ]]; then lo=1 hi=$n; fi
+    if [[ $lo == "$hi" ]]; then printf '%s' "$lo"; else printf '%s-%s' "$lo" "$hi"; fi
+}
+
+tui_confirm() {
+    local p=$1 sel=$2 k yes no
+    tty_echo -echo
+    tui_cursor off
+    while :; do
+        if (( sel )); then yes=$'\e[7m 是 \e[0m' no=' 否 '; else yes=' 是 ' no=$'\e[7m 否 \e[0m'; fi
+        printf '\r  %s   %s  %s\e[K' "$p" "$yes" "$no" >&4
+        tui_read_key k
+        case $k in
+            LEFT|RIGHT|UP|DOWN|TAB) sel=$(( 1 - sel )) ;;
+            y|Y) sel=1 ;;
+            n|N) sel=0 ;;
+            ENTER) printf '\n' >&4; (( sel )) && return 0; return 1 ;;
+            ESC) printf '\n' >&4; return 1 ;;
+        esac
+    done
+}
+
 ask_yes() {
     local a
     (( ASSUME_YES )) && return 0
+    if (( TUI )); then tui_confirm "$1" 1; return; fi
     while :; do
         read_line "$1 [Y/n]：" a
         case $a in
@@ -457,6 +831,7 @@ ask_yes() {
 ask_no() {
     local a
     (( ASSUME_YES )) && return 0
+    if (( TUI )); then tui_confirm "$1" 0; return; fi
     while :; do
         read_line "$1 [y/N]：" a
         case $a in
@@ -470,7 +845,7 @@ ask_no() {
 ask_number() {
     local __an_pr=$1 __an_min=$2 __an_max=$3 __an_def=${4:-} __an_n
     while :; do
-        read_line "$__an_pr：" __an_n
+        read_line "$__an_pr：" __an_n "$__an_def"
         [[ -n $__an_n ]] || __an_n=$__an_def
         if [[ $__an_n =~ ^[0-9]{1,9}$ ]] && (( 10#$__an_n >= __an_min && 10#$__an_n <= __an_max )); then
             printf -v "$5" '%d' $(( 10#$__an_n ))
@@ -480,56 +855,46 @@ ask_number() {
     done
 }
 
-option_page() {
-    local __op_var=$1 __op_cur=$2 __op_title=$3 __op_hint=$4 __op_i __op_k __op_w __op_lw=8 __op_opt
-    shift 4
-    local -a __op_opts=("$@")
-    for __op_opt in "${__op_opts[@]}"; do
-        str_width "${__op_opt%%|*}" __op_w
-        (( __op_w + 2 <= __op_lw )) || __op_lw=$(( __op_w + 2 ))
+OP_TITLE='' OP_SUB='' OP_HINT='' OP_CUR=0
+OP_OPTS=()
+
+op_build() {
+    local i opt w lw=8 desc line pad
+    for opt in "${OP_OPTS[@]}"; do
+        str_width "${opt%%|*}" w
+        (( w + 2 <= lw )) || lw=$(( w + 2 ))
     done
-    (( __op_lw >= 12 )) || __op_lw=12
-    ui_page "$__op_title"
-    if [[ -n $__op_hint ]]; then ui_hint "$__op_hint"; ui_blank; fi
-    for __op_i in "${!__op_opts[@]}"; do
-        __op_opt=${__op_opts[$__op_i]}
-        [[ $__op_opt == *'|'* ]] || __op_opt+='|'
-        ui_option "$(( __op_i + 1 ))" "${__op_opt%%|*}" "${__op_opt#*|}" $(( __op_i + 1 == __op_cur )) "$__op_lw"
+    (( lw >= 12 )) || lw=12
+    ui_page "$OP_TITLE" "$OP_SUB"
+    if [[ -n $OP_HINT ]]; then ui_hint "$OP_HINT"; ui_blank; fi
+    for i in "${!OP_OPTS[@]}"; do
+        opt=${OP_OPTS[$i]}
+        [[ $opt == *'|'* ]] || opt+='|'
+        desc=${opt#*|}
+        tui_opt "$(( i + 1 ))" "${opt%%|*}" "${desc%%$'\n'*}" $(( i + 1 == OP_CUR )) "$lw"
+        while [[ $desc == *$'\n'* ]]; do
+            desc=${desc#*$'\n'}
+            fit_width "${desc%%$'\n'*}" $(( UI_W - 7 - lw )) line
+            printf -v pad '%*s' $(( 6 + lw )) ''
+            ui_emit "$pad$C_DIM$line$C_RESET"
+        done
     done
-    if (( __op_cur > 0 )); then ui_footer "$(key_range ${#__op_opts[@]}) 选择   回车 不改"
-    else ui_footer "$(key_range ${#__op_opts[@]}) 选择   回车 返回"; fi
-    while :; do
-        read_line '请选择：' __op_k
-        if [[ -z $__op_k || $__op_k == 0 ]]; then
-            printf -v "$__op_var" '%s' ''
-            return 0
-        fi
-        if [[ $__op_k =~ ^[0-9]+$ ]] && (( __op_k >= 1 && __op_k <= ${#__op_opts[@]} )); then
-            printf -v "$__op_var" '%s' "$__op_k"
-            return 0
-        fi
-        if (( ${#__op_opts[@]} == 1 )); then ui_warn '请输入 1，或直接回车。'
-        else ui_warn "请输入 1-${#__op_opts[@]} 之间的编号。"; fi
-    done
+    if (( OP_CUR > 0 )); then
+        TUI_FOOT='上下键 移动   回车 选择   Esc 不改'
+        TUI_FOOT_PLAIN="$(key_range ${#OP_OPTS[@]}) 选择   回车 不改"
+    else
+        TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
+    fi
 }
 
-key_range() { if (( $1 == 1 )); then printf '1'; else printf '1-%d' "$1"; fi; }
-
-menu_pick() {
-    local __mp_var=$1 __mp_max=$2 __mp_prompt=${3:-请选择：} __mp_k
-    while :; do
-        read_line "$__mp_prompt" __mp_k
-        if [[ -z $__mp_k || $__mp_k == 0 ]]; then
-            printf -v "$__mp_var" '%s' ''
-            return 0
-        fi
-        if [[ $__mp_k =~ ^[0-9]+$ ]] && (( __mp_k >= 1 && __mp_k <= __mp_max )); then
-            printf -v "$__mp_var" '%s' "$__mp_k"
-            return 0
-        fi
-        if (( __mp_max == 1 )); then ui_warn '请输入 1，或直接回车。'
-        else ui_warn "请输入 1-$__mp_max 之间的编号。"; fi
-    done
+option_page() {
+    local __op_var=$1
+    OP_CUR=$2 OP_TITLE=$3 OP_HINT=$4 OP_SUB=''
+    shift 4
+    OP_OPTS=("$@")
+    tui_menu op_build $(( OP_CUR > 0 ? OP_CUR - 1 : 0 )) ''
+    if [[ $TUI_KEY == ENTER ]]; then printf -v "$__op_var" '%d' $(( TUI_CUR + 1 ))
+    else printf -v "$__op_var" '%s' ''; fi
 }
 
 in_list() {
@@ -558,9 +923,20 @@ index_of() {
 
 ui_pause() {
     local k
+    if (( TUI )); then
+        printf '  %s按回车返回%s' "$C_DIM" "$C_RESET" >&4
+        ui_flush
+        tty_echo -echo
+        tui_cursor off
+        while :; do
+            tui_read_key k
+            case $k in ENTER|ESC|q|Q) break ;; b|B) go_home_if_b b || true ;; esac
+        done
+        printf '\n' >&4
+        return 0
+    fi
     read_line '按回车返回：' k
 }
-
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -709,10 +1085,9 @@ atomic_write() {
 is_managed_file() { [[ -f $1 ]] && grep -q "^$MANAGED_TAG" "$1" 2>/dev/null; }
 
 human_bytes() {
-    local b=$1
-    if (( b >= 1048576 && b % 1048576 == 0 )); then printf '%dM' $(( b / 1048576 ))
-    elif (( b >= 1024 && b % 1024 == 0 )); then printf '%dK' $(( b / 1024 ))
-    else printf '%d' "$b"; fi
+    awk -v b="$1" 'BEGIN {
+        if (b >= 1048576) { v = b / 1048576; u = "M" } else if (b >= 1024) { v = b / 1024; u = "K" } else { printf "%d", b; exit }
+        s = sprintf("%.1f", v); sub(/\.0$/, "", s); printf "%s%s", s, u }'
 }
 
 
@@ -1270,6 +1645,7 @@ run_action() (
     trap 'on_action_error $? $LINENO "${FUNCNAME[0]:-}" "$BASH_COMMAND"' ERR
     trap 'on_action_error 130 $LINENO' INT
     trap 'on_action_error 143 $LINENO' TERM HUP
+    trap 'TUI_RESIZED=1' WINCH
     trap on_action_exit EXIT
     make_dir "$(dirname -- "$STAGE_BASE")"
     STAGE=$(mktemp -d "$STAGE_BASE.XXXXXXXX")
@@ -1319,6 +1695,44 @@ latest_tag_try() {
     printf '%s' "$tag"
 }
 
+xray_newest_tag() {
+    local now json tag='' upd t ts
+    local -a settled=()
+    now=$(date +%s)
+    json=$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 -H 'Accept: application/vnd.github+json' \
+        "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" 2>>"${STEP_LOG:-/dev/null}" || true)
+    if [[ -n $json ]]; then
+        tag=$(jq -r --argjson now "$now" --argjson d "$XRAY_SETTLE_DAYS" '
+            [.[] | select((.draft | not) and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
+                 | select(((.published_at // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) <= ($now - $d * 86400))
+                 | .tag_name]
+            | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last // empty' <<< "$json" 2>/dev/null || true)
+    fi
+    if [[ -z $tag ]]; then
+        while read -r upd t; do
+            [[ $t =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            ts=$(date -d "$upd" +%s 2>/dev/null || echo "$now")
+            (( ts <= now - XRAY_SETTLE_DAYS * 86400 )) && settled+=("$t")
+        done <<< "$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 \
+            https://github.com/XTLS/Xray-core/releases.atom 2>>"${STEP_LOG:-/dev/null}" | awk '
+            /<entry>/ { u = ""; t = "" }
+            /<updated>/ { line = $0; gsub(/.*<updated>|<\/updated>.*/, "", line); u = line }
+            /releases\/tag\// { if (match($0, /releases\/tag\/[^"]+/)) t = substr($0, RSTART + 13, RLENGTH - 13) }
+            /<\/entry>/ { if (u != "" && t != "") print u, t }' || true)"
+        (( ${#settled[@]} == 0 )) || tag=$(printf '%s\n' "${settled[@]}" | sort -V | tail -n 1)
+    fi
+    [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    printf '%s' "$tag"
+}
+
+xray_resolve_tag() {
+    case $1 in
+        compat) printf '%s' "$XRAY_COMPAT_VERSION" ;;
+        latest) xray_newest_tag || { die '查不到 Xray 的最新版本，请检查本机能否访问 GitHub。'; return 1; } ;;
+        *) printf '%s' "$(normalize_tag "$1")" ;;
+    esac
+}
+
 latest_tag() {
     local t
     t=$(latest_tag_try "$1") || { die "无法获取 $1 的最新版本号，请检查本机能否访问 GitHub。"; return 1; }
@@ -1359,8 +1773,8 @@ download_xray() {
         riscv64) asset=Xray-linux-riscv64.zip ;;
         *) die "Xray 暂不支持此架构：$(uname -m)"; return 1 ;;
     esac
-    if [[ $tag == latest ]]; then base=https://github.com/XTLS/Xray-core/releases/latest/download
-    else base=https://github.com/XTLS/Xray-core/releases/download/$tag; fi
+    if [[ $tag == latest || $tag == compat ]]; then tag=$(xray_resolve_tag "$tag"); fi
+    base=https://github.com/XTLS/Xray-core/releases/download/$tag
     mkdir -p "$out"
     fetch "$base/$asset" "$out/$asset"
     fetch "$base/$asset.dgst" "$out/$asset.dgst"
@@ -1774,7 +2188,7 @@ parse_vless_link() {
     local stream
     if [[ $security == reality ]]; then
         [[ -n $sni && -n $pbk ]] || { PARSE_ERR='REALITY 落地缺少 sni 或 pbk'; return 1; }
-        [[ -n $fp ]] || fp=firefox
+        [[ -n $fp ]] || fp=chrome
         stream=$(jq -cn --arg sni "$sni" --arg pbk "$pbk" --arg sid "$sid" --arg fp "$fp" \
             '{network:"raw", security:"reality",
               realitySettings:({serverName:$sni, publicKey:$pbk, fingerprint:$fp, spiderX:"/"}
@@ -1895,15 +2309,15 @@ draft_new() {
     local s=$1
     PREVIEW_NOTES=()
     jq -n --arg s "$s" --arg v4 "$NET_V4" --arg v6 "$NET_V6" --argjson schema "$STATE_SCHEMA" \
-        --arg name "$(default_node_name)" '{
+        --arg name "$(default_node_name)" --argjson jitter "$(limit_jitter_new)" '{
         schema: $schema, scheme: $s, name: $name, script: "", installed_at: "",
         net: {host: (if $v4 != "" then $v4 elif $v6 != "" then $v6 else "" end), v4: $v4, v6: $v6, manual: 0, v6_link: 1},
         outbound: (if $v4 == "" and $v6 != "" then "v6first" else "v4first" end),
         bbr: 1, firewall: "auto",
-        core: {xray: "latest", ss: "latest"},
+        core: {xray: "compat", ss: "latest"},
         reality: {port: 0, internal: 0, gate: 0, sni: "", sni_auto: 1, private_key: "", public_key: "", short_id: "",
-                  fp: "firefox", guard: "nginx", limit: "orig", limit_custom: {ua: 8192, ur: 1024, da: 32768, dr: 2048},
-                  conn_ip: 256, conn_total: 4096},
+                  fp: "chrome", guard: "nginx", limit: "orig", limit_custom: {ua: 8192, ur: 1024, da: 32768, dr: 2048},
+                  limit_jitter: $jitter, conn_ip: 256, conn_total: 4096},
         xhttp: {path: "", xmux: null, enc: 0, split: "v6_up_v4_down"},
         enc: {port: 0, rtt: "0rtt", shape: "random", auth: "x25519", ticket: "600s", pad: "off",
               pad_client: "", pad_server: "", server_key: "", client_key: ""},
@@ -1918,7 +2332,7 @@ draft_new() {
         p=443
         if port_taken tcp 443; then
             p=$(random_free_port)
-            if [[ $s == triple ]]; then note_add "TCP 443 已被 $(port_owner_label tcp 443) 占用，REALITY 改用随机端口 $p。"
+            if [[ $s == triple ]]; then note_add "TCP 443 被 $(port_owner_label tcp 443) 占用，REALITY 改用随机端口 $p。"
             else PORT_NOTE="443 已被 $(port_owner_label tcp 443) 占用"; fi
         fi
         st_set .reality.port "$p"
@@ -2049,10 +2463,23 @@ outbound_xray_strategy() {
     esac
 }
 
+limit_jitter_new() {
+    shuf -i 80-125 -n 4 | jq -cs .
+}
+
+limit_preset() {
+    local base
+    case $1 in
+        orig) base='8192 1024 32768 2048' ;;
+        std) base='262144 32768 1048576 65536' ;;
+    esac
+    jq -r --arg b "$base" '(.reality.limit_jitter // [100,100,100,100]) as $j | ($b | split(" ") | map(tonumber)) as $v
+        | [range(0; 4) | ($v[.] * $j[.] / 100 | floor | tostring)] | join(" ")' "$DRAFT"
+}
+
 limit_values() {
     case $(st .reality.limit) in
-        orig) printf '8192 1024 32768 2048' ;;
-        std) printf '262144 32768 1048576 65536' ;;
+        orig|std) limit_preset "$(st .reality.limit)" ;;
         custom) jq -r '.reality.limit_custom | "\(.ua) \(.ur) \(.da) \(.dr)"' "$DRAFT" ;;
     esac
 }
@@ -2066,7 +2493,7 @@ limit_label() {
 limit_text() {
     local -a lv=()
     read -r -a lv <<< "${1:-$(limit_values)}"
-    printf '上行 %s 后 %s/s，下行 %s 后 %s/s' "$(human_bytes "${lv[0]}")" "$(human_bytes "${lv[1]}")" \
+    printf '上行 %s 后 %s/s\n下行 %s 后 %s/s' "$(human_bytes "${lv[0]}")" "$(human_bytes "${lv[1]}")" \
         "$(human_bytes "${lv[2]}")" "$(human_bytes "${lv[3]}")"
 }
 
@@ -2111,24 +2538,22 @@ core_label() {
     local v iv=''
     v=$(st ".core.$1")
     if [[ $MODE == modify ]]; then iv=$(installed_version "$1"); fi
-    if [[ -n $iv && ( $v == latest || $v == "$iv" ) ]]; then printf '%s' "$iv"
-    elif [[ $v == latest ]]; then printf '最新版'
-    else printf '%s' "$v"; fi
-}
-
-core_text() {
-    local -a o=()
-    if needs_xray; then o+=("Xray $(core_label xray)"); fi
-    if needs_ss_rust; then o+=("SS-Rust $(core_label ss)"); fi
-    join_by '，' "${o[@]}"
+    case $v in
+        compat) printf '兼容版 %s' "$XRAY_COMPAT_VERSION" ;;
+        latest)
+            [[ $(jq -r ".core.$1 // empty" "$STATE" 2>/dev/null) == latest ]] || iv=''
+            if [[ -n $iv ]]; then printf '最新版 %s' "$iv"; else printf '最新版'; fi ;;
+        *) printf '%s 固定' "$v" ;;
+    esac
 }
 
 system_summary() {
     local -a o=("$(outbound_label "$(st .outbound)")")
     if [[ $(st .bbr) == 1 ]]; then o+=('BBR 开'); else o+=('BBR 关'); fi
-    if scheme_has_reality "$(scheme)"; then o+=("$(st .reality.fp)"); fi
-    o+=("$(core_text)")
+    if scheme_has_reality "$(scheme)"; then o+=("指纹 $(st .reality.fp)"); fi
     join_by '，' "${o[@]}"
+    if needs_xray; then printf '\nXray %s' "$(core_label xray)"; fi
+    if needs_ss_rust; then printf '\nSS-Rust %s' "$(core_label ss)"; fi
 }
 
 node_name() { st '.name // "zxray"'; }
@@ -2173,33 +2598,36 @@ v6_links_on() {
 note_add() { PREVIEW_NOTES+=("$1"); }
 
 
-choose_scheme() {
-    local __cs_var=$1 __cs_def=${2:-1} __cs_k i
+CS_DEF=1 CS_MARK=0
+PV_KEYS=()
+declare -A PV_ORIG=()
+
+cs_build() {
+    local i
     local -a name=('RAW + Vision' 'XHTTP 单路' 'XHTTP 上下行分离' 'SS2022' 'VLESS-ENC'
         'SS2022 + VLESS-ENC' 'REALITY + SS + ENC' 'XHTTP + ENC 分离')
-    local -a note=('推荐，兼容性最好' '可选 XMUX，可叠加 VLESS 加密' '上下行走不同 IP，需要双栈'
-        '客户端支持最广' 'Xray 原生加密，抗量子握手' '两个入口，各给一条链接' '三个入口，各给一条链接'
-        '上下行走不同 IP，需要双栈')
-    local -a group=([0]='REALITY：借用伪装站点的证书' [3]='不需要伪装站点' [5]='多入口组合' [7]='实验')
+    local -a note=('推荐，各种客户端都能用' '可选 XMUX；sing-box 不支持' '需要双栈；sing-box 不支持'
+        '客户端支持最广' '抗量子握手；sing-box 不支持' '两个入口，各给一条链接' '三个入口，各给一条链接'
+        '需要双栈；sing-box 不支持')
+    local -a group=([0]='REALITY：借用伪装站点的 TLS 握手' [3]='不需要伪装站点' [5]='多入口组合' [7]='实验')
     ui_page '选择方案'
     for i in "${!SCHEMES[@]}"; do
         if [[ -n ${group[$i]:-} ]]; then
             (( i == 0 )) || ui_blank
             ui_group "${group[$i]}"
         fi
-        ui_option $(( i + 1 )) "${name[$i]}" "${note[$i]}" $(( i + 1 == __cs_def )) 20
+        tui_opt $(( i + 1 )) "${name[$i]}" "${note[$i]}" $(( i + 1 == CS_MARK )) 20
     done
-    ui_footer "1-${#SCHEMES[@]} 选择   回车 选 $__cs_def   0 返回"
-    while :; do
-        read_line '请选择：' __cs_k
-        [[ -n $__cs_k ]] || __cs_k=$__cs_def
-        if [[ $__cs_k == 0 ]]; then printf -v "$__cs_var" '%s' ''; return 0; fi
-        if [[ $__cs_k =~ ^[0-9]+$ ]] && (( __cs_k >= 1 && __cs_k <= ${#SCHEMES[@]} )); then
-            printf -v "$__cs_var" '%s' "${SCHEMES[$((__cs_k - 1))]}"
-            return 0
-        fi
-        ui_warn "请输入 1-${#SCHEMES[@]} 之间的编号。"
-    done
+    TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
+    TUI_FOOT_PLAIN="1-${#SCHEMES[@]} 选择   0 返回"
+}
+
+choose_scheme() {
+    local __cs_var=$1
+    CS_DEF=${2:-1} CS_MARK=${3:-0}
+    tui_menu cs_build $(( CS_DEF - 1 )) ''
+    if [[ $TUI_KEY == ENTER ]]; then printf -v "$__cs_var" '%s' "${SCHEMES[$TUI_CUR]}"
+    else printf -v "$__cs_var" '%s' ''; fi
 }
 
 scheme_index() {
@@ -2253,6 +2681,24 @@ item_label() {
     esac
 }
 
+item_help() {
+    case $1 in
+        port) printf '%s\n%s' '客户端连接用的端口。' '改了以后，客户端要重新导入节点。' ;;
+        sni) printf '%s\n%s' 'REALITY 借用这个网站的 TLS 握手，不合法的连接会转给它。' '更换后，客户端要重新导入节点。' ;;
+        addr) printf '%s' '写进节点链接的服务器地址：本机 IP，或解析到本机的域名。' ;;
+        name) printf '%s' '显示在客户端节点列表里，用来区分不同的服务器。' ;;
+        landings) printf '%s\n%s' '默认从本机直接出去。每添加一个落地，会多一条节点链接，' '用它的流量改从落地服务器出去。' ;;
+        xhttp) printf '%s' 'XHTTP 的路径、连接复用（XMUX），以及可叠加的 VLESS 加密。' ;;
+        split) printf '%s' '上传和下载分别走本机的 IPv4 和 IPv6。' ;;
+        ssm) printf '%s' 'SS2022 的加密方式。更换会生成新密码。' ;;
+        encp) printf '%s' 'VLESS 加密的握手方式、认证方式、外观和填充。' ;;
+        guard) printf '%s\n%s' 'SNI 不是伪装站点的连接直接断开，' '防止服务器被当成访问任意网站的跳板。' ;;
+        conn) printf '%s' 'Nginx 在验证之前限制并发连接，超出的直接断开。' ;;
+        limit) printf '%s\n%s' '被转给伪装站点的流量，传到一定量后限速，防止被偷流量。' '数值在预设附近随机微调，每台服务器都不一样。' ;;
+        system) printf '%s' '出站 IP、BBR、TLS 指纹、IPv6 链接、防火墙和核心版本。' ;;
+    esac
+}
+
 item_value() {
     local s v n
     s=$(scheme)
@@ -2292,7 +2738,7 @@ item_value() {
             n=$(jq '.landings | length' "$DRAFT")
             if (( n == 0 )); then printf '本机直连'; else printf '本机直连 + %d 个落地' "$n"; fi ;;
         xhttp)
-            v="XMUX $(xmux_label)"$'\t'"VLESS 加密"
+            v="XMUX $(xmux_label)，VLESS 加密"
             if [[ $(st .xhttp.enc) == 1 ]]; then v+=' 开'; else v+=' 关'; fi
             printf '%s\n路径 %s' "$v" "$(st .xhttp.path)" ;;
         split) printf '%s\t路径 %s' "$(split_label)" "$(st .xhttp.path)" ;;
@@ -2302,9 +2748,122 @@ item_value() {
             if [[ $(st .reality.guard) == nginx ]]; then printf 'Nginx 前置\t只放行伪装站点的 SNI'
             else printf 'Xray 内置\t只放行伪装站点的 SNI，无连接上限'; fi ;;
         conn) printf '每个 IP %s，总计 %s' "$(st .reality.conn_ip)" "$(st .reality.conn_total)" ;;
-        limit) printf '%s\t%s' "$(limit_label)" "$(limit_text)" ;;
+        limit) printf '%s\n' "$(limit_label)"; limit_text | sed 's/^/\t/' ;;
         system) system_summary ;;
     esac
+}
+
+same_item() {
+    local a=$2 b=$3
+    if [[ $1 == sni ]]; then first_value "$2" a; first_value "$3" b; fi
+    [[ $a == "$b" ]]
+}
+
+split_vn() {
+    local __sv_l=$1
+    printf -v "$2" '%s' "${__sv_l%%$'\t'*}"
+    if [[ $__sv_l == *$'\t'* ]]; then printf -v "$3" '%s' "${__sv_l#*$'\t'}"; else printf -v "$3" '%s' ''; fi
+}
+
+line_text() {
+    local __lt_v __lt_n
+    split_vn "$1" __lt_v __lt_n
+    __lt_v=${__lt_v:-$__lt_n}
+    printf -v "$2" '%s' "${__lt_v#"${__lt_v%%[! ]*}"}"
+}
+
+first_value() {
+    local __fv_l=${1%%$'\n'*}
+    printf -v "$2" '%s' "${__fv_l%%$'\t'*}"
+}
+
+pv_snapshot() {
+    local src=${1:-$DRAFT} saved=$DRAFT key
+    local -a rows=()
+    PV_ORIG=()
+    DRAFT=$src
+    mapfile -t rows < <(preview_items)
+    for key in "${rows[@]}"; do
+        [[ $key != @* ]] || continue
+        PV_ORIG[$key]=$(item_value "$key")
+    done
+    DRAFT=$saved
+    cp -f -- "$src" "$STAGE/pv-base.json"
+}
+
+link_fields() {
+    jq -S -c '{scheme, name, net: (.net | {host, v4, v6, v6_link}),
+        reality: (.reality | {port, sni, fp, public_key, short_id}), xhttp, enc: (.enc | del(.ticket)), ss,
+        users: [.users[] | {name, id, port}], landings: [.landings[] | .tag]}' "$1"
+}
+
+links_will_change() {
+    [[ -f $STAGE/pv-base.json ]] || return 0
+    [[ $(link_fields "$STAGE/pv-base.json") != "$(link_fields "$DRAFT")" ]]
+}
+
+pv_changed_count() {
+    local key n=0 cur
+    for key in "${PV_KEYS[@]}"; do
+        [[ -n ${PV_ORIG[$key]+x} ]] || continue
+        cur=$(item_value "$key")
+        same_item "$key" "$cur" "${PV_ORIG[$key]}" || n=$(( n + 1 ))
+    done
+    printf '%d' "$n"
+}
+
+pv_build() {
+    local key v note n=0 i full orig changed
+    local -a rows=() vals=() olds=()
+    mapfile -t rows < <(preview_items)
+    for key in "${rows[@]}"; do [[ $key == @* ]] || n=$(( n + 1 )); done
+    if [[ $MODE == modify ]]; then ui_page '当前配置' "$(scheme_label "$(scheme)")"
+    else ui_page '预览' "$(scheme_label "$(scheme)")"; fi
+    KEY_W=${#n}
+    PV_KEYS=()
+    for key in "${rows[@]}"; do
+        if [[ $key == @* ]]; then ui_group "${key#@}"; continue; fi
+        PV_KEYS+=("$key")
+        full=$(item_value "$key")
+        mapfile -t vals <<< "$full"
+        olds=()
+        changed=0
+        if [[ $MODE == modify && -n ${PV_ORIG[$key]+x} ]] && ! same_item "$key" "$full" "${PV_ORIG[$key]}"; then
+            changed=1
+            mapfile -t olds <<< "${PV_ORIG[$key]}"
+        fi
+        for i in "${!vals[@]}"; do
+            split_vn "${vals[$i]}" v note
+            if (( changed )) && { ! same_item "$key" "${vals[$i]}" "${olds[$i]:-}" || (( changed == 1 && i == ${#vals[@]} - 1 )); }; then
+                changed=2
+                first_value "${olds[$i]:-}" orig
+                note=${note#"${note%%[! ]*}"}
+                [[ -z $note ]] || v+=${v:+  }$note
+                v="$C_YELLOW* $v$C_RESET"
+                note=''
+                if (( i == 0 )) && [[ -n $orig && $orig != "${vals[$i]%%$'\t'*}" ]]; then note="原 $orig"; fi
+            fi
+            if (( i == 0 )); then tui_item "${#PV_KEYS[@]}" "$(item_label "$key")" "$v" "$note" "$(item_help "$key")"
+            else ui_cont "$v" "$note"; fi
+        done
+    done
+    if (( ${#PREVIEW_NOTES[@]} )); then
+        ui_blank
+        for i in "${!PREVIEW_NOTES[@]}"; do ui_warn "${PREVIEW_NOTES[$i]}"; done
+    fi
+    ui_rule
+    if [[ $MODE == modify ]]; then
+        i=$(pv_changed_count)
+        if (( i > 0 )); then v="已改 $i 项"; else v='还没有修改'; fi
+        tui_item a '应用修改' '' "$v" '把上面的设置写入服务器并重启服务，应用前会再确认一次。'
+        tui_item c '换方案' '' '重新选择方案，会生成全新的节点' '换成别的方案，现有节点会全部失效。'
+        TUI_FOOT_PLAIN="1-$n 修改   a 应用修改   c 换方案   0 返回"
+    else
+        tui_item y '开始安装' '' '确认无误后开始部署' '下载核心、生成配置并启动服务，大约需要一分钟。'
+        TUI_FOOT_PLAIN="1-$n 修改   y 开始安装   0 返回"
+    fi
+    TUI_HELP_H=2
+    TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
 }
 
 preview_ready() {
@@ -2331,59 +2890,109 @@ preview_ready() {
     return 0
 }
 
-preview_loop() {
-    local k i key n line v note
-    local -a rows=() keys=() vals=()
-    draft_watch_start
-    while :; do
-        mapfile -t rows < <(preview_items)
-        keys=()
-        if [[ $MODE == modify ]]; then ui_page '当前配置' "$(scheme_label "$(scheme)")"
-        else ui_page '预览' "$(scheme_label "$(scheme)")"; fi
-        n=$(printf '%s\n' "${rows[@]}" | grep -vc '^@' || true)
-        KEY_W=${#n}
-        for key in "${rows[@]}"; do
-            if [[ $key == @* ]]; then ui_group "${key#@}"; continue; fi
-            keys+=("$key")
-            mapfile -t vals < <(item_value "$key")
-            line=${vals[0]:-}
-            v=${line%%$'\t'*}; note=''; [[ $line != *$'\t'* ]] || note=${line#*$'\t'}
-            ui_item "${#keys[@]}" "$(item_label "$key")" "$v" "$note"
-            for line in "${vals[@]:1}"; do
-                v=${line%%$'\t'*}; note=''; [[ $line != *$'\t'* ]] || note=${line#*$'\t'}
-                ui_cont "$v" "$note"
+PC_TITLE='应用修改'
+
+pc_build() {
+    local key cur o v n=0 lab m i shown
+    local -a ol=() nl=()
+    ui_page "$PC_TITLE" "$(scheme_label "$(scheme)")"
+    if [[ $(jq -r .scheme "$STAGE/pv-base.json") != "$(scheme)" ]]; then
+        ui_kv '方案' "$(scheme_label "$(jq -r .scheme "$STAGE/pv-base.json")") -> $(scheme_label "$(scheme)")"
+        n=1
+    else
+        for key in "${PV_KEYS[@]}"; do
+            [[ -n ${PV_ORIG[$key]+x} ]] || continue
+            cur=$(item_value "$key")
+            ! same_item "$key" "$cur" "${PV_ORIG[$key]}" || continue
+            n=$(( n + 1 ))
+            mapfile -t ol <<< "${PV_ORIG[$key]}"
+            mapfile -t nl <<< "$cur"
+            lab=$(item_label "$key")
+            m=${#ol[@]}
+            (( ${#nl[@]} <= m )) || m=${#nl[@]}
+            shown=0
+            for (( i = 0; i < m; i++ )); do
+                if (( shown || i < m - 1 )) && same_item "$key" "${ol[$i]:-}" "${nl[$i]:-}"; then continue; fi
+                line_text "${ol[$i]:-}" o
+                line_text "${nl[$i]:-}" v
+                if [[ $o == "$v" ]]; then o=${ol[$i]//$'\t'/ } v=${nl[$i]//$'\t'/ }; fi
+                pc_row "$lab" "${o:-无}" "${v:-无}"
+                lab=''
+                shown=1
             done
         done
-        if (( ${#PREVIEW_NOTES[@]} )); then
-            ui_blank
-            for i in "${!PREVIEW_NOTES[@]}"; do ui_warn "${PREVIEW_NOTES[$i]}"; done
-        fi
-        n=${#keys[@]}
-        if [[ $MODE == modify ]]; then ui_footer "y 应用修改   1-$n 修改   c 换方案   0 返回"
-        else ui_footer "y 开始安装   1-$n 修改   0 返回"; fi
-        read_line '请选择：' k
-        case $k in
-            y|Y)
-                preview_ready || continue
-                draft_watch_stop
-                PREVIEW_RESULT=0
-                return 0 ;;
-            0)
+    fi
+    if (( n == 0 )); then ui_line '没有修改，会按当前设置重新生成配置并重启服务。'; fi
+    ui_blank
+    if links_will_change; then ui_warn '应用后节点链接会变，客户端需要重新导入。'
+    else ui_ok '节点链接不变，客户端不用改动。'; fi
+    if scheme_has_reality "$(scheme)" && core_breaks_singbox "$(st .core.xray)" \
+        && ! core_breaks_singbox "$(jq -r '.core.xray // "compat"' "$STAGE/pv-base.json")"; then
+        ui_warn '换用新核心后，sing-box 内核的客户端会连不上 REALITY。'
+    fi
+    ui_rule
+    tui_item 1 "$PC_TITLE" '' '写入配置并重启服务'
+    tui_item 2 '再看看' '' '回到上一页'
+    TUI_FOOT='上下键 移动   回车 确认   Esc 返回'
+    TUI_FOOT_PLAIN="1 $PC_TITLE   2 再看看"
+}
+
+core_breaks_singbox() {
+    case $1 in
+        compat) return 1 ;;
+        latest) return 0 ;;
+        *) ver_ge "${1#v}" "$XRAY_MLKEM_VERSION" ;;
+    esac
+}
+
+pc_row() {
+    local w
+    str_width "$2 -> $3" w
+    if (( w <= UI_W - 2 - LABEL_W )); then
+        ui_kv "$1" "$C_DIM$2$C_RESET -> $C_YELLOW$3$C_RESET"
+    else
+        ui_kv "$1" "$C_DIM原 $2$C_RESET"
+        ui_kv '' "$C_YELLOW改为 $3$C_RESET"
+    fi
+}
+
+pv_confirm() {
+    PC_TITLE=${1:-应用修改}
+    tui_menu pc_build 0 ''
+    [[ $TUI_KEY == ENTER && ${TUI_IKEYS[$TUI_CUR]} == 1 ]]
+}
+
+preview_loop() {
+    local key cur=0
+    draft_watch_start
+    if [[ $MODE == modify ]]; then pv_snapshot; else PV_ORIG=(); fi
+    while :; do
+        tui_menu pv_build "$cur" ''
+        cur=$TUI_CUR
+        case $TUI_KEY in
+            ESC)
                 confirm_discard '有修改还没应用，确定放弃' || continue
                 draft_watch_stop
                 PREVIEW_RESULT=1
                 return 0 ;;
-            c|C)
-                [[ $MODE == modify ]] || continue
-                confirm_discard '有修改还没应用，换方案会放弃这些修改，确定' || continue
-                draft_watch_stop
-                PREVIEW_RESULT=2
-                return 0 ;;
-            *)
-                if [[ $k =~ ^[0-9]+$ ]] && (( k >= 1 && k <= n )); then
-                    PREVIEW_NOTES=()
-                    "edit_${keys[$((k - 1))]}"
-                fi ;;
+            ENTER)
+                key=${TUI_IKEYS[$TUI_CUR]}
+                case $key in
+                    y|a)
+                        preview_ready || continue
+                        if [[ $MODE == modify ]]; then pv_confirm || continue; fi
+                        draft_watch_stop
+                        PREVIEW_RESULT=0
+                        return 0 ;;
+                    c)
+                        confirm_discard '有修改还没应用，换方案会放弃这些修改，确定' || continue
+                        draft_watch_stop
+                        PREVIEW_RESULT=2
+                        return 0 ;;
+                    *)
+                        PREVIEW_NOTES=()
+                        "edit_${PV_KEYS[$((key - 1))]}" ;;
+                esac ;;
         esac
     done
 }
@@ -2393,12 +3002,26 @@ confirm_identity_change() {
     ask_no "$1，客户端要重新导入节点。确定"
 }
 
+input_page() {
+    local title=$1 sub=$2 hint=$3
+    shift 3
+    ui_page "$title" "$sub"
+    [[ -z $hint ]] || ui_hint "$hint"
+    ui_blank
+    while (( $# >= 2 )); do
+        ui_kv "$1" "$2"
+        shift 2
+    done
+    if (( TUI )); then ui_footer '回车 确认，原样回车就是不改'
+    else ui_footer '回车 不改'; fi
+}
+
 
 ask_port() {
     local __ap_cur=$1 __ap_proto=$2 __ap_p __ap_x __ap_busy
     while :; do
-        read_line '新端口：' __ap_p
-        [[ -n $__ap_p ]] || { printf -v "$3" '%s' "$__ap_cur"; return 0; }
+        read_line '新端口：' __ap_p "$__ap_cur"
+        [[ -n $__ap_p && $__ap_p != "$__ap_cur" ]] || { printf -v "$3" '%s' "$__ap_cur"; return 0; }
         if [[ $__ap_p == r || $__ap_p == R ]]; then
             __ap_p=$(random_free_port)
             ui_note "随机选到 $__ap_p"
@@ -2424,7 +3047,7 @@ ask_port() {
 }
 
 edit_port() {
-    local s k p i n idx=0 proto=tcp cur
+    local s k p i n idx=0 proto=tcp cur hint
     local -a keys=() labels=() opts=()
     s=$(scheme)
     if scheme_has_reality "$s"; then keys+=(.reality.port); labels+=('REALITY'); fi
@@ -2444,14 +3067,10 @@ edit_port() {
     fi
     [[ ${keys[$idx]} != .ss.port && ${keys[$idx]} != .users* ]] || proto=both
     cur=$(st "${keys[$idx]}")
-    ui_page "端口" "${labels[$idx]}"
-    if [[ $proto == both ]]; then ui_hint '客户端连接用的端口，TCP 和 UDP 都会用到。'
-    else ui_hint '客户端连接用的 TCP 端口。'; fi
-    [[ $MODE != modify ]] || ui_hint '改了以后，客户端里这个节点的端口也要跟着改。'
-    ui_blank
-    ui_kv '当前' "$cur"
-    ui_kv '可以填' '1-65535' '或输入 r 随机选一个空闲端口'
-    ui_footer '回车 不改'
+    if [[ $proto == both ]]; then hint='客户端连接用的端口，TCP 和 UDP 都会用到。'
+    else hint='客户端连接用的 TCP 端口。'; fi
+    [[ $MODE != modify ]] || hint+=$'\n改了以后，客户端里这个节点的端口也要跟着改。'
+    input_page '端口' "${labels[$idx]}" "$hint" '当前' "$cur" '可以填' '1-65535，或输入 r 随机选一个空闲端口'
     ask_port "$cur" "$proto" p
     [[ $p != "$cur" ]] || return 0
     st_set "${keys[$idx]}" "$p"
@@ -2459,9 +3078,10 @@ edit_port() {
 }
 
 edit_sni() {
-    local c d
-    option_page c 0 '伪装站点' $'REALITY 借用这个网站的证书，没通过验证的连接会被转给它。\n要求支持 TLS 1.3 和 HTTP/2，离本机越近越好。' \
-        '自动挑选|从候选列表测速，选最快的可用站点' '手动输入|填写一个指定的域名' '候选列表|查看或修改自动挑选用的站点'
+    local c d cur
+    cur=$(st .reality.sni)
+    option_page c 0 '伪装站点' $'REALITY 借用这个网站的 TLS 握手，不合法的连接会转给它。\n要求支持 TLS 1.3 和 HTTP/2，离本机越近越好。' \
+        '自动挑选|同时测速候选站点，选最快的可用站点' '手动输入|填写一个指定的域名' '候选列表|查看或修改自动挑选用的站点'
     case $c in
         1)
             confirm_identity_change '更换伪装站点' || return 0
@@ -2475,10 +3095,10 @@ edit_sni() {
             fi ;;
         2)
             confirm_identity_change '更换伪装站点' || return 0
-            ui_blank
+            input_page '伪装站点' '手动输入' '只填域名，例如 www.example.com，不带 https:// 和路径。' '当前' "${cur:-未选择}"
             while :; do
-                read_line '域名（回车取消）：' d
-                [[ -n $d ]] || return 0
+                read_line '域名：' d "$cur"
+                [[ -n $d && $d != "$cur" ]] || return 0
                 d=${d,,}
                 if ! valid_domain "$d"; then ui_warn '只填域名，例如 www.example.com，不带 https:// 和路径。'; continue; fi
                 ui_note "正在检测 $d ..."
@@ -2497,21 +3117,17 @@ edit_addr() {
     local c v cur=0 host i
     local -a opts=() vals=()
     if scheme_is_split "$(scheme)"; then
-        ui_page '节点地址' '上下行分离'
-        ui_hint '上传和下载分别连本机的 IPv4 和 IPv6 地址。'
-        ui_blank
-        ui_kv '当前 IPv4' "$(st .net.v4 | grep . || printf '未填写')"
-        ui_kv '当前 IPv6' "$(st .net.v6 | grep . || printf '未填写')"
-        ui_footer '回车 不改'
+        input_page '节点地址' '上下行分离' '上传和下载分别连本机的 IPv4 和 IPv6 地址。' \
+            'IPv4' "$(st .net.v4 | grep . || printf '未填写')" 'IPv6' "$(st .net.v6 | grep . || printf '未填写')"
         while :; do
-            read_line '新的 IPv4：' v
-            [[ -n $v ]] || break
+            read_line 'IPv4：' v "$(st .net.v4)"
+            [[ -n $v && $v != "$(st .net.v4)" ]] || break
             if valid_ipv4 "$v"; then st_sets .net.v4 "$v"; st_set .net.manual 1; break; fi
             ui_warn 'IPv4 格式不正确。'
         done
         while :; do
-            read_line '新的 IPv6：' v
-            [[ -n $v ]] || break
+            read_line 'IPv6：' v "$(st .net.v6)"
+            [[ -n $v && $v != "$(st .net.v6)" ]] || break
             if valid_ipv6 "$v"; then st_sets .net.v6 "$v"; st_set .net.manual 1; break; fi
             ui_warn 'IPv6 格式不正确。'
         done
@@ -2523,28 +3139,26 @@ edit_addr() {
     for i in "${!vals[@]}"; do [[ ${vals[$i]} != "$host" ]] || cur=$(( i + 1 )); done
     if (( cur == 0 )) && [[ -n $host ]]; then opts+=("自定义|$host"); vals+=("$host"); cur=${#vals[@]}; fi
     opts+=('输入新地址|域名或 IP')
-    option_page c "$cur" '节点地址' '写进客户端链接的服务器地址：本机 IP，或已解析到本机的域名。' "${opts[@]}"
+    option_page c "$cur" '节点地址' '写进节点链接的服务器地址：本机 IP，或解析到本机的域名。' "${opts[@]}"
     [[ -n $c && $c != "$cur" ]] || return 0
     if (( c <= ${#vals[@]} )); then st_sets .net.host "${vals[$((c - 1))]}"; return 0; fi
-    ui_blank
+    input_page '节点地址' '输入新地址' '填写域名、IPv4 或 IPv6 地址。域名要已经解析到本机。' '当前' "${host:-未填写}"
     while :; do
-        read_line '域名或 IP（回车取消）：' v
-        [[ -n $v ]] || return 0
+        read_line '域名或 IP：' v "$host"
+        [[ -n $v && $v != "$host" ]] || return 0
         if valid_host "$v"; then st_sets .net.host "${v,,}"; return 0; fi
         ui_warn '格式不正确，请填写域名、IPv4 或 IPv6 地址。'
     done
 }
 
 edit_name() {
-    local v
-    ui_page '节点名称'
-    ui_hint $'显示在客户端节点列表里，有多台服务器时用来区分。\n可以用中文、字母、数字和横线，最长 24 个字符宽。'
-    ui_blank
-    ui_kv '当前' "$(node_name)" "$(name_example)"
-    ui_footer '回车 不改'
+    local v cur
+    cur=$(node_name)
+    input_page '节点名称' '' $'显示在客户端节点列表里，有多台服务器时用来区分。\n可以用中文、字母、数字和横线，最长 24 个字符宽。' \
+        '当前' "$cur" '链接名称' "$(name_example | sed 's/^链接里显示为 //')"
     while :; do
-        read_line '新名称：' v
-        [[ -n $v ]] || return 0
+        read_line '新名称：' v "$cur"
+        [[ -n $v && $v != "$cur" ]] || return 0
         if valid_node_name "$v"; then st_sets .name "$v"; return 0; fi
         ui_warn '名称不能有空格和 # ? & / \ % 引号，最长 24 个字符宽。'
     done
@@ -2554,51 +3168,54 @@ next_landing_index() {
     jq '[.landings[].tag | ltrimstr("landing") | tonumber] | (max // 0) + 1' "$DRAFT"
 }
 
+ld_build() {
+    local n i tag
+    n=$(jq '.landings | length' "$DRAFT")
+    ui_page '出口'
+    ui_hint $'默认所有流量从本机直接访问网站。每添加一个落地，\n会多生成一条节点链接，用它的流量改从落地服务器出去。'
+    ui_blank
+    KEY_W=${#n}
+    ui_item '' '直出' '本机' '默认出口'
+    for (( i = 0; i < n; i++ )); do
+        tag=$(jq -r ".landings[$i].tag" "$DRAFT")
+        tui_item "${tag#landing}" "$(landing_label "$tag")" \
+            "$(jq -r ".landings[$i] | \"\(.kind) \(.host):\(.port)\"" "$DRAFT")" \
+            "$(jq -r ".landings[$i].label // \"\"" "$DRAFT")" '回车可以删除这个落地。'
+    done
+    ui_blank
+    tui_item a '添加落地' '' 'ss:// 或 vless:// 链接' '支持 ss:// 和 vless://（TCP，无加密或 REALITY）。'
+    TUI_HELP_H=1
+    TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
+    if (( n > 0 )); then TUI_FOOT_PLAIN='a 添加落地   落地编号 删除   回车 返回'
+    else TUI_FOOT_PLAIN='a 添加落地   回车 返回'; fi
+}
+
 edit_landings() {
-    local c n i link idx tag
+    local n key link cur=0 tag
     while :; do
-        n=$(jq '.landings | length' "$DRAFT")
-        ui_page '出口'
-        ui_hint $'默认所有流量从本机直接访问网站。每添加一个落地，\n会多生成一条节点链接，用它的流量改从落地服务器出去。'
-        ui_blank
-        ui_kv '直出' '本机'
-        for (( i = 0; i < n; i++ )); do
-            ui_kv "$(landing_label "$(jq -r ".landings[$i].tag" "$DRAFT")")" \
-                "$(jq -r ".landings[$i] | \"\(.kind) \(.host):\(.port)\"" "$DRAFT")" \
-                "$(jq -r ".landings[$i].label // \"\"" "$DRAFT")"
-        done
-        if (( n > 0 )); then ui_footer 'a 添加落地   d 删除落地   回车 返回'
-        else ui_footer 'a 添加落地   回车 返回'; fi
-        read_line '请选择：' c
-        case $c in
-            a|A)
-                if (( n >= 10 )); then ui_warn '最多添加 10 个落地。'; ui_pause; continue; fi
-                ui_blank
-                ui_note '支持 ss:// 和 vless://（TCP，无加密或 REALITY）。'
-                while :; do
-                    read_line '落地链接（回车取消）：' link
-                    [[ -n $link ]] || break
-                    if parse_landing_link "$link"; then
-                        add_landing "$(normalize_link "$link")"
-                        break
-                    fi
-                    ui_warn "这个链接用不了：$PARSE_ERR"
-                done ;;
-            d|D)
-                (( n > 0 )) || continue
-                ui_blank
-                read_line '删除第几个落地（填编号，回车取消）：' idx
-                [[ $idx =~ ^[0-9]+$ ]] || continue
-                tag="landing$idx"
-                if [[ $(jq --arg t "$tag" '[.landings[] | select(.tag == $t)] | length' "$DRAFT") == 0 ]]; then
-                    ui_warn "没有落地 $idx。"
-                    ui_pause
-                    continue
+        tui_menu ld_build "$cur" ''
+        cur=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        key=${TUI_IKEYS[$TUI_CUR]}
+        if [[ $key == a ]]; then
+            n=$(jq '.landings | length' "$DRAFT")
+            if (( n >= 10 )); then TUI_MSG='最多添加 10 个落地。'; (( TUI )) || ui_warn "$TUI_MSG"; continue; fi
+            input_page '添加落地' '' $'粘贴落地服务器的分享链接。\n支持 ss:// 和 vless://（TCP，无加密或 REALITY）。'
+            while :; do
+                read_line '落地链接（回车取消）：' link
+                [[ -n $link ]] || break
+                if parse_landing_link "$link"; then
+                    add_landing "$(normalize_link "$link")"
+                    break
                 fi
-                st_filter --arg t "$tag" '.landings |= map(select(.tag != $t)) | .users |= map(select(.out != $t))' ;;
-            ''|0) return 0 ;;
-            *) ui_warn '请输入 a、d，或直接回车返回。'; ui_pause ;;
-        esac
+                ui_warn "这个链接用不了：$PARSE_ERR"
+            done
+        else
+            tag="landing$key"
+            ask_no "删除$(landing_label "$tag")（$(jq -r --arg t "$tag" '.landings[] | select(.tag == $t) | "\(.host):\(.port)"' "$DRAFT")）" || continue
+            st_filter --arg t "$tag" '.landings |= map(select(.tag != $t)) | .users |= map(select(.out != $t))'
+            cur=0
+        fi
     done
 }
 
@@ -2614,35 +3231,39 @@ add_landing() {
 }
 
 edit_path() {
-    local p
-    ui_page 'XHTTP 路径'
-    ui_hint '客户端请求用的路径，相当于一个暗号。'
-    [[ $MODE != modify ]] || ui_hint '改了以后，客户端需要重新导入节点。'
-    ui_blank
-    ui_kv '当前' "$(st .xhttp.path)"
-    ui_kv '可以填' '以 / 开头' '字母、数字、点、下划线、横线，最长 64 位'
-    ui_footer '回车 不改'
+    local p cur hint='客户端请求用的路径，相当于一个暗号。'
+    cur=$(st .xhttp.path)
+    [[ $MODE != modify ]] || hint+=$'\n改了以后，客户端需要重新导入节点。'
+    input_page 'XHTTP 路径' '' "$hint" '当前' "$cur" '可以填' '以 / 开头，字母、数字和 . _ - /，最长 64 位'
     while :; do
-        read_line '新路径：' p
-        [[ -n $p && $p != "$(st .xhttp.path)" ]] || return 0
+        read_line '新路径：' p "$cur"
+        [[ -n $p && $p != "$cur" ]] || return 0
         if [[ $p =~ ^/[A-Za-z0-9._/-]{1,64}$ ]]; then st_sets .xhttp.path "$p"; return 0; fi
         ui_warn '格式不对：以 / 开头，只用字母、数字和 . _ - /'
     done
 }
 
+xh_build() {
+    local v
+    ui_page 'XHTTP 传输'
+    tui_item 1 '路径' "$(st .xhttp.path)" '' '客户端请求用的路径，相当于一个暗号。'
+    tui_item 2 'XMUX' "$(xmux_label)" '客户端复用连接的方式' '控制客户端怎样复用连接，参数写进节点链接，只在客户端生效。'
+    if [[ $(st .xhttp.enc) == 1 ]]; then v='开'; else v='关'; fi
+    tui_item 3 'VLESS 加密' "$v" '在 REALITY 之外再加一层加密' '在 REALITY 之外再加一层 VLESS 加密，客户端需要支持。'
+    if [[ $(st .xhttp.enc) == 1 ]]; then
+        tui_item 4 '加密参数' "$(enc_summary)" "$(enc_detail)" 'VLESS 加密的握手方式、认证方式、外观和填充。'
+    fi
+    TUI_HELP_H=1
+    TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
+}
+
 edit_xhttp() {
-    local c v n
+    local c v cur=0
     while :; do
-        ui_page 'XHTTP 传输'
-        ui_item 1 '路径' "$(st .xhttp.path)"
-        ui_item 2 'XMUX' "$(xmux_label)" '客户端复用连接的方式'
-        if [[ $(st .xhttp.enc) == 1 ]]; then v='开'; else v='关'; fi
-        ui_item 3 'VLESS 加密' "$v" '在 REALITY 之外再加一层加密'
-        n=3
-        if [[ $(st .xhttp.enc) == 1 ]]; then ui_item 4 '加密参数' "$(enc_summary)" "$(enc_detail)"; n=4; fi
-        ui_footer "1-$n 修改   回车 返回"
-        menu_pick c "$n"
-        case $c in
+        tui_menu xh_build "$cur" ''
+        cur=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        case ${TUI_IKEYS[$TUI_CUR]} in
             1) edit_path ;;
             2) edit_xmux ;;
             3)
@@ -2653,13 +3274,12 @@ edit_xhttp() {
                 confirm_identity_change '切换 VLESS 加密' || continue
                 st_set .xhttp.enc "$(( c - 1 ))" ;;
             4) edit_encp ;;
-            '') return 0 ;;
         esac
     done
 }
 
 edit_xmux() {
-    local c r s cur
+    local c r s cur r0 s0
     cur=$(xmux_mode_index)
     option_page c "$cur" 'XMUX' '控制客户端怎样复用连接。参数写进节点链接，只在客户端生效。' \
         '客户端默认|推荐' '按并发数|每条连接最多承载几路请求' '按连接数|最多开几条底层连接'
@@ -2668,16 +3288,20 @@ edit_xmux() {
     case $c in
         1) st_set .xhttp.xmux null ;;
         2|3)
-            ui_blank
+            r0=$(jq -r '.xhttp.xmux | (.maxConcurrency // .maxConnections // "") ' "$DRAFT")
+            s0=$(jq -r '.xhttp.xmux.hMaxReusableSecs // "1800-3000"' "$DRAFT")
+            [[ $c == "$cur" ]] || r0=''
+            if [[ $c == 2 ]]; then input_page 'XMUX' '按并发数' '每条底层连接最多同时承载几路请求，可以填数字或区间。'
+            else input_page 'XMUX' '按连接数' '客户端最多开几条底层连接，可以填数字或区间。'; fi
             while :; do
-                if [[ $c == 2 ]]; then read_line '每条连接承载几路（例如 16-32）：' r
-                else read_line '底层连接数（例如 2-4）：' r; fi
+                if [[ $c == 2 ]]; then read_line '每条连接承载几路（例如 16-32）：' r "${r0:-16-32}"
+                else read_line '底层连接数（例如 2-4）：' r "${r0:-2-4}"; fi
                 [[ -n $r ]] || return 0
                 [[ $r =~ ^[0-9]{1,4}(-[0-9]{1,4})?$ ]] && break
                 ui_warn '请填写数字或区间，例如 16-32。'
             done
             while :; do
-                read_line '每条连接最长复用几秒（回车用 1800-3000）：' s
+                read_line '每条连接最长复用几秒：' s "$s0"
                 [[ -n $s ]] || s=1800-3000
                 [[ $s =~ ^[0-9]{1,6}(-[0-9]{1,6})?$ ]] && break
                 ui_warn '请填写数字或区间，例如 1800-3000。'
@@ -2690,17 +3314,22 @@ edit_xmux() {
     esac
 }
 
+sp2_build() {
+    ui_page '上下行分离'
+    ui_hint $'上传和下载分别走本机的 IPv4 和 IPv6，\n客户端也要同时有 IPv4 和 IPv6。'
+    ui_blank
+    tui_item 1 '方向' "$(split_label)"
+    tui_item 2 '路径' "$(st .xhttp.path)"
+    TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
+}
+
 edit_split() {
-    local c cur
+    local c cur sel=0
     while :; do
-        ui_page '上下行分离'
-        ui_hint $'上传和下载分别走本机的 IPv4 和 IPv6，\n客户端也要同时有 IPv4 和 IPv6。'
-        ui_blank
-        ui_item 1 '方向' "$(split_label)"
-        ui_item 2 '路径' "$(st .xhttp.path)"
-        ui_footer '1-2 修改   回车 返回'
-        menu_pick c 2
-        case $c in
+        tui_menu sp2_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        case ${TUI_IKEYS[$TUI_CUR]} in
             1)
                 cur=1; [[ $(st .xhttp.split) == v6_up_v4_down ]] || cur=2
                 option_page c "$cur" '方向' '' 'IPv6 上行|IPv4 下行' 'IPv4 上行|IPv6 下行'
@@ -2708,7 +3337,6 @@ edit_split() {
                 confirm_identity_change '更换方向' || continue
                 if [[ $c == 1 ]]; then st_sets .xhttp.split v6_up_v4_down; else st_sets .xhttp.split v4_up_v6_down; fi ;;
             2) edit_path ;;
-            '') return 0 ;;
         esac
     done
 }
@@ -2725,18 +3353,24 @@ edit_ssm() {
     if [[ $(scheme) == ss ]]; then st_filter '.users |= map(if .name != "direct" then .id = "" else . end)'; fi
 }
 
+ec_build() {
+    ui_page 'VLESS-ENC 参数'
+    tui_item 1 '握手方式' "$(rtt_label "$(st .enc.rtt)")" '' '0-RTT 复用会话票据，重连更快；1-RTT 每次完整握手。'
+    tui_item 2 '认证方式' "$(auth_label "$(st .enc.auth)")" '' 'X25519 密钥短；ML-KEM-768 抗量子，但链接会长很多。'
+    tui_item 3 '握手外观' "$(st .enc.shape)" '' '握手数据在网络上看起来的样子。'
+    tui_item 4 '填充' "$(pad_label "$(st .enc.pad)")" '' '在握手数据里加入随机长度的填充。'
+    tui_item 5 '票据有效期' "$(st .enc.ticket | tr -d s) 秒" '只影响服务端' '0-RTT 会话票据在服务端保留多久。'
+    TUI_HELP_H=1
+    TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
+}
+
 edit_encp() {
-    local c v cur
+    local v cur sel=0
     while :; do
-        ui_page 'VLESS-ENC 参数'
-        ui_item 1 '握手方式' "$(rtt_label "$(st .enc.rtt)")"
-        ui_item 2 '认证方式' "$(auth_label "$(st .enc.auth)")"
-        ui_item 3 '握手外观' "$(st .enc.shape)"
-        ui_item 4 '填充' "$(pad_label "$(st .enc.pad)")"
-        ui_item 5 '票据有效期' "$(st .enc.ticket | tr -d s) 秒" '只影响服务端'
-        ui_footer '1-5 修改   回车 返回'
-        menu_pick c 5
-        case $c in
+        tui_menu ec_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        case ${TUI_IKEYS[$TUI_CUR]} in
             1)
                 cur=1; [[ $(st .enc.rtt) != 1rtt ]] || cur=2
                 option_page v "$cur" '握手方式' '' '0-RTT|复用会话票据，重连更快' '1-RTT|每次都完整握手'
@@ -2759,15 +3393,10 @@ edit_encp() {
                 case $v in 1) st_sets .enc.shape random ;; 2) st_sets .enc.shape xorpub ;; 3) st_sets .enc.shape native ;; esac ;;
             4) edit_padding ;;
             5)
-                ui_page '票据有效期'
-                ui_hint $'0-RTT 会话票据在服务端保留多久。\n只影响服务端，客户端不用重新导入。'
-                ui_blank
-                ui_kv '当前' "$(st .enc.ticket | tr -d s) 秒"
-                ui_kv '可以填' '1-86400 秒'
-                ui_footer '回车 不改'
-                ask_number '新的有效期（秒）' 1 86400 "$(st .enc.ticket | tr -d s)" v
+                input_page '票据有效期' '' $'0-RTT 会话票据在服务端保留多久。\n只影响服务端，客户端不用重新导入。' \
+                    '当前' "$(st .enc.ticket | tr -d s) 秒" '可以填' '1-86400 秒'
+                ask_number '有效期（秒）' 1 86400 "$(st .enc.ticket | tr -d s)" v
                 st_sets .enc.ticket "${v}s" ;;
-            '') return 0 ;;
         esac
     done
 }
@@ -2785,16 +3414,15 @@ edit_padding() {
         2) st_sets .enc.pad gentle ;;
         3) st_sets .enc.pad aggressive ;;
         4)
-            ui_blank
-            ui_hint $'格式：多段「概率-最小-最大」用点连接，\n第一段概率须为 100，长度不小于 35。'
+            input_page '填充' '自定义' $'格式：多段「概率-最小-最大」用点连接，\n第一段概率须为 100，长度不小于 35。'
             while :; do
-                read_line '客户端规则（例如 100-96-768.60-0-80）：' p
+                read_line '客户端规则：' p "$(st .enc.pad_client | grep . || printf '100-96-768.60-0-80')"
                 [[ -n $p ]] || return 0
                 valid_padding "$p" && break
                 ui_warn '格式不正确。'
             done
             while :; do
-                read_line '服务端规则：' q
+                read_line '服务端规则：' q "$(st .enc.pad_server | grep . || printf '100-128-1024.70-0-96')"
                 [[ -n $q ]] || return 0
                 valid_padding "$q" && break
                 ui_warn '格式不正确。'
@@ -2819,16 +3447,12 @@ edit_guard() {
 
 edit_conn() {
     local a b total
-    ui_page '连接上限'
-    ui_hint $'Nginx 在验证之前限制并发连接，超出的直接断开。\n对正常客户端同样生效，多人共用时请适当调大。'
-    ui_blank
-    ui_kv '每个 IP' "$(st .reality.conn_ip)" '可以填 16-65535'
-    ui_kv '总计' "$(st .reality.conn_total)" '不能小于每个 IP 的上限'
-    ui_footer '回车 不改'
+    input_page '连接上限' '' $'Nginx 在验证之前限制并发连接，超出的直接断开。\n对正常客户端同样生效，多人共用时请适当调大。' \
+        '每个 IP' "$(st .reality.conn_ip)，可以填 16-65535" '总计' "$(st .reality.conn_total)，不能小于每个 IP 的上限"
     ask_number '每个 IP 最多几条' 16 65535 "$(st .reality.conn_ip)" a
     total=$(st .reality.conn_total)
     (( total >= a )) || total=$a
-    ask_number "总计最多几条（回车用 $total）" "$a" 65535 "$total" b
+    ask_number '总计最多几条' "$a" 65535 "$total" b
     st_set .reality.conn_ip "$a"
     st_set .reality.conn_total "$b"
 }
@@ -2836,58 +3460,66 @@ edit_conn() {
 edit_limit() {
     local c ua ur da dr cur
     index_of cur "$(st .reality.limit)" orig std custom
-    option_page c "$cur" '回落限速' $'没通过验证、被转给伪装站点的流量，传到一定量后限速，\n防止服务器被当成免费通道。不影响正常客户端。' \
-        "严格|$(limit_text '8192 1024 32768 2048')" "宽松|$(limit_text '262144 32768 1048576 65536')" '自定义|分别填写 4 个数值'
+    option_page c "$cur" '回落限速' $'被转给伪装站点的流量，传到一定量后限速，防止被偷流量。\n数值在预设附近随机微调，每台服务器都不一样。' \
+        "严格|$(limit_text "$(limit_preset orig)")" "宽松|$(limit_text "$(limit_preset std)")" '自定义|分别填写 4 个数值'
     [[ -n $c ]] || return 0
     if [[ $c == "$cur" && $c != 3 ]]; then return 0; fi
     case $c in
         1) st_sets .reality.limit orig ;;
         2) st_sets .reality.limit std ;;
         3)
-            ui_page '回落限速' '自定义'
-            ui_hint $'单位是字节，1K = 1024，1M = 1048576。\n直接回车沿用括号里的值。'
-            ui_blank
-            ask_number "上行传多少后开始限速（$(st .reality.limit_custom.ua)）" 0 104857600 "$(st .reality.limit_custom.ua)" ua
-            ask_number "上行限速每秒多少（$(st .reality.limit_custom.ur)）" 1 104857600 "$(st .reality.limit_custom.ur)" ur
-            ask_number "下行传多少后开始限速（$(st .reality.limit_custom.da)）" 0 104857600 "$(st .reality.limit_custom.da)" da
-            ask_number "下行限速每秒多少（$(st .reality.limit_custom.dr)）" 1 104857600 "$(st .reality.limit_custom.dr)" dr
+            input_page '回落限速' '自定义' '单位是字节，1K = 1024，1M = 1048576。'
+            ask_number '上行传多少字节后开始限速' 0 104857600 "$(st .reality.limit_custom.ua)" ua
+            ask_number '上行限速每秒多少字节' 1 104857600 "$(st .reality.limit_custom.ur)" ur
+            ask_number '下行传多少字节后开始限速' 0 104857600 "$(st .reality.limit_custom.da)" da
+            ask_number '下行限速每秒多少字节' 1 104857600 "$(st .reality.limit_custom.dr)" dr
             st_set .reality.limit_custom "$(jq -cn --argjson a "$ua" --argjson b "$ur" --argjson c "$da" --argjson d "$dr" \
                 '{ua:$a, ur:$b, da:$c, dr:$d}')"
             st_sets .reality.limit custom ;;
     esac
 }
 
+SYS_KEYS=()
+
+sy_build() {
+    local v fw
+    ui_page '高级设置'
+    SYS_KEYS=(outbound bbr)
+    tui_item 1 '出站 IP' "$(outbound_label "$(st .outbound)")" '访问网站时用哪种 IP' '服务器访问目标网站时先用哪种 IP。'
+    if [[ $(st .bbr) == 1 ]]; then v='开'; else v='关'; fi
+    tui_item 2 'BBR' "$v" 'TCP 拥塞控制' '通常能提升高延迟、有丢包线路的速度。'
+    if scheme_has_reality "$(scheme)"; then
+        SYS_KEYS+=(fp)
+        tui_item "${#SYS_KEYS[@]}" 'TLS 指纹' "$(st .reality.fp)" '客户端模仿的浏览器' 'chrome 兼容性最好，各种客户端都能用。'
+    fi
+    if [[ -n $(st .net.v6) ]] && ! scheme_is_split "$(scheme)"; then
+        SYS_KEYS+=(v6link)
+        if [[ $(st '.net.v6_link // 1') == 1 ]]; then v='附带'; else v='不附带'; fi
+        tui_item "${#SYS_KEYS[@]}" 'IPv6 链接' "$v" '每个节点另给一条 IPv6 链接' '本机有 IPv6 时，每个节点另外生成一条用 IPv6 连接的链接。'
+    fi
+    fw=$(fw_kind)
+    if [[ -n $fw ]]; then
+        SYS_KEYS+=(firewall)
+        if [[ $(st '.firewall // "auto"') == auto ]]; then v='自动放行'; else v='不处理'; fi
+        tui_item "${#SYS_KEYS[@]}" '防火墙' "$v" "本机 $fw 已启用" '自动放行用到的端口，改端口时同步，卸载时撤销。'
+    fi
+    SYS_KEYS+=(core)
+    local -a cl=()
+    if needs_xray; then cl+=("Xray $(core_label xray)"); fi
+    if needs_ss_rust; then cl+=("SS-Rust $(core_label ss)"); fi
+    tui_item "${#SYS_KEYS[@]}" '核心版本' "${cl[0]:-}" '' '兼容版 sing-box 也能连；最新版含预发布，sing-box 连不上。'
+    for v in "${cl[@]:1}"; do ui_cont "$v"; done
+    TUI_HELP_H=1
+    TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
+}
+
 edit_system() {
-    local c v n fw
-    local -a keys=()
+    local sel=0
     while :; do
-        ui_page '高级设置'
-        keys=(outbound bbr)
-        ui_item 1 '出站 IP' "$(outbound_label "$(st .outbound)")" '访问网站时用哪种 IP'
-        if [[ $(st .bbr) == 1 ]]; then v='开'; else v='关'; fi
-        ui_item 2 'BBR' "$v" 'TCP 拥塞控制'
-        if scheme_has_reality "$(scheme)"; then
-            keys+=(fp)
-            ui_item "${#keys[@]}" 'TLS 指纹' "$(st .reality.fp)" '客户端模仿的浏览器'
-        fi
-        if [[ -n $(st .net.v6) ]] && ! scheme_is_split "$(scheme)"; then
-            keys+=(v6link)
-            if [[ $(st '.net.v6_link // 1') == 1 ]]; then v='附带'; else v='不附带'; fi
-            ui_item "${#keys[@]}" 'IPv6 链接' "$v" '每个节点另给一条 IPv6 链接'
-        fi
-        fw=$(fw_kind)
-        if [[ -n $fw ]]; then
-            keys+=(firewall)
-            if [[ $(st '.firewall // "auto"') == auto ]]; then v='自动放行'; else v='不处理'; fi
-            ui_item "${#keys[@]}" '防火墙' "$v" "本机 $fw 已启用"
-        fi
-        keys+=(core)
-        ui_item "${#keys[@]}" '核心版本' "$(core_text)"
-        n=${#keys[@]}
-        ui_footer "1-$n 修改   回车 返回"
-        menu_pick c "$n"
-        [[ -n $c ]] || return 0
-        "edit_${keys[$((c - 1))]}"
+        tui_menu sy_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        "edit_${SYS_KEYS[$TUI_CUR]}"
     done
 }
 
@@ -2919,18 +3551,18 @@ edit_bbr() {
 }
 
 edit_fp() {
-    local c cur
-    local -a fps=(firefox chrome safari edge)
-    index_of cur "$(st .reality.fp)" "${fps[@]}"
-    option_page c "$cur" 'TLS 指纹' '客户端连接时模仿哪种浏览器，写进节点链接。' "${fps[@]}"
+    local c cur=0
+    case $(st .reality.fp) in chrome) cur=1 ;; firefox) cur=2 ;; esac
+    option_page c "$cur" 'TLS 指纹' $'客户端连接时模仿哪种浏览器，写进节点链接。\n其他指纹在新版服务端上会被拒绝，所以只保留这两种。' \
+        'chrome|推荐，各种客户端都能用' 'firefox|最新版核心下，需要 Xray 26.3.27 以上的客户端'
     [[ -n $c && $c != "$cur" ]] || return 0
-    st_sets .reality.fp "${fps[$((c - 1))]}"
+    if [[ $c == 1 ]]; then st_sets .reality.fp chrome; else st_sets .reality.fp firefox; fi
 }
 
 edit_v6link() {
     local c cur=1
     [[ $(st '.net.v6_link // 1') == 1 ]] || cur=2
-    option_page c "$cur" 'IPv6 链接' '本机有 IPv6 时，可以给每个节点另外生成一条用 IPv6 地址连接的链接。' \
+    option_page c "$cur" 'IPv6 链接' '本机有 IPv6 时，给每个节点另外生成一条用 IPv6 连接的链接。' \
         '附带|IPv4 和 IPv6 各一条' '不附带|只生成节点地址那一条'
     [[ -n $c && $c != "$cur" ]] || return 0
     if [[ $c == 1 ]]; then st_set .net.v6_link 1; else st_set .net.v6_link 0; fi
@@ -2946,29 +3578,56 @@ edit_firewall() {
     if [[ $c == 1 ]]; then st_sets .firewall auto; else st_sets .firewall off; fi
 }
 
-edit_core() {
-    local v w name
-    local -a which=()
-    if needs_xray; then which+=(xray); fi
-    if needs_ss_rust; then which+=(ss); fi
+co_build() {
     ui_page '核心版本'
-    ui_hint '填 latest 跟随最新正式版，或填版本号，例如 v26.3.27。'
-    ui_blank
-    for w in "${which[@]}"; do
-        if [[ $w == xray ]]; then name=Xray; else name=SS-Rust; fi
-        v=''
-        [[ $MODE != modify ]] || v=$(installed_version "$w")
-        ui_kv "$name" "$(st ".core.$w")" "${v:+正在运行 $v}"
+    if needs_xray; then tui_item 1 'Xray' "$(core_label xray)" '' '兼容版 sing-box 也能连；最新版只用发布满 3 天的版本。'; fi
+    if needs_ss_rust; then tui_item 2 'SS-Rust' "$(core_label ss)" '' '跟随 shadowsocks-rust 的正式版，或固定一个版本。'; fi
+    TUI_HELP_H=1
+    TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
+}
+
+ask_core_version() {
+    local __av_cur=$1 __av_v
+    while :; do
+        read_line '版本号：' __av_v "$__av_cur"
+        [[ -n $__av_v ]] || return 1
+        if [[ $__av_v =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]]; then printf -v "$2" '%s' "$(normalize_tag "$__av_v")"; return 0; fi
+        ui_warn '版本号格式不正确，例如 v26.7.28。'
     done
-    ui_footer '回车 不改'
-    for w in "${which[@]}"; do
-        if [[ $w == xray ]]; then name=Xray; else name=SS-Rust; fi
-        while :; do
-            read_line "$name 版本：" v
-            [[ -n $v ]] || break
-            if [[ $v == latest || $v =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]]; then st_sets ".core.$w" "$(normalize_tag "$v")"; break; fi
-            ui_warn '版本号格式不正确，例如 v26.3.27。'
-        done
+}
+
+edit_core() {
+    local c cur v sel=0 iv
+    while :; do
+        tui_menu co_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        if [[ ${TUI_IKEYS[$TUI_CUR]} == 1 ]]; then
+            case $(st .core.xray) in compat) cur=1 ;; latest) cur=2 ;; *) cur=3 ;; esac
+            option_page c "$cur" 'Xray 版本' $'最新版的 REALITY 会拒绝不带抗量子密钥的握手，\nsing-box 内核的客户端因此连不上。' \
+                "兼容版|$XRAY_COMPAT_VERSION，sing-box 也能连，推荐" "最新版|含预发布，只用发布满 $XRAY_SETTLE_DAYS 天的" '指定版本|填写一个版本号'
+            [[ -n $c ]] || continue
+            case $c in
+                1) st_sets .core.xray compat ;;
+                2) st_sets .core.xray latest ;;
+                3)
+                    iv=$(installed_version xray)
+                    [[ $(st .core.xray) == compat || $(st .core.xray) == latest ]] || iv=$(st .core.xray)
+                    input_page 'Xray 版本' '指定版本' "填写 Xray 的版本号，例如 $XRAY_COMPAT_VERSION。最低 v$XRAY_MIN_VERSION。"
+                    ask_core_version "${iv:-$XRAY_COMPAT_VERSION}" v || continue
+                    if ! ver_ge "${v#v}" "$XRAY_MIN_VERSION"; then ui_warn "最低需要 v$XRAY_MIN_VERSION。"; ui_pause; continue; fi
+                    st_sets .core.xray "$v" ;;
+            esac
+        else
+            cur=1; [[ $(st .core.ss) == latest ]] || cur=2
+            option_page c "$cur" 'SS-Rust 版本' '' '最新版|跟随正式版' '指定版本|填写一个版本号'
+            [[ -n $c ]] || continue
+            if [[ $c == 1 ]]; then st_sets .core.ss latest; continue; fi
+            input_page 'SS-Rust 版本' '指定版本' '填写 shadowsocks-rust 的版本号，例如 v1.24.0。'
+            iv=$(installed_version ss)
+            ask_core_version "${iv:-v1.24.0}" v || continue
+            st_sets .core.ss "$v"
+        fi
     done
 }
 
@@ -2979,6 +3638,7 @@ block_rules_json() {
     jq -cn '[
       {type:"field", domain:["full:localhost","full:localhost.localdomain"], outboundTag:"blocked"},
       {type:"field", network:"tcp", port:"25,465,587,2525", outboundTag:"blocked"},
+      {type:"field", network:"udp", port:"443", outboundTag:"blocked"},
       {type:"field", ip:["geoip:private","0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16",
         "172.16.0.0/12","192.0.0.0/24","192.0.2.0/24","192.168.0.0/16","198.18.0.0/15","198.51.100.0/24",
         "203.0.113.0/24","224.0.0.0/4","240.0.0.0/4","255.255.255.255/32","::/128","::1/128","fc00::/7",
@@ -3018,7 +3678,7 @@ render_xray_config() {
             --argjson ua "${lv[0]}" --argjson ur "${lv[1]}" --argjson da "${lv[2]}" --argjson dr "${lv[3]}" '
             {network: $net, security: "reality",
              realitySettings: {show: false, target: (if $guard == "nginx" then ($sni + ":443") else $gate end),
-                serverNames: [$sni], privateKey: $key, shortIds: [$sid],
+                serverNames: [$sni], privateKey: $key, shortIds: [$sid], minClientVer: "0.0.0",
                 limitFallbackUpload: {afterBytes: $ua, bytesPerSec: $ur, burstBytesPerSec: 0},
                 limitFallbackDownload: {afterBytes: $da, bytesPerSec: $dr, burstBytesPerSec: 0}}}
             + (if $net == "xhttp" then {xhttpSettings: {path: $path, mode: "auto"}} else {} end)
@@ -3384,13 +4044,14 @@ render_info() {
         if scheme_has_reality "$s"; then
             if [[ $(st .reality.guard) == nginx ]]; then printf '防护    Nginx SNI 过滤 + 回落限速\n'
             else printf '防护    Xray 内置 SNI 过滤 + 回落限速\n'; fi
-            printf '限速    %s\n' "$(limit_text)"
+            limit_text | sed '1s/^/限速    /; 2,$s/^/        /'
+            printf '\n'
         fi
         if [[ $(scheme_transport "$s") == xhttp ]]; then
             printf 'XHTTP   请使用 Xray 内核客户端，不要开启通用 Mux.cool\n'
         fi
         if [[ $s == ss && $(ss_core) == ss-rust ]]; then
-            printf 'SS-Rust 已拦截私网地址；不含 Xray 的 SMTP 端口拦截\n'
+            printf 'SS-Rust 已拦截私网地址；不含 Xray 的 SMTP 端口和 UDP 443 拦截\n'
         fi
     } > "$out"
 }
@@ -3398,18 +4059,28 @@ render_info() {
 
 installed_version() { jq -r ".installed.$1 // empty" "$STATE" 2>/dev/null || true; }
 
+core_satisfied() {
+    local which=$1 want cur old
+    state_ok || return 1
+    want=$(st ".core.$which")
+    cur=$(installed_version "$which")
+    old=$(jq -r ".core.$which // empty" "$STATE" 2>/dev/null || true)
+    [[ -n $cur ]] || return 1
+    case $want in
+        compat) [[ $cur == "$XRAY_COMPAT_VERSION" ]] ;;
+        latest) [[ $old == latest ]] ;;
+        *) [[ ${cur#v} == "${want#v}" ]] ;;
+    esac
+}
+
 plan_cores() {
     USE_XRAY='' USE_SS='' NEW_XRAY=0 NEW_SS=0
-    local want cur
     if needs_xray; then
-        want=$(st .core.xray); cur=$(installed_version xray)
-        if [[ $MODE == modify && -x $XRAY_BIN && -n $cur && ( $want == latest || $want == "$cur" ) ]]; then
-            USE_XRAY=$XRAY_BIN USE_XRAY_ASSET=$XRAY_ASSET_DIR
+        if [[ -x $XRAY_BIN ]] && core_satisfied xray; then USE_XRAY=$XRAY_BIN USE_XRAY_ASSET=$XRAY_ASSET_DIR
         else NEW_XRAY=1; fi
     fi
     if needs_ss_rust; then
-        want=$(st .core.ss); cur=$(installed_version ss)
-        if [[ $MODE == modify && -x $SS_BIN && -n $cur && ( $want == latest || $want == "$cur" ) ]]; then USE_SS=$SS_BIN
+        if [[ -x $SS_BIN ]] && core_satisfied ss; then USE_SS=$SS_BIN
         else NEW_SS=1; fi
     fi
 }
@@ -3793,6 +4464,7 @@ apply_draft() {
     health_check
     record_installed_versions
     record_created_dirs
+    save_prev_state
     atomic_install "$DRAFT" "$STATE" 600
     ui_step_done
 
@@ -3850,6 +4522,21 @@ release_extra_packages() {
 }
 
 state_ok() { [[ -f $STATE ]] && [[ $(jq -r '.schema // 0' "$STATE" 2>/dev/null) == "$STATE_SCHEMA" ]]; }
+
+migrate_state() {
+    [[ -f $STATE ]] || return 0
+    [[ $(jq -r '.schema // 0' "$STATE" 2>/dev/null || true) == 4 ]] || return 0
+    local tmp
+    tmp=$(mktemp "$STATE.XXXXXX")
+    if jq --argjson s "$STATE_SCHEMA" --argjson j "$(limit_jitter_new)" '.schema = $s
+        | (if .core.xray == "latest" then .core.xray = "compat" else . end)
+        | .reality.limit_jitter = (.reality.limit_jitter // $j)' "$STATE" > "$tmp"; then
+        chmod 600 "$tmp"
+        mv -f -- "$tmp" "$STATE"
+    else
+        rm -f -- "$tmp"
+    fi
+}
 
 foreign_install_present() {
     state_ok && return 1
@@ -3960,8 +4647,9 @@ action_install() {
     ui_line '正在检测本机公网地址...'
     detect_public_ips
     DRAFT=$STAGE/draft.json
-    local def=1
+    local def=1 curidx=0
     if state_ok; then
+        curidx=$(scheme_index "$(jq -r .scheme "$STATE")")
         MODE=modify
         load_state_draft
         PREVIEW_NOTES=()
@@ -3977,7 +4665,7 @@ action_install() {
     while :; do
         MODE=new
         local s
-        choose_scheme s "$def"
+        choose_scheme s "$def" "$curidx"
         [[ -n $s ]] || exit "$RC_QUIET"
         if scheme_is_split "$s" && [[ -z $NET_V4 || -z $NET_V6 ]]; then
             ui_warn '上下行分离需要本机同时有公网 IPv4 和 IPv6。'
@@ -4028,7 +4716,7 @@ firewall_hints() {
 
 show_install_result() {
     ui_blank
-    ui_title '安装完成' "$(scheme_label "$(scheme)")" "$C_GREEN"
+    ui_title '安装完成' "$(scheme_label "$(scheme)")" ok
     print_nodes
     ui_rule
     firewall_hints
@@ -4040,7 +4728,7 @@ show_install_result() {
 show_modify_result() {
     local changed l
     ui_blank
-    ui_title '修改已生效' "$(scheme_label "$(scheme)")" "$C_GREEN"
+    ui_title "${1:-修改已生效}" "$(scheme_label "$(scheme)")" ok
     changed=$(jq -rn --slurpfile a "$STAGE/nodes-before.json" --slurpfile b "$NODES_JSON" '
         ($a[0] | map({(.label): .link}) | add // {}) as $old
         | $b[0][] | select($old[.label] != .link) | .label')
@@ -4069,29 +4757,74 @@ print_nodes() {
     done
 }
 
+NODE_LABELS=() NODE_LINKS=()
+
+link_preview() {
+    local l=$1 w=$(( UI_W - 2 )) i n out=''
+    n=$(( (${#l} + w - 1) / w ))
+    for (( i = 0; i < n && i < 4; i++ )); do out+=${l:i*w:w}$'\n'; done
+    if (( n > 4 )); then out+="...（共 ${#l} 个字符，回车查看完整链接）"
+    else out=${out%$'\n'}; fi
+    printf '%s' "$out"
+}
+
+node_tag() {
+    if [[ $1 == *type=xhttp* || $1 == *encryption=mlkem* ]]; then printf 'sing-box 不支持'; fi
+}
+
+nd_build() {
+    local i n lw0=$LABEL_W
+    if state_ok; then DRAFT=$STATE; ui_page '节点链接' "$(scheme_label "$(scheme)")"
+    else ui_page '节点链接'; fi
+    n=${#NODE_LABELS[@]}
+    KEY_W=${#n}
+    LABEL_W=24
+    for i in "${!NODE_LABELS[@]}"; do
+        tui_item $(( i + 1 )) "${NODE_LABELS[$i]}" '' "$(node_tag "${NODE_LINKS[$i]}")" "$(link_preview "${NODE_LINKS[$i]}")"
+        (( TUI )) || printf '%s\n\n' "${NODE_LINKS[$i]}" >&4
+    done
+    LABEL_W=$lw0
+    ui_blank
+    ui_kv '链接文件' "$INFO_FILE"
+    ui_kv '订阅 Base64' "$SUB_B64"
+    TUI_HELP_H=5
+    TUI_HELP_DIM=0
+    TUI_FOOT='上下键 选节点   回车 二维码   c 复制   Esc 返回'
+    TUI_FOOT_PLAIN="$(key_range "$n") 显示二维码   回车 返回"
+}
+
+osc52_copy() {
+    local b
+    b=$(printf '%s' "$1" | base64 | tr -d '\r\n')
+    if [[ -n ${TMUX:-} ]]; then printf '\ePtmux;\e\e]52;c;%s\a\e\\' "$b" >&4
+    else printf '\e]52;c;%s\a' "$b" >&4; fi
+}
+
 action_nodes() {
-    local k n
+    local sel=0
     if [[ ! -t 1 ]] || (( ASSUME_YES )); then
         print_nodes
         return 0
     fi
-    while :; do
-        if state_ok; then
-            DRAFT=$STATE
-            ui_page '节点链接' "$(scheme_label "$(scheme)")"
-        else
-            ui_page '节点链接'
-        fi
-        print_nodes
-        n=$(jq 'length' "$NODES_JSON" 2>/dev/null || echo 0)
-        if (( n == 0 )); then ui_footer '回车 返回'; read_line '请选择：' k; return 0; fi
+    if [[ ! -s $NODES_JSON ]]; then
+        ui_page '节点链接'
+        ui_line '还没有节点，请先在主页选择「安装」。'
         ui_rule
-        ui_kv '链接文件' "$INFO_FILE"
-        ui_kv '订阅 Base64' "$SUB_B64"
-        ui_footer "$(key_range "$n") 显示二维码   回车 返回"
-        menu_pick k "$n"
-        [[ -n $k ]] || return 0
-        show_qr "$(jq -r ".[$((k - 1))].link" "$NODES_JSON")" "$(jq -r ".[$((k - 1))].label" "$NODES_JSON")"
+        ui_pause
+        exit "$RC_QUIET"
+    fi
+    mapfile -t NODE_LABELS < <(jq -r '.[].label' "$NODES_JSON")
+    mapfile -t NODE_LINKS < <(jq -r '.[].link' "$NODES_JSON")
+    while :; do
+        tui_menu nd_build "$sel" c
+        sel=$TUI_CUR
+        case $TUI_KEY in
+            c)
+                osc52_copy "${NODE_LINKS[$TUI_CUR]}"
+                TUI_MSG="已复制 ${NODE_LABELS[$TUI_CUR]}（终端不支持时请手动选中复制）" ;;
+            ENTER) show_qr "${NODE_LINKS[$TUI_CUR]}" "${NODE_LABELS[$TUI_CUR]}" ;;
+            *) exit "$RC_QUIET" ;;
+        esac
     done
 }
 
@@ -4100,18 +4833,22 @@ show_qr() {
     if ! have qrencode; then
         ui_blank
         ui_note '显示二维码要用到 qrencode，卸载时会一并删除。'
-        ask_yes '现在安装 qrencode' || return 0
-        ui_note '正在安装 qrencode...'
-        pkg_install_tracked added "$(qr_package)" >/dev/null 2>&1 || true
-        if [[ -n $added ]] && state_ok; then
-            jq --argjson add "$(json_words "$added")" '.meta.extra_packages = ((.meta.extra_packages // []) + $add | unique)' \
-                "$STATE" > "$STAGE/state-pkg.json"
-            atomic_install "$STAGE/state-pkg.json" "$STATE" 600
+        if ask_yes '现在安装 qrencode'; then
+            ui_note '正在安装 qrencode...'
+            pkg_install_tracked added "$(qr_package)" >/dev/null 2>&1 || true
+            if [[ -n $added ]] && state_ok; then
+                jq --argjson add "$(json_words "$added")" '.meta.extra_packages = ((.meta.extra_packages // []) + $add | unique)' \
+                    "$STATE" > "$STAGE/state-pkg.json"
+                atomic_install "$STAGE/state-pkg.json" "$STATE" 600
+            fi
+            have qrencode || ui_warn 'qrencode 安装失败，下面只显示链接。'
         fi
-        if ! have qrencode; then ui_warn 'qrencode 安装失败，请检查软件源。'; ui_pause; return 0; fi
     fi
-    ui_page "$label" '用客户端扫码导入'
-    qrencode -t ANSIUTF8 -m 1 "$link" >&4 || ui_warn '链接太长，生成不了二维码。'
+    ui_page "$label" '用客户端扫码，或复制下面的链接'
+    if have qrencode; then
+        qrencode -t ANSIUTF8 -m 1 "$link" >&4 2>/dev/null || ui_warn '链接太长，生成不了二维码。'
+    fi
+    printf '%s\n' "$link" >&4
     ui_rule
     ui_pause
 }
@@ -4121,26 +4858,60 @@ qr_package() {
 }
 
 
+mt_build() {
+    ui_page '更新与维护'
+    tui_item 1 '更新' '' '脚本和核心升到最新，节点不变'
+    tui_item 2 '重启' '' '重启服务并检查运行状态'
+    tui_item 3 '运行状态' '' '服务、端口、防火墙和最近日志'
+    tui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
+    if [[ -f $DATA_DIR/state.prev.json ]]; then
+        tui_item 5 '回滚配置' '' "恢复到 $(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M') 那次修改之前"
+    fi
+    TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
+}
+
 action_maintain() {
-    local k
+    local sel=0
     while :; do
-        ui_page '更新与维护'
-        ui_item 1 '更新' '' '脚本和核心升到最新，节点不变'
-        ui_item 2 '重启' '' '重启服务并检查运行状态'
-        ui_item 3 '运行状态' '' '服务、端口、防火墙和最近日志'
-        ui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
-        ui_footer '1-4 选择   回车 返回'
-        menu_pick k 4
-        case $k in
+        tui_menu mt_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        case ${TUI_IKEYS[$TUI_CUR]} in
             1)
                 run_sub action_update
                 if (( SUB_RC == 21 || SUB_RC == 23 )); then exit "$SUB_RC"; fi ;;
             2) run_sub action_restart ;;
             3) run_sub action_status ;;
             4) run_sub action_sni_pool ;;
-            '') return 0 ;;
+            5) run_sub action_rollback ;;
         esac
     done
+}
+
+action_rollback() {
+    local prev=$DATA_DIR/state.prev.json
+    require_state
+    (( STATE_READY )) || return 0
+    [[ -f $prev ]] || { ui_warn '没有可以回滚的配置。'; return 0; }
+    MODE=modify
+    DRAFT=$STAGE/draft.json
+    jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
+        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema' "$prev" > "$DRAFT"
+    pv_snapshot "$STATE"
+    mapfile -t PV_KEYS < <(preview_items | grep -v '^@')
+    cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
+    pv_confirm '回滚配置' || exit "$RC_QUIET"
+    apply_draft
+    show_modify_result '已回滚'
+}
+
+save_prev_state() {
+    state_ok || return 0
+    local a b
+    a=$(jq -S -c 'del(.installed, .installed_at, .updated_at, .script, .meta)' "$STATE")
+    b=$(jq -S -c 'del(.installed, .installed_at, .updated_at, .script, .meta)' "$DRAFT")
+    [[ $a != "$b" ]] || return 0
+    atomic_install "$STATE" "$DATA_DIR/state.prev.json" 600
 }
 
 run_sub() {
@@ -4197,8 +4968,8 @@ action_update() {
 }
 
 update_cores() {
-    local -a todo=()
-    local cur new tag t dir
+    local -a todo=() notes=()
+    local cur new tag t dir want
     require_state
     (( STATE_READY )) || return 0
     MODE=modify
@@ -4209,14 +4980,16 @@ update_cores() {
     mkdir -p "$dir"
     if needs_xray; then
         cur=$(installed_version xray)
-        tag=$(latest_tag_try XTLS/Xray-core || true)
-        if [[ -z $tag || ${tag#v} != "${cur#v}" ]]; then
-            download_xray latest "$dir/xray-pkg"
+        want=$(st .core.xray)
+        case $want in
+            compat|latest) tag=$(xray_resolve_tag "$want") ;;
+            *) tag=''; notes+=("Xray 已固定为 $want") ;;
+        esac
+        if [[ -n $tag && ${tag#v} != "${cur#v}" ]] && { [[ $want == compat ]] || ver_ge "${tag#v}" "${cur#v}"; }; then
+            download_xray "$tag" "$dir/xray-pkg"
             new=$(cat "$dir/xray-pkg/xray.version")
-            if [[ $new != "$cur" ]] && ver_ge "$new" "${cur:-0}"; then
-                todo+=("Xray ${cur:-未知} -> $new")
-                USE_XRAY=$dir/xray-pkg/xray USE_XRAY_ASSET=$dir/xray-pkg
-            fi
+            todo+=("Xray ${cur:-未知} -> $new")
+            USE_XRAY=$dir/xray-pkg/xray USE_XRAY_ASSET=$dir/xray-pkg
         fi
     fi
     if needs_ss_rust; then
@@ -4229,7 +5002,7 @@ update_cores() {
         fi
     fi
     if (( ${#todo[@]} == 0 )); then
-        ui_step_skip '已是最新'
+        if (( ${#notes[@]} )); then ui_step_skip "${notes[0]}"; else ui_step_skip '已是最新'; fi
     else
         ui_step_done
         for t in "${todo[@]}"; do ui_line "  $t"; done
@@ -4349,39 +5122,54 @@ sni_pool_file() {
     if state_ok; then printf '%s' "$SNI_POOL_FILE"; else printf '%s' "$STAGE/sni-pool.txt"; fi
 }
 
+POOL=()
+
+pool_build() {
+    local i f
+    f=$(sni_pool_file)
+    mapfile -t POOL < <(sni_pool)
+    if [[ -f $f ]]; then ui_page '候选站点' '自定义列表'; else ui_page '候选站点' '默认列表'; fi
+    ui_hint $'自动挑选伪装站点时，会同时测速这些网站，\n选出可用且最快的一个。'
+    ui_blank
+    KEY_W=${#POOL[@]}
+    KEY_W=${#KEY_W}
+    for i in "${!POOL[@]}"; do tui_item $(( i + 1 )) "${POOL[$i]}" '' '' '回车可以把它从列表里删除。'; done
+    ui_blank
+    tui_item a '添加站点' '' '' '添加一个支持 TLS 1.3 和 HTTP/2 的网站域名。'
+    if [[ -f $f ]]; then tui_item r '恢复默认' '' '' '删除自定义列表，改回脚本自带的列表。'; fi
+    TUI_HELP_H=1
+    TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
+    if [[ -f $f ]]; then TUI_FOOT_PLAIN='编号 删除   a 添加   r 恢复默认   回车 返回'
+    else TUI_FOOT_PLAIN='编号 删除   a 添加   回车 返回'; fi
+}
+
 edit_sni_pool() {
-    local k d i f
-    local -a pool=()
+    local d key f sel=0
+    local -a rest=()
     f=$(sni_pool_file)
     while :; do
-        mapfile -t pool < <(sni_pool)
-        if [[ -f $f ]]; then ui_page '候选站点' '自定义列表'; else ui_page '候选站点' '默认列表'; fi
-        ui_hint $'自动挑选伪装站点时，会同时测速这些网站，\n选出可用且最快的一个。'
-        ui_blank
-        KEY_W=${#pool[@]}
-        KEY_W=${#KEY_W}
-        for i in "${!pool[@]}"; do ui_item $(( i + 1 )) "${pool[$i]}"; done
-        if [[ -f $f ]]; then ui_footer 'a 添加   d 删除   r 恢复默认   回车 返回'
-        else ui_footer 'a 添加   d 删除   回车 返回'; fi
-        read_line '请选择：' k
-        case $k in
-            a|A)
-                read_line '要添加的域名（回车取消）：' d
+        tui_menu pool_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        key=${TUI_IKEYS[$TUI_CUR]}
+        case $key in
+            a)
+                input_page '添加站点' '' '只填域名，例如 www.example.com。'
+                read_line '域名（回车取消）：' d
                 [[ -n $d ]] || continue
                 d=${d,,}
-                if ! valid_domain "$d"; then ui_warn '只填域名，例如 www.example.com。'; ui_pause; continue; fi
-                if in_list "$d" "${pool[@]}"; then continue; fi
-                printf '%s\n' "${pool[@]}" "$d" | atomic_write "$f" 600 ;;
-            d|D)
-                read_line '删除第几个（填编号，回车取消）：' i
-                [[ -n $i ]] || continue
-                if ! [[ $i =~ ^[0-9]+$ ]] || (( i < 1 || i > ${#pool[@]} )); then ui_warn "没有第 $i 个。"; ui_pause; continue; fi
-                if (( ${#pool[@]} == 1 )); then ui_warn '列表里至少要留一个站点。'; ui_pause; continue; fi
-                unset "pool[$(( i - 1 ))]"
-                printf '%s\n' "${pool[@]}" | atomic_write "$f" 600 ;;
-            r|R) rm -f -- "$f" ;;
-            ''|0) return 0 ;;
-            *) ui_warn '请输入 a、d、r，或直接回车返回。'; ui_pause ;;
+                if ! valid_domain "$d"; then TUI_MSG='格式不对：只填域名，例如 www.example.com。'; (( TUI )) || ui_warn "$TUI_MSG"; continue; fi
+                in_list "$d" "${POOL[@]}" && continue
+                printf '%s\n' "${POOL[@]}" "$d" | atomic_write "$f" 600 ;;
+            r)
+                ask_no '删除自定义列表，恢复默认' && rm -f -- "$f" ;;
+            *)
+                if (( ${#POOL[@]} == 1 )); then TUI_MSG='列表里至少要留一个站点。'; (( TUI )) || ui_warn "$TUI_MSG"; continue; fi
+                ask_no "从列表里删除 ${POOL[$((key - 1))]}" || continue
+                rest=("${POOL[@]}")
+                unset "rest[$(( key - 1 ))]"
+                printf '%s\n' "${rest[@]}" | atomic_write "$f" 600
+                sel=0 ;;
         esac
     done
 }
@@ -4513,7 +5301,8 @@ Xray Manager v$SCRIPT_VERSION
   --scheme 方案        指定方案，可选：
                        reality-raw  reality-xhttp  reality-split  ss
                        enc  dual  triple  enc-split
-  --core-version 版本  安装时指定 Xray 版本，例如 v26.3.27
+  --core-version 版本  安装时的 Xray 版本：compat（兼容版，默认）、
+                       latest（最新版）或版本号，例如 v26.7.28
   --update             更新脚本和核心，节点不变
   --nodes              输出节点链接
   --uninstall          完整卸载
@@ -4550,6 +5339,11 @@ parse_args() {
             --core-version)
                 (( $# >= 2 )) || fatal '--core-version 缺少参数。'
                 CLI_CORE_TAG=$2
+                if [[ $CLI_CORE_TAG != compat && $CLI_CORE_TAG != latest ]]; then
+                    [[ $CLI_CORE_TAG =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]] || fatal "--core-version 格式不对：$CLI_CORE_TAG"
+                    ver_ge "${CLI_CORE_TAG#v}" "$XRAY_MIN_VERSION" || fatal "--core-version 最低 v$XRAY_MIN_VERSION。"
+                    CLI_CORE_TAG=$(normalize_tag "$CLI_CORE_TAG")
+                fi
                 shift ;;
             --version|-V) printf 'Xray Manager v%s\n' "$SCRIPT_VERSION"; exit 0 ;;
             *) fatal "未知参数：$1（--help 查看用法）" ;;
@@ -4573,7 +5367,7 @@ action_install_cli() {
     if scheme_is_split "$s" && [[ -z $NET_V4 || -z $NET_V6 ]]; then die '上下行分离需要本机同时有公网 IPv4 和 IPv6。'; return 1; fi
     draft_new "$s"
     carry_meta_from_state
-    [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$(normalize_tag "$CLI_CORE_TAG")"
+    [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
     prepare_new_draft
     if scheme_has_reality "$s" && [[ -z $(st .reality.sni) ]]; then die '候选列表里没有可用的伪装站点。'; return 1; fi
     [[ -n $(st .net.host) ]] || { die '检测不到本机公网地址。'; return 1; }
@@ -4596,26 +5390,92 @@ system_running() {
     fi
 }
 
-show_home() {
-    ui_clear
-    ui_title 'XRAY MANAGER' "v$SCRIPT_VERSION"
+home_alerts() {
+    local proto port label kind f rv xv
+    local -a a=() ports=()
+    if ! system_running; then
+        a+=('服务没有在运行，可在「更新与维护」里重启')
+    else
+        while read -r proto port label; do
+            [[ -n $port ]] || continue
+            port_listening "$proto" "$port" || a+=("${proto^^} $port（$label）没有在监听")
+        done <<< "$(public_ports)"
+    fi
+    kind=$(fw_kind)
+    if [[ -n $kind ]]; then
+        mapfile -t ports < <(fw_wanted)
+        for f in "${ports[@]}"; do
+            [[ -n $f ]] || continue
+            fw_has "$kind" "$f" || { a+=("本机 $kind 还没放行 $f"); break; }
+        done
+    fi
+    f=$DATA_DIR/update-check.json
+    if [[ -f $f ]]; then
+        rv=$(jq -r '.script // empty' "$f" 2>/dev/null || true)
+        if [[ -n $rv ]] && ! ver_ge "$SCRIPT_VERSION" "$rv"; then a+=("有新版脚本 v$rv，可在「更新与维护」里更新"); fi
+        xv=$(jq -r '.xray // empty' "$f" 2>/dev/null || true)
+        if [[ -n $xv && $(st .core.xray) == latest && -n $(installed_version xray) ]] && ! ver_ge "$(installed_version xray)" "$xv"; then
+            a+=("Xray 有新版本 $xv，可在「更新与维护」里更新")
+        fi
+    fi
+    for f in "${a[@]}"; do ui_kv '' "$C_YELLOW! $f$C_RESET"; done
+}
+
+home_build() {
+    local core=''
+    ui_banner
+    ui_blank
     if state_ok; then
         DRAFT=$STATE
         ui_kv '方案' "$(scheme_label "$(scheme)")"
         ui_kv '节点' "$(node_name)" "$(st .net.host)"
-        if system_running; then ui_kv '状态' "${C_GREEN}运行中${C_RESET}"
-        else ui_kv '状态' "${C_YELLOW}已停止${C_RESET}" '可在「更新与维护」里重启'; fi
+        [[ -z $(installed_version xray) ]] || core="Xray $(installed_version xray)"
+        [[ -z $(installed_version ss) ]] || core+="${core:+，}SS-Rust $(installed_version ss)"
+        if system_running; then ui_kv '状态' "${C_GREEN}运行中${C_RESET}" "$core"
+        else ui_kv '状态' "${C_YELLOW}已停止${C_RESET}" "$core"; fi
+        home_alerts
     else
         ui_kv '状态' '未安装'
     fi
     ui_rule
-    if state_ok; then ui_item 1 '修改配置' '' '查看或调整当前节点的设置'
-    else ui_item 1 '安装' '' '选择方案并部署节点'; fi
-    ui_item 2 '节点链接' '' '查看链接、显示二维码'
-    ui_item 3 '更新与维护' '' '更新、重启、运行状态'
-    ui_item 4 '卸载' '' '删除本脚本部署的全部内容'
-    ui_item 0 '退出'
-    ui_rule
+    if state_ok; then
+        tui_item 1 '修改配置' '' '查看或调整当前节点的设置'
+        tui_item 2 '节点链接' '' '查看链接、二维码，复制到剪贴板'
+        tui_item 3 '更新与维护' '' '更新、重启、运行状态、回滚'
+    else
+        tui_item 1 '安装' '' '选择方案并部署节点'
+        tui_item 2 '节点链接' '' '安装后可用'
+        tui_item 3 '更新与维护' '' '安装后可用'
+    fi
+    tui_item 4 '卸载' '' '删除本脚本部署的全部内容'
+    tui_item 0 '退出'
+    TUI_FOOT='上下键 移动   回车 确认   q 退出'
+    TUI_FOOT_PLAIN='1-4 选择   0 退出'
+}
+
+update_check_bg() {
+    state_ok || return 0
+    [[ -d $DATA_DIR ]] || return 0
+    local f=$DATA_DIR/update-check.json age
+    if [[ -f $f ]]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
+        (( age >= 86400 )) || return 0
+    fi
+    (
+        trap - ERR INT TERM HUP EXIT
+        set +e
+        s='' x=''
+        body=$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 "$SCRIPT_REMOTE_URL" 2>/dev/null)
+        if grep -q "$SCRIPT_MARKER" <<< "$body"; then
+            s=$(awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' <<< "$body")
+        fi
+        if [[ $(jq -r '.core.xray // empty' "$STATE" 2>/dev/null) == latest ]]; then x=$(STEP_LOG=/dev/null xray_newest_tag); fi
+        [[ -d $DATA_DIR ]] || exit 0
+        tmp=$(mktemp "$DATA_DIR/.update-check.XXXXXX") || exit 0
+        jq -n --arg s "$s" --arg x "$x" '{script: $s, xray: $x}' > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$f"
+        rm -f -- "$tmp"
+    ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 9>&- &
+    disown 2>/dev/null || true
 }
 
 on_main_int() {
@@ -4625,6 +5485,7 @@ on_main_int() {
 }
 
 on_main_exit() {
+    tui_cursor on
     tty_echo echo
 }
 
@@ -4652,8 +5513,8 @@ after_action() {
 main() {
     parse_args "$@"
     (( EUID == 0 )) || fatal '请用 root 运行（例如 sudo sh xray-manager.sh）。'
-    ui_setup
     input_setup
+    ui_setup
     detect_system || exit 1
     ensure_deps || exit 1
     if [[ ${ZX_REEXEC:-0} != 1 ]]; then acquire_lock; fi
@@ -4663,6 +5524,7 @@ main() {
     SOURCE_PATH=${BASH_SOURCE[0]}
     if [[ -f $SOURCE_PATH ]]; then SOURCE_PATH=$(readlink -f -- "$SOURCE_PATH"); fi
     tx_recover_if_needed
+    migrate_state
     if [[ ${ZX_REEXEC:-0} != 1 ]]; then clean_stale_stages; fi
 
     case $ACTION in
@@ -4679,17 +5541,23 @@ main() {
         nodes) run_top action_nodes; exit "$TOP_RC" ;;
     esac
 
-    local k
+    local sel=0
+    trap 'TUI_RESIZED=1' WINCH
+    update_check_bg
     while :; do
-        show_home
-        read_line '请选择：' k
-        case $k in
+        tui_menu home_build "$sel" q
+        sel=$TUI_CUR
+        case $TUI_KEY in
+            q) ui_clear; exit 0 ;;
+            ENTER) ;;
+            *) continue ;;
+        esac
+        case ${TUI_IKEYS[$TUI_CUR]} in
             1) run_top action_install ;;
             2) run_top action_nodes; after_action "$TOP_RC"; continue ;;
             3) run_top action_maintain; after_action "$TOP_RC"; continue ;;
             4) run_top action_uninstall ;;
-            0|q|Q) ui_clear; exit 0 ;;
-            *) continue ;;
+            0) ui_clear; exit 0 ;;
         esac
         after_action "$TOP_RC"
         if (( TOP_RC != 130 && ! TOP_QUIET )); then ui_pause; fi
