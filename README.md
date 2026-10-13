@@ -28,7 +28,7 @@ zxray
 
 ### 其他
 - xhttp 只做了 v4 v6 分离，刚需双栈机器，此脚本不支持 CDN 分离方案
-- 若 xray 内核过新，sing-box 客户端将失效，可尝试安装兼容版 v26.7.28
+- 若 xray 内核过新，sing-box 客户端将无法使用订阅，可尝试安装兼容版 xray v26.7.28
 <br>
 
 #### License
