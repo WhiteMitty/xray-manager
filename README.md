@@ -28,5 +28,5 @@ zxray
 - 若 xray 内核过新，sing-box 客户端将无法使用订阅，此脚本仅考虑 xray 客户端兼容性
 <br>
 
-#### License
+### License
 MIT
