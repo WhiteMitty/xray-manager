@@ -4741,6 +4741,7 @@ install_files_and_services() {
                 atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
                 rm -f -- "$XRAY_ASSET_DIR/.zxray-full-geo"
             fi
+            make_dir "$XRAY_ASSET_DIR"
             chmod 755 "$XRAY_ASSET_DIR"
         fi
         install_full_geodata
