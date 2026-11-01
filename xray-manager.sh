@@ -33,9 +33,8 @@ set -Eeuo pipefail
 umask 077
 exec 4>&1 5>&2
 
-readonly SCRIPT_VERSION="0.2.0"
+readonly SCRIPT_VERSION="0.2.1"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
-readonly SCRIPT_REMOTE_URL="https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh"
 readonly XRAY_MIN_VERSION="26.3.27"
 readonly XRAY_COMPAT_VERSION="v26.7.28"
 readonly XRAY_SETTLE_DAYS=3
@@ -106,7 +105,7 @@ USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
 NEW_XRAY=0 NEW_SS=0
 UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1
 TUI=0 TUI_KEY='' TUI_CUR=0 TUI_TOP=0 TUI_HEAD=0 TUI_PREV_OK=0 INPUT_DIRTY=0 STEP_PW=0 TUI_MSG='' TUI_RESIZED=0 TUI_HELP_H=0 TUI_HELP_DIM=1 TUI_FOOT='' TUI_FOOT_PLAIN=''
-UI_BUF_ON=0 SPIN_PID='' QR_DECLINED=0
+UI_BUF_ON=0 SPIN_PID=''
 UI_BUF=() TUI_ITEMS=() TUI_IKEYS=() TUI_HELPS=() TUI_PREV=()
 C_KEY='' C_GROUP='' C_RULE='' C_DIM='' C_BOLD='' C_GREEN='' C_YELLOW='' C_RED='' C_RESET='' C_TITLE='' C_TITLE_OK=''
 
@@ -1057,6 +1056,9 @@ valid_ipv6() {
     local a=$1 part count=0
     [[ $a == *:* && $a != *[!0-9a-fA-F:]* && ${#a} -le 39 && $a != *:::* ]] || return 1
     if [[ $a == *::* ]]; then
+        # Exactly one :: and no single stray colon at either boundary.
+        [[ $a != :* || $a == ::* ]] || return 1
+        [[ $a != *: || $a == *:: ]] || return 1
         local rest=${a#*::}
         [[ $rest != *::* ]] || return 1
     else
@@ -1919,15 +1921,32 @@ download_ss() {
     fetch "$base/$asset.sha256" "$out/$asset.sha256"
     digest=$(awk '{print $1; exit}' "$out/$asset.sha256")
     [[ $digest =~ ^[0-9a-fA-F]{64}$ ]] || { die 'shadowsocks-rust 校验文件格式异常。'; return 1; }
-    [[ $(sha256_of "$out/$asset") == "${digest,,}" ]] || { die 'shadowsocks-rust 安装包校验失败。'; return 1; }
-    member=$(tar -tJf "$out/$asset" | awk '$0=="ssserver" || $0=="./ssserver"{print; exit}')
+    [[ $(sha256_of "$out/$asset") == "${digest,,}" ]] || { die 'shadowsocks-rust 安装包 SHA-256 校验失败。'; return 1; }
+
+    # Do not stop reading tar's listing early: tar | awk '... exit' can trigger SIGPIPE (141) with pipefail.
+    if ! tar -tJf "$out/$asset" > "$out/.ss-members" 2>>"${STEP_LOG:-/dev/null}"; then
+        rm -f -- "$out/.ss-members"
+        die '读取 shadowsocks-rust 安装包目录失败。'
+        return 1
+    fi
+    member=$(awk '$0 == "ssserver" || $0 == "./ssserver" {if (found == "") found = $0} END {print found}' "$out/.ss-members")
+    rm -f -- "$out/.ss-members"
     [[ -n $member ]] || { die '安装包中缺少 ssserver。'; return 1; }
-    tar -xOJf "$out/$asset" "$member" > "$out/ssserver"
+    if ! tar -xOJf "$out/$asset" "$member" > "$out/ssserver" 2>>"${STEP_LOG:-/dev/null}"; then
+        rm -f -- "$out/ssserver"
+        die '从 shadowsocks-rust 安装包提取 ssserver 失败。'
+        return 1
+    fi
+    [[ -s $out/ssserver ]] || { die '提取的 ssserver 为空。'; return 1; }
     chmod 755 "$out/ssserver"
+    "$out/ssserver" --version >>"${STEP_LOG:-/dev/null}" 2>&1 || {
+        die 'ssserver 无法运行；请检查本机 CPU 架构及系统兼容性。'
+        return 1
+    }
     rm -f -- "$out/$asset" "$out/$asset.sha256"
-    "$out/ssserver" --version >/dev/null 2>&1 || { die 'ssserver 无法运行。'; return 1; }
     printf '%s' "$tag" > "$out/ss.version"
 }
+
 
 
 script_version_of() {
@@ -1935,14 +1954,6 @@ script_version_of() {
     awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' "$1" 2>/dev/null || true
 }
 
-download_script() {
-    local out=$1
-    curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --connect-timeout 10 --max-time 60 \
-        -o "$out" "$SCRIPT_REMOTE_URL" >> "$STEP_LOG" 2>&1 || return 1
-    grep -q "$SCRIPT_MARKER" "$out" || return 2
-    bash -n "$out" 2>>"$STEP_LOG" || return 3
-    [[ -n $(script_version_of "$out") ]] || return 3
-}
 
 
 detect_public_ips() {
@@ -2007,15 +2018,21 @@ port_taken() {
 }
 
 port_foreign() {
-    local rows pid
+    local rows row pids pid
     rows=$(listeners "$1" "$2")
     [[ -n $rows ]] || return 1
-    while read -r pid; do
-        [[ -n $pid ]] || continue
-        pid_is_owned "$pid" || return 0
-    done <<< "$(grep -oE 'pid=[0-9]+' <<< "$rows" | cut -d= -f2 || true)"
+    # An existing listener with a hidden PID is occupied, not a free port.
+    while IFS= read -r row; do
+        pids=$(grep -oE 'pid=[0-9]+' <<< "$row" | cut -d= -f2 || true)
+        [[ -n $pids ]] || return 0
+        while IFS= read -r pid; do
+            [[ -n $pid ]] || continue
+            pid_is_owned "$pid" || return 0
+        done <<< "$pids"
+    done <<< "$rows"
     return 1
 }
+
 
 port_owner_name() {
     local rows
@@ -2394,6 +2411,8 @@ st_sets() { st_filter --arg v "$2" "$1 = \$v"; }
 load_state_draft() {
     DRAFT=$STAGE/draft.json
     cp -f -- "$STATE" "$DRAFT"
+    # Existing installations must not re-emit a former Firefox fingerprint.
+    if [[ $(st .reality.fp) != chrome ]]; then st_sets .reality.fp chrome; fi
 }
 
 scheme() { st .scheme; }
@@ -2681,7 +2700,7 @@ core_label() {
 system_summary() {
     local -a o=("$(outbound_label "$(st .outbound)")")
     if [[ $(st .bbr) == 1 ]]; then o+=('BBR 开'); else o+=('BBR 关'); fi
-    if scheme_has_reality "$(scheme)"; then o+=("指纹 $(st .reality.fp)"); fi
+    if scheme_has_reality "$(scheme)"; then o+=("指纹 chrome"); fi
     join_by '，' "${o[@]}"
     if needs_xray; then printf '\nXray %s' "$(core_label xray)"; fi
     if needs_ss_rust; then printf '\nSS-Rust %s' "$(core_label ss)"; fi
@@ -3661,8 +3680,7 @@ sy_build() {
     if [[ $(st .bbr) == 1 ]]; then v='开'; else v='关'; fi
     tui_item 2 'BBR' "$v" 'TCP 拥塞控制' '通常能提升高延迟、有丢包线路的速度。'
     if scheme_has_reality "$(scheme)"; then
-        SYS_KEYS+=(fp)
-        tui_item "${#SYS_KEYS[@]}" 'TLS 指纹' "$(st .reality.fp)" '客户端模仿的浏览器' 'chrome 兼容性最好，各种客户端都能用。'
+        ui_kv 'TLS 指纹' 'chrome（固定）'
     fi
     if [[ -n $(st .net.v6) && $(st .net.host) == "$(st .net.v4)" ]] && ! scheme_is_split "$(scheme)"; then
         SYS_KEYS+=(v6link)
@@ -3724,14 +3742,6 @@ edit_bbr() {
     if [[ $c == 1 ]]; then st_set .bbr 1; else st_set .bbr 0; fi
 }
 
-edit_fp() {
-    local c cur=0
-    case $(st .reality.fp) in chrome) cur=1 ;; firefox) cur=2 ;; esac
-    option_page c "$cur" 'TLS 指纹' $'客户端连接时模仿哪种浏览器，写进节点链接。\n其他指纹在新版服务端上会被拒绝，所以只保留这两种。' \
-        'chrome|推荐，各种客户端都能用' 'firefox|最新版核心下，需要 Xray 26.3.27 以上的客户端'
-    [[ -n $c && $c != "$cur" ]] || return 0
-    if [[ $c == 1 ]]; then st_sets .reality.fp chrome; else st_sets .reality.fp firefox; fi
-}
 
 edit_v6link() {
     local c cur=1
@@ -4074,9 +4084,10 @@ landing_label() {
 }
 
 reality_query() {
-    printf 'security=reality&sni=%s&fp=%s&pbk=%s&sid=%s&spx=%%2F' \
-        "$(url_encode "$(st .reality.sni)")" "$(st .reality.fp)" "$(st .reality.public_key)" "$(st .reality.short_id)"
+    printf 'security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&spx=%%2F' \
+        "$(url_encode "$(st .reality.sni)")" "$(st .reality.public_key)" "$(st .reality.short_id)"
 }
+
 
 split_hosts() {
     if [[ $(st .xhttp.split) == v6_up_v4_down ]]; then printf '%s %s' "$(st .net.v6)" "$(st .net.v4)"
@@ -4137,7 +4148,7 @@ render_nodes() {
                     local up down ex
                     read -r up down <<< "$(split_hosts)"
                     label=$(node_label XHTTP分离 "$outtag")
-                    ex=$(jq -cn --arg a "$down" --argjson p "$port" --arg sni "$(st .reality.sni)" --arg fp "$(st .reality.fp)" \
+                    ex=$(jq -cn --arg a "$down" --argjson p "$port" --arg sni "$(st .reality.sni)" --arg fp chrome \
                         --arg pbk "$(st .reality.public_key)" --arg sid "$(st .reality.short_id)" --arg path "$(st .xhttp.path)" \
                         '{downloadSettings:{address:$a, port:$p, network:"xhttp", security:"reality",
                           realitySettings:{serverName:$sni, fingerprint:$fp, publicKey:$pbk, shortId:$sid, spiderX:"/"},
@@ -4931,7 +4942,7 @@ show_install_result() {
     firewall_hints
     ui_rule
     ui_line "以后输入 ${C_KEY}zxray${C_RESET} 就能打开主页，"
-    ui_line '在「节点链接」里可以再看链接、显示二维码。'
+    ui_line '在「节点链接」里可以查看或复制完整链接。'
 }
 
 show_modify_result() {
@@ -5006,8 +5017,8 @@ nd_build() {
     ui_kv '订阅 Base64' "$SUB_B64"
     TUI_HELP_H=5
     TUI_HELP_DIM=0
-    TUI_FOOT='上下键 选节点   回车 二维码   c 复制   Esc 返回'
-    TUI_FOOT_PLAIN="$(key_range "$n") 显示二维码   回车 返回"
+    TUI_FOOT='上下键 选节点   回车 链接   c 复制   Esc 返回'
+    TUI_FOOT_PLAIN="$(key_range "$n") 显示链接   回车 返回"
 }
 
 osc52_copy() {
@@ -5040,65 +5051,26 @@ action_nodes() {
             c)
                 osc52_copy "${NODE_LINKS[$TUI_CUR]}"
                 TUI_MSG="已复制 ${NODE_LABELS[$TUI_CUR]}（终端不支持时请手动选中复制）" ;;
-            ENTER) show_qr "${NODE_LINKS[$TUI_CUR]}" "${NODE_LABELS[$TUI_CUR]}" ;;
+            ENTER) show_node_link "${NODE_LINKS[$TUI_CUR]}" "${NODE_LABELS[$TUI_CUR]}" ;;
             *) exit "$RC_QUIET" ;;
         esac
     done
 }
 
-show_qr() {
-    local link=$1 label=$2 added='' qr='' warn='' sz rows=0 cols=0 l w h
-    if ! have qrencode && (( ! QR_DECLINED )); then
-        ui_blank
-        ui_note '显示二维码要用到 qrencode，卸载时会一并删除。'
-        if ask_yes '现在安装 qrencode'; then
-            ui_note '正在安装 qrencode...'
-            pkg_refresh >/dev/null 2>&1 || true
-            pkg_install_tracked added "$(qr_package)" >/dev/null 2>&1 || true
-            if [[ -n $added ]] && state_ok; then
-                jq --argjson add "$(json_words "$added")" '.meta.extra_packages = ((.meta.extra_packages // []) + $add | unique)' \
-                    "$STATE" > "$STAGE/state-pkg.json"
-                atomic_install "$STAGE/state-pkg.json" "$STATE" 600
-            fi
-            have qrencode || warn='qrencode 安装失败，下面只显示链接。'
-        else
-            QR_DECLINED=1
-        fi
-    fi
-    if have qrencode; then
-        qr=$(qrencode -t UTF8 -m 4 "$link" 2>/dev/null) || { qr=''; warn='链接太长，生成不了二维码。'; }
-        if [[ -n $qr ]]; then
-            sz=$(stty size <&"$INPUT_FD" 2>/dev/null || true)
-            if [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]]; then rows=${BASH_REMATCH[1]} cols=${BASH_REMATCH[2]}; fi
-            l=${qr%%$'\n'*}
-            strip_ansi "$l" l
-            w=${#l}
-            h=$(grep -c '' <<< "$qr")
-            if (( cols > 0 && w > cols )); then
-                warn="终端太窄，二维码需要 $w 列宽。把窗口拉宽或把字体调小后再试。"
-                qr=''
-            elif (( rows > 0 && h + 6 > rows )); then
-                warn='终端不够高，二维码可能显示不全，可以把窗口拉高后再试。'
-                qr=''
-            fi
-        fi
-    fi
-    ui_page "$label" '用客户端扫码，或复制下面的链接'
-    [[ -z $warn ]] || ui_warn "$warn"
-    [[ -z $qr ]] || printf '%s\n' "$qr" >&4
+
+
+
+show_node_link() {
+    local link=$1 label=$2
+    ui_page "$label" '完整节点链接'
     printf '%s\n' "$link" >&4
     ui_rule
     ui_pause
 }
 
-qr_package() {
-    case $PKG in apk) printf 'libqrencode-tools' ;; *) printf 'qrencode' ;; esac
-}
-
-
 mt_build() {
     ui_page '更新与维护'
-    tui_item 1 '更新' '' '脚本和核心升到最新，节点不变'
+    tui_item 1 '更新' '' '检查并更新核心，保留本定制版脚本'
     tui_item 2 '重启' '' '重启服务并检查运行状态'
     tui_item 3 '运行状态' '' '服务、端口、防火墙和最近日志'
     tui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
@@ -5117,7 +5089,7 @@ action_maintain() {
         case ${TUI_IKEYS[$TUI_CUR]} in
             1)
                 run_sub action_update
-                if (( SUB_RC == 21 || SUB_RC == 23 )); then exit "$SUB_RC"; fi ;;
+                ;;
             2) run_sub action_restart ;;
             3) run_sub action_status ;;
             4) run_sub action_sni_pool ;;
@@ -5134,7 +5106,7 @@ action_rollback() {
     MODE=modify
     DRAFT=$STAGE/draft.json
     jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
-        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema' "$prev" > "$DRAFT"
+        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema | .reality.fp = "chrome"' "$prev" > "$DRAFT"
     pv_snapshot "$STATE"
     mapfile -t PV_KEYS < <(preview_items | grep -v '^@')
     cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
@@ -5175,7 +5147,7 @@ save_prev_state() {
 run_sub() {
     run_child "$@"
     SUB_RC=$CHILD_RC
-    if (( SUB_RC == 21 || SUB_RC == 23 || SUB_RC == RC_QUIET )); then return 0; fi
+    if (( SUB_RC == RC_QUIET )); then return 0; fi
     if (( SUB_RC == 130 )); then exit 130; fi
     ui_pause
     return 0
@@ -5192,41 +5164,11 @@ require_state() {
 }
 
 action_update() {
-    local remote_v rc=0
-    require_state
-    (( STATE_READY )) || return 0
-    STEP_NO=0 STEP_TOTAL=2
     ui_blank
-    ui_step '检查脚本更新'
-    : > "$STEP_LOG"
-    download_script "$STAGE/remote.sh" || rc=$?
-    remote_v=''
-    (( rc != 0 )) || remote_v=$(script_version_of "$STAGE/remote.sh")
-    if (( rc == 1 )); then
-        step_end "${C_YELLOW}连不上 GitHub，跳过${C_RESET}"
-    elif (( rc == 2 )); then
-        step_end "${C_YELLOW}下载到的不是本脚本，跳过${C_RESET}"
-    elif (( rc == 3 )); then
-        step_end "${C_YELLOW}下载的文件不完整，跳过${C_RESET}"
-    elif [[ -z $remote_v ]] || ver_ge "$SCRIPT_VERSION" "$remote_v"; then
-        ui_step_skip "已是最新 v$SCRIPT_VERSION"
-    else
-        [[ ! -f $SELF_SCRIPT_PATH ]] || cp -f -- "$SELF_SCRIPT_PATH" "$SELF_SCRIPT_PATH.prev"
-        atomic_install "$STAGE/remote.sh" "$SELF_SCRIPT_PATH" 700
-        install_self
-        ui_step_skip "v$SCRIPT_VERSION -> v$remote_v"
-        ui_line '接下来由新版脚本继续更新核心...'
-        trap 'rc=130' INT TERM HUP
-        ZX_REEXEC=1 bash "$SELF_SCRIPT_PATH" --update-cores "${ASSUME_YES_FLAG[@]}" <&"$INPUT_FD" 2>&5 || rc=$?
-        if (( rc != 0 )); then
-            ui_warn '核心没有更新成功，节点仍按原来的配置运行。'
-            ui_note "如需退回旧版脚本：cp $SELF_SCRIPT_PATH.prev $SELF_SCRIPT_PATH"
-            exit 23
-        fi
-        exit 21
-    fi
-    update_cores keep
+    ui_note '此定制版本只检查并更新核心，不自动下载覆盖脚本。'
+    update_cores
 }
+
 
 update_cores() {
     local -a todo=() notes=()
@@ -5271,7 +5213,6 @@ update_cores() {
         for t in "${todo[@]}"; do ui_line "  $t"; done
         replace_cores
     fi
-    if [[ ${ZX_REEXEC:-0} == 1 ]]; then regenerate_from_state; fi
     return 0
 }
 
@@ -5308,16 +5249,6 @@ replace_cores() {
     ui_ok '核心已更新，节点不变。'
 }
 
-regenerate_from_state() {
-    ui_blank
-    ui_line '用新版脚本重新生成配置，节点不变...'
-    load_state_draft
-    MODE=modify
-    PREVIEW_NOTES=()
-    cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
-    apply_draft
-    show_modify_result
-}
 
 action_restart() {
     local s
@@ -5583,7 +5514,7 @@ Xray Manager v$SCRIPT_VERSION
                        enc  dual  triple  enc-split
   --core-version 版本  安装时的 Xray 版本：compat（兼容版，默认）、
                        latest（最新版）或版本号，例如 v26.7.28
-  --update             更新脚本和核心，节点不变
+  --update             仅检查并更新核心，不覆盖定制脚本
   --nodes              输出节点链接
   --uninstall          完整卸载
   --yes                跳过所有确认
@@ -5671,7 +5602,7 @@ system_running() {
 }
 
 home_alerts() {
-    local proto port label kind f rv xv
+    local proto port label kind f xv
     local -a a=() ports=()
     if ! system_running; then
         a+=('服务没有在运行，可在「更新与维护」里重启')
@@ -5691,8 +5622,6 @@ home_alerts() {
     fi
     f=$DATA_DIR/update-check.json
     if [[ -f $f ]]; then
-        rv=$(jq -r '.script // empty' "$f" 2>/dev/null || true)
-        if [[ -n $rv ]] && ! ver_ge "$SCRIPT_VERSION" "$rv"; then a+=("有新版脚本 v$rv，可在「更新与维护」里更新"); fi
         xv=$(jq -r '.xray // empty' "$f" 2>/dev/null || true)
         if [[ -n $xv && $(st .core.xray) == latest && -n $(installed_version xray) ]] && ! ver_ge "$(installed_version xray)" "$xv"; then
             a+=("Xray 有新版本 $xv，可在「更新与维护」里更新")
@@ -5811,7 +5740,7 @@ home_build() {
     ui_rule
     if state_ok; then
         tui_item 1 '修改配置' '' '查看或调整当前节点的设置'
-        tui_item 2 '节点链接' '' '查看链接、二维码，复制到剪贴板'
+        tui_item 2 '节点链接' '' '查看完整链接，复制到剪贴板'
         tui_item 3 '更新与维护' '' '更新、重启、运行状态、回滚'
     else
         tui_item 1 '安装' '' '选择方案并部署节点'
@@ -5827,6 +5756,7 @@ home_build() {
 update_check_bg() {
     state_ok || return 0
     [[ -d $DATA_DIR ]] || return 0
+    [[ $(jq -r '.core.xray // empty' "$STATE" 2>/dev/null) == latest ]] || return 0
     local f=$DATA_DIR/update-check.json age
     if [[ -f $f ]]; then
         age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
@@ -5835,20 +5765,16 @@ update_check_bg() {
     (
         trap - ERR INT TERM HUP EXIT
         set +e
-        s='' x=''
-        body=$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 "$SCRIPT_REMOTE_URL" 2>/dev/null)
-        if grep -q "$SCRIPT_MARKER" <<< "$body"; then
-            s=$(awk -F'"' '/^readonly SCRIPT_VERSION=/{print $2; exit}' <<< "$body")
-        fi
-        if [[ $(jq -r '.core.xray // empty' "$STATE" 2>/dev/null) == latest ]]; then x=$(STEP_LOG=/dev/null xray_newest_tag); fi
-        [[ -n $s || -n $x ]] || exit 0
+        x=$(STEP_LOG=/dev/null xray_newest_tag)
+        [[ -n $x ]] || exit 0
         [[ -d $DATA_DIR ]] || exit 0
-        tmp=$(mktemp "$DATA_DIR/.update-check.XXXXXX") || exit 0
-        jq -n --arg s "$s" --arg x "$x" '{script: $s, xray: $x}' > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$f"
+        tmp=$(mktemp "$DATA_DIR/.update-check.XXXXXXXX") || exit 0
+        jq -n --arg x "$x" '{xray: $x}' > "$tmp" && chmod 600 "$tmp" && mv -f -- "$tmp" "$f"
         rm -f -- "$tmp"
     ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 9>&- &
     disown 2>/dev/null || true
 }
+
 
 on_main_int() {
     (( CHILD_RUNNING )) && return 0
@@ -5872,7 +5798,6 @@ after_action() {
     local rc=$1
     case $rc in
         20) exit 0 ;;
-        21|23) ui_pause; on_main_exit; exec bash "$SELF_SCRIPT_PATH" ;;
     esac
     if [[ -e $TX ]]; then
         ui_err '有一次操作没能恢复完，重新运行脚本会继续恢复。'
@@ -5889,7 +5814,7 @@ main() {
     ui_setup
     detect_system || exit 1
     ensure_deps || exit 1
-    if [[ ${ZX_REEXEC:-0} != 1 ]]; then acquire_lock; fi
+    acquire_lock
     trap 'on_main_int' INT
     trap 'exit 143' TERM HUP
     trap 'on_main_exit' EXIT
@@ -5898,7 +5823,7 @@ main() {
     tx_recover_if_needed
     migrate_state
     check_state_file
-    if [[ ${ZX_REEXEC:-0} != 1 ]]; then clean_stale_stages; fi
+    clean_stale_stages
 
     case $ACTION in
         install)
@@ -5906,8 +5831,6 @@ main() {
             after_action "$TOP_RC"; exit "$TOP_RC" ;;
         update)
             run_top action_update
-            if (( TOP_RC == 21 )); then exit 0; fi
-            if (( TOP_RC == 23 )); then exit 1; fi
             after_action "$TOP_RC"; exit "$TOP_RC" ;;
         update-cores) run_top update_cores; exit "$TOP_RC" ;;
         uninstall) run_top action_uninstall; after_action "$TOP_RC"; exit "$TOP_RC" ;;
