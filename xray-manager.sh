@@ -33,12 +33,9 @@ set -Eeuo pipefail
 umask 077
 exec 4>&1 5>&2
 
-readonly SCRIPT_VERSION="0.2.1"
+readonly SCRIPT_VERSION="0.2.2"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
 readonly XRAY_MIN_VERSION="26.3.27"
-readonly XRAY_COMPAT_VERSION="v26.7.28"
-readonly XRAY_SETTLE_DAYS=3
-readonly XRAY_MLKEM_VERSION=26.9.8
 readonly STATE_SCHEMA=5
 readonly SERVICE_USER="zxray"
 readonly MANAGED_TAG="# Managed by Xray Manager"
@@ -1783,13 +1780,13 @@ fetch() {
 
 latest_tag_try() {
     local repo=$1 url tag
-    url=$(curl --proto '=https' -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 --max-time 30 \
+    url=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 --max-time 30 \
         "https://github.com/$repo/releases/latest" 2>>"$STEP_LOG" || true)
     tag=${url##*/releases/tag/}
     tag=${tag//%2F//}
     tag=${tag//%2f//}
     if [[ -z $url || $tag == "$url" || -z $tag ]]; then
-        tag=$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 \
+        tag=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 30 \
             "https://api.github.com/repos/$repo/releases/latest" 2>>"$STEP_LOG" | jq -r '.tag_name // empty' || true)
     fi
     [[ $tag =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
@@ -1797,39 +1794,18 @@ latest_tag_try() {
 }
 
 xray_newest_tag() {
-    local now json tag='' upd t ts
-    local -a settled=()
-    now=$(date +%s)
-    json=$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 -H 'Accept: application/vnd.github+json' \
-        "https://api.github.com/repos/XTLS/Xray-core/releases?per_page=30" 2>>"${STEP_LOG:-/dev/null}" || true)
-    if [[ -n $json ]]; then
-        tag=$(jq -r --argjson now "$now" --argjson d "$XRAY_SETTLE_DAYS" '
-            [.[] | select((.draft | not) and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")))
-                 | select(((.published_at // "") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) <= ($now - $d * 86400))
-                 | .tag_name]
-            | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last // empty' <<< "$json" 2>/dev/null || true)
-    fi
-    if [[ -z $tag ]]; then
-        while read -r upd t; do
-            [[ $t =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
-            ts=$(jq -rn --arg u "$upd" '$u | sub("\\.[0-9]+"; "") | sub("[+]00:00$"; "Z") | fromdateiso8601' 2>/dev/null || echo "$now")
-            (( ts <= now - XRAY_SETTLE_DAYS * 86400 )) && settled+=("$t")
-        done <<< "$(curl --proto '=https' -fsSL --connect-timeout 10 --max-time 30 \
-            https://github.com/XTLS/Xray-core/releases.atom 2>>"${STEP_LOG:-/dev/null}" | awk '
-            /<entry>/ { u = ""; t = "" }
-            /<updated>/ { line = $0; gsub(/.*<updated>|<\/updated>.*/, "", line); u = line }
-            /releases\/tag\// { if (match($0, /releases\/tag\/[^"]+/)) t = substr($0, RSTART + 13, RLENGTH - 13) }
-            /<\/entry>/ { if (u != "" && t != "") print u, t }' || true)"
-        (( ${#settled[@]} == 0 )) || tag=$(printf '%s\n' "${settled[@]}" | sort -V | tail -n 1)
-    fi
+    # GitHub releases/latest is the stable release channel used by the official installer.
+    # Do not silently mix in prereleases, wait for a grace period, or pin an obsolete version.
+    local tag
+    tag=$(latest_tag_try XTLS/Xray-core) || return 1
     [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
     printf '%s' "$tag"
 }
 
+
 xray_resolve_tag() {
     case $1 in
-        compat) printf '%s' "$XRAY_COMPAT_VERSION" ;;
-        latest) xray_newest_tag || { die '查不到 Xray 的最新版本，请检查本机能否访问 GitHub。'; return 1; } ;;
+        compat|latest) xray_newest_tag || { die '查不到 Xray 的最新正式版，请检查本机能否访问 GitHub。'; return 1; } ;;
         *) printf '%s' "$(normalize_tag "$1")" ;;
     esac
 }
@@ -2413,6 +2389,7 @@ load_state_draft() {
     cp -f -- "$STATE" "$DRAFT"
     # Existing installations must not re-emit a former Firefox fingerprint.
     if [[ $(st .reality.fp) != chrome ]]; then st_sets .reality.fp chrome; fi
+    if [[ $(st .core.xray) == compat ]]; then st_sets .core.xray latest; fi
 }
 
 scheme() { st .scheme; }
@@ -2464,7 +2441,7 @@ draft_new() {
         net: {host: (if $v4 != "" then $v4 elif $v6 != "" then $v6 else "" end), v4: $v4, v6: $v6, manual: 0, v6_link: 1},
         outbound: (if $v4 == "" and $v6 != "" then "v6first" else "v4first" end),
         bbr: 1, firewall: "auto",
-        core: {xray: "compat", ss: "latest"},
+        core: {xray: "latest", ss: "latest"},
         reality: {port: 0, internal: 0, gate: 0, sni: "", sni_auto: 1, private_key: "", public_key: "", short_id: "",
                   fp: "chrome", guard: "nginx", limit: "orig", limit_custom: {ua: 8192, ur: 1024, da: 32768, dr: 2048},
                   limit_jitter: $jitter, conn_ip: 256, conn_total: 4096},
@@ -2689,10 +2666,10 @@ core_label() {
     v=$(st ".core.$1")
     if [[ $MODE == modify ]]; then iv=$(installed_version "$1"); fi
     case $v in
-        compat) printf '兼容版 %s' "$XRAY_COMPAT_VERSION" ;;
+        compat) printf '旧版配置（更新时自动升级）' ;;
         latest)
             [[ $(jq -r ".core.$1 // empty" "$STATE" 2>/dev/null) == latest ]] || iv=''
-            if [[ -n $iv ]]; then printf '最新版 %s' "$iv"; else printf '最新版'; fi ;;
+            if [[ -n $iv ]]; then printf '最新正式版 %s' "$iv"; else printf '最新正式版'; fi ;;
         *) printf '%s 固定' "$v" ;;
     esac
 }
@@ -3108,10 +3085,6 @@ pc_build() {
     ui_blank
     if links_will_change; then ui_warn '应用后节点链接会变，客户端需要重新导入。'
     else ui_ok '节点链接不变，客户端不用改动。'; fi
-    if scheme_has_reality "$(scheme)" && core_breaks_singbox "$(st .core.xray)" \
-        && ! core_breaks_singbox "$(jq -r '.core.xray // "compat"' "$STAGE/pv-base.json")"; then
-        ui_warn '换用新核心后，sing-box 内核的客户端会连不上 REALITY。'
-    fi
     ui_rule
     tui_item 1 "$PC_TITLE" '' '写入配置并重启服务'
     tui_item 2 '再看看' '' '回到上一页'
@@ -3119,13 +3092,8 @@ pc_build() {
     TUI_FOOT_PLAIN="1 $PC_TITLE   2 再看看"
 }
 
-core_breaks_singbox() {
-    case $1 in
-        compat) return 1 ;;
-        latest) return 0 ;;
-        *) ver_ge "${1#v}" "$XRAY_MLKEM_VERSION" ;;
-    esac
-}
+
+
 
 pc_row() {
     local w
@@ -3367,11 +3335,57 @@ ld_build() {
             "$(jq -r ".landings[$i].label // \"\"" "$DRAFT")" '回车可以删除这个落地。'
     done
     ui_blank
-    tui_item a '添加落地' '' 'ss:// 或 vless:// 链接' '支持 ss:// 和 vless://（TCP，无加密或 REALITY）。'
+    tui_item a '添加落地' '' 'ss:// 或 vless:// 链接' '支持 ss:// 和 vless://（TCP、REALITY、VLESS-ENC）。'
     TUI_HELP_H=1
     TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
     if (( n > 0 )); then TUI_FOOT_PLAIN='a 添加落地   落地编号 删除   回车 返回'
     else TUI_FOOT_PLAIN='a 添加落地   回车 返回'; fi
+}
+
+confirm_landing_add() {
+    local link=$1 k answer
+    # Parse has already succeeded. Present details before any draft mutation.
+    ui_page '确认添加落地' '尚未保存'
+    ui_kv '名称' "$PARSED_LABEL"
+    ui_kv '类型' "$PARSED_KIND"
+    ui_kv '地址' "$(uri_host "$PARSED_HOST")"
+    ui_kv '端口' "$PARSED_PORT"
+    if [[ $PARSED_KIND == ss ]]; then
+        ui_kv '加密方式' "$(jq -r '.settings.servers[0].method // "unknown"' <<< "$PARSED_OUTBOUND_JSON")"
+    else
+        local encryption security
+        encryption=$(jq -r '.settings.vnext[0].users[0].encryption // "none"' <<< "$PARSED_OUTBOUND_JSON")
+        security=$(jq -r '.streamSettings.security // "none"' <<< "$PARSED_OUTBOUND_JSON")
+        if [[ $security == reality ]]; then
+            ui_kv '安全类型' 'REALITY'
+            ui_kv 'SNI' "$(jq -r '.streamSettings.realitySettings.serverName // ""' <<< "$PARSED_OUTBOUND_JSON")"
+        elif [[ $encryption != none ]]; then
+            ui_kv '安全类型' 'VLESS-ENC'
+        else
+            ui_kv '安全类型' '无额外加密'
+        fi
+    fi
+    ui_hint $'请核对上面解析出来的落地服务器。\n此时仅保存到草稿，稍后仍需在预览页应用修改。'
+    ui_rule
+    if (( TUI )); then
+        ui_footer '回车 确认添加   Esc 取消'
+        ui_flush
+        tty_echo -echo
+        tui_cursor off
+        while :; do
+            tui_read_key k
+            case $k in
+                ENTER) return 0 ;;
+                ESC|q|Q) return 1 ;;
+                b|B) go_home_if_b b || true ;;
+            esac
+        done
+    fi
+    read_line '按回车确认添加，输入 n 取消：' answer
+    case $answer in
+        ''|y|Y) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 edit_landings() {
@@ -3384,12 +3398,17 @@ edit_landings() {
         if [[ $key == a ]]; then
             n=$(jq '.landings | length' "$DRAFT")
             if (( n >= 10 )); then TUI_MSG='最多添加 10 个落地。'; (( TUI )) || ui_warn "$TUI_MSG"; continue; fi
-            input_page '添加落地' '' $'粘贴落地服务器的分享链接。\n支持 ss:// 和 vless://（TCP，无加密或 REALITY）。'
+            input_page '添加落地' '' $'粘贴落地服务器的分享链接。\n成功解析后需再次按回车确认添加。'
             while :; do
                 read_line '落地链接（回车取消）：' link
                 [[ -n $link ]] || break
                 if parse_landing_link "$link"; then
-                    add_landing "$(normalize_link "$link")"
+                    if confirm_landing_add "$link"; then
+                        add_landing "$(normalize_link "$link")"
+                        ui_ok '落地已加入草稿；返回预览页后，仍需选择「应用修改」才会生效。'
+                    else
+                        ui_note '已取消添加，草稿没有变化。'
+                    fi
                     break
                 fi
                 ui_warn "这个链接用不了：$PARSE_ERR"
@@ -3697,7 +3716,7 @@ sy_build() {
     local -a cl=()
     if needs_xray; then cl+=("Xray $(core_label xray)"); fi
     if needs_ss_rust; then cl+=("SS-Rust $(core_label ss)"); fi
-    tui_item "${#SYS_KEYS[@]}" '核心版本' "${cl[0]:-}" '' '兼容版 sing-box 也能连；最新版含预发布，sing-box 连不上。'
+    tui_item "${#SYS_KEYS[@]}" '核心版本' "${cl[0]:-}" '' '默认跟随 GitHub 最新正式版（不含预发布版）。'
     for v in "${cl[@]:1}"; do ui_cont "$v"; done
     TUI_HELP_H=1
     TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
@@ -3764,7 +3783,7 @@ edit_firewall() {
 
 co_build() {
     ui_page '核心版本'
-    if needs_xray; then tui_item 1 'Xray' "$(core_label xray)" '' '兼容版 sing-box 也能连；最新版只用发布满 3 天的版本。'; fi
+    if needs_xray; then tui_item 1 'Xray' "$(core_label xray)" '' '默认获取 GitHub 最新正式版；也可指定版本号。'; fi
     if needs_ss_rust; then tui_item 2 'SS-Rust' "$(core_label ss)" '' '跟随 shadowsocks-rust 的正式版，或固定一个版本。'; fi
     TUI_HELP_H=1
     TUI_FOOT='上下键 移动   回车 修改   Esc 返回'
@@ -3787,18 +3806,17 @@ edit_core() {
         sel=$TUI_CUR
         [[ $TUI_KEY == ENTER ]] || return 0
         if [[ ${TUI_IKEYS[$TUI_CUR]} == 1 ]]; then
-            case $(st .core.xray) in compat) cur=1 ;; latest) cur=2 ;; *) cur=3 ;; esac
-            option_page c "$cur" 'Xray 版本' $'最新版的 REALITY 会拒绝不带抗量子密钥的握手，\nsing-box 内核的客户端因此连不上。' \
-                "兼容版|$XRAY_COMPAT_VERSION，sing-box 也能连，推荐" "最新版|含预发布，只用发布满 $XRAY_SETTLE_DAYS 天的" '指定版本|填写一个版本号'
+            case $(st .core.xray) in latest|compat) cur=1 ;; *) cur=2 ;; esac
+            option_page c "$cur" 'Xray 版本' $'默认跟随 GitHub 最新正式版，不再使用旧兼容版。\n不会自动安装预发布版。' \
+                '最新正式版|推荐；安装或更新时获取 GitHub 最新稳定版本' '指定版本|填一个确定的 Xray 版本号'
             [[ -n $c ]] || continue
             case $c in
-                1) st_sets .core.xray compat ;;
-                2) st_sets .core.xray latest ;;
-                3)
+                1) st_sets .core.xray latest ;;
+                2)
                     iv=$(installed_version xray)
-                    [[ $(st .core.xray) == compat || $(st .core.xray) == latest ]] || iv=$(st .core.xray)
-                    input_page 'Xray 版本' '指定版本' "填写 Xray 的版本号，例如 $XRAY_COMPAT_VERSION。最低 v$XRAY_MIN_VERSION。"
-                    ask_core_version "${iv:-$XRAY_COMPAT_VERSION}" v || continue
+                    [[ $(st .core.xray) == latest || $(st .core.xray) == compat ]] || iv=$(st .core.xray)
+                    input_page 'Xray 版本' '指定版本' "填写 Xray 的版本号，例如 v26.10.31。最低 v$XRAY_MIN_VERSION。"
+                    ask_core_version "${iv:-v26.10.31}" v || continue
                     if ! ver_ge "${v#v}" "$XRAY_MIN_VERSION"; then ui_warn "最低需要 v$XRAY_MIN_VERSION。"; ui_pause; continue; fi
                     st_sets .core.xray "$v" ;;
             esac
@@ -3814,6 +3832,7 @@ edit_core() {
         fi
     done
 }
+
 
 
 listen_any() { if has_ipv6_stack; then printf '::'; else printf '0.0.0.0'; fi; }
@@ -4252,7 +4271,7 @@ core_satisfied() {
     old=$(jq -r ".core.$which // empty" "$STATE" 2>/dev/null || true)
     [[ -n $cur ]] || return 1
     case $want in
-        compat) [[ $cur == "$XRAY_COMPAT_VERSION" ]] ;;
+        compat) return 1 ;;
         latest) [[ $old == latest ]] ;;
         *) [[ ${cur#v} == "${want#v}" ]] ;;
     esac
@@ -4742,7 +4761,7 @@ migrate_state() {
         [[ $(jq -r '.schema // 0' "$f" 2>/dev/null || true) == 4 ]] || continue
         tmp=$(mktemp "$f.XXXXXX")
         if jq --argjson s "$STATE_SCHEMA" --argjson j "$(limit_jitter_new)" '.schema = $s
-            | (if .core.xray == "latest" then .core.xray = "compat" else . end)
+            | (if .core.xray == "compat" then .core.xray = "latest" else . end)
             | .reality.limit_jitter = (.reality.limit_jitter // $j)' "$f" > "$tmp"; then
             chmod 600 "$tmp"
             mv -f -- "$tmp" "$f"
@@ -5070,7 +5089,7 @@ show_node_link() {
 
 mt_build() {
     ui_page '更新与维护'
-    tui_item 1 '更新' '' '检查并更新核心，保留本定制版脚本'
+    tui_item 1 '更新' '' '更新 Xray / SS-Rust 正式版并保留定制脚本'
     tui_item 2 '重启' '' '重启服务并检查运行状态'
     tui_item 3 '运行状态' '' '服务、端口、防火墙和最近日志'
     tui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
@@ -5106,7 +5125,8 @@ action_rollback() {
     MODE=modify
     DRAFT=$STAGE/draft.json
     jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
-        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema | .reality.fp = "chrome"' "$prev" > "$DRAFT"
+        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema | .reality.fp = "chrome"
+        | if .core.xray == "compat" then .core.xray = "latest" else . end' "$prev" > "$DRAFT"
     pv_snapshot "$STATE"
     mapfile -t PV_KEYS < <(preview_items | grep -v '^@')
     cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
@@ -5208,11 +5228,20 @@ update_cores() {
     fi
     if (( ${#todo[@]} == 0 )); then
         if (( ${#notes[@]} )); then ui_step_skip "${notes[0]}"; else ui_step_skip '已是最新'; fi
+        # A prior install can still have the legacy compat preference.
+        if [[ $(jq -r '.core.xray // empty' "$STATE") == compat && $(st .core.xray) == latest ]]; then
+            atomic_install "$DRAFT" "$STATE" 600
+        fi
     else
         ui_step_done
         for t in "${todo[@]}"; do ui_line "  $t"; done
         replace_cores
     fi
+    # Persist this repaired manager in the zxray shortcut after successful maintenance.
+    install_self
+    # Metadata version tracks the actual manager script after a successful update.
+    st_sets .script "$SCRIPT_VERSION"
+    atomic_install "$DRAFT" "$STATE" 600
     return 0
 }
 
@@ -5512,8 +5541,8 @@ Xray Manager v$SCRIPT_VERSION
   --scheme 方案        指定方案，可选：
                        reality-raw  reality-xhttp  reality-split  ss
                        enc  dual  triple  enc-split
-  --core-version 版本  安装时的 Xray 版本：compat（兼容版，默认）、
-                       latest（最新版）或版本号，例如 v26.7.28
+  --core-version 版本  安装时的 Xray 版本：latest（最新正式版，默认）
+                       或指定版本号，例如 v26.10.31
   --update             仅检查并更新核心，不覆盖定制脚本
   --nodes              输出节点链接
   --uninstall          完整卸载
@@ -5550,7 +5579,7 @@ parse_args() {
             --core-version)
                 (( $# >= 2 )) || fatal '--core-version 缺少参数。'
                 CLI_CORE_TAG=$2
-                if [[ $CLI_CORE_TAG != compat && $CLI_CORE_TAG != latest ]]; then
+                if [[ $CLI_CORE_TAG != latest ]]; then
                     [[ $CLI_CORE_TAG =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]] || fatal "--core-version 格式不对：$CLI_CORE_TAG"
                     ver_ge "${CLI_CORE_TAG#v}" "$XRAY_MIN_VERSION" || fatal "--core-version 最低 v$XRAY_MIN_VERSION。"
                     CLI_CORE_TAG=$(normalize_tag "$CLI_CORE_TAG")
