@@ -33,7 +33,7 @@ set -Eeuo pipefail
 umask 077
 exec 4>&1 5>&2
 
-readonly SCRIPT_VERSION="0.2.3"
+readonly SCRIPT_VERSION="0.2.7"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
 readonly XRAY_MIN_VERSION="26.10.31"
 readonly STATE_SCHEMA=5
@@ -93,11 +93,12 @@ STEP_NO=0 STEP_TOTAL=0 STEP_OPEN=0 STEP_LOG='' STEP_LABEL='' DIE_SHOWN=0
 CHILD_RC=0 SUB_RC=0 TOP_RC=0 TOP_QUIET=0 STATE_READY=0
 MODE=new PREVIEW_RESULT=1 PORT_NOTE='' DRAFT_WATCH=0 DRAFT_BASE=''
 PREVIEW_NOTES=() CREATED_DIRS=()
+SNI_POOL_STAGED=0
 NET_V4='' NET_V6=''
 SNI_BEST_MS=0
 PARSE_ERR=''
 SERVICE_USER_CREATED=0
-NGINX_MODULE_LINE='' NGINX_REJECT_TLS=1
+NGINX_MODULE_LINE='' NGINX_REJECT_TLS=1 NGINX_SUPPORTS_E=0
 USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
 NEW_XRAY=0 NEW_SS=0 GEO_REFRESH=0 FULL_GEO_DIR=''
 UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1
@@ -158,12 +159,64 @@ strip_ansi() {
     printf -v "$2" '%s' "$__sa_s"
 }
 
+# A fast, no-fork width path for ASCII + common wide CJK/fullwidth characters.
+# Other Unicode (including emoji, narrow accented letters and combining sequences)
+# deliberately falls back to wc -L rather than applying an incorrect byte heuristic.
+ui_fast_wide() {
+    local __uw_s=$1 __uw_tail __uw_b
+    case $__uw_s in
+        *$'\u200d'*|*$'\ufe0e'*|*$'\ufe0f'*|*$'\u20e3'*|*$'\u3099'*|*$'\u309a'*) return 1 ;;
+    esac
+    local LC_ALL=C
+    # Reject 2-byte UTF-8, 4-byte UTF-8, E0-E2 (often narrow), and EE (PUA).
+    [[ $__uw_s != *[$'\xc2'-$'\xe2'$'\xee'$'\xf0'-$'\xf4']* ]] || return 1
+    # EF also contains narrow halfwidth/format code points; whitelist only
+    # fullwidth forms in EF BC, part of EF BD, and currency forms EF BF A0-A6.
+    __uw_tail=$__uw_s
+    while [[ $__uw_tail == *$'\xef'* ]]; do
+        __uw_tail=${__uw_tail#*$'\xef'}
+        [[ ${#__uw_tail} -ge 2 ]] || return 1
+        __uw_b=${__uw_tail:1:1}
+        case ${__uw_tail:0:1} in
+            $'\xbc') : ;;
+            $'\xbd') [[ $__uw_b < $'\xa1' ]] || return 1 ;;
+            $'\xbf') [[ $__uw_b == [$'\xa0'-$'\xa6'] ]] || return 1 ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
 str_width() {
-    local __sw_s __sw_c __sw_b
+    local __sw_s __sw_chars __sw_bytes __sw_w
     strip_ansi "$1" __sw_s
-    __sw_c=${#__sw_s}
-    byte_len "$__sw_s" __sw_b
-    printf -v "$2" '%d' $(( __sw_c + (__sw_b - __sw_c) / 2 ))
+    __sw_chars=${#__sw_s}
+    byte_len "$__sw_s" __sw_bytes
+    if (( __sw_chars == __sw_bytes )); then
+        printf -v "$2" '%d' "$__sw_chars"
+        return 0
+    fi
+    if ui_fast_wide "$__sw_s"; then
+        printf -v "$2" '%d' $(( __sw_chars + (__sw_bytes - __sw_chars) / 2 ))
+        return 0
+    fi
+    __sw_w=$(printf '%s\n' "$__sw_s" | wc -L 2>/dev/null) || __sw_w=$(( __sw_chars + (__sw_bytes - __sw_chars) / 2 ))
+    [[ $__sw_w =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || __sw_w=$(( __sw_chars + (__sw_bytes - __sw_chars) / 2 ))
+    if [[ $__sw_s == *$'\u200d'* ]]; then
+        local __sw_unit __sw_part
+        local -a __sw_units=()
+        mapfile -t __sw_units < <(display_units "$__sw_s")
+        __sw_w=0
+        for __sw_unit in "${__sw_units[@]}"; do
+            if [[ $__sw_unit == *$'\u200d'* ]]; then
+                __sw_w=$(( __sw_w + 2 ))
+            else
+                __sw_part=$(printf '%s\n' "$__sw_unit" | wc -L 2>/dev/null) || __sw_part=${#__sw_unit}
+                __sw_w=$(( __sw_w + __sw_part ))
+            fi
+        done
+    fi
+    printf -v "$2" '%d' "$__sw_w"
 }
 
 pad_to() {
@@ -176,6 +229,57 @@ pad_to() {
     fi
 }
 
+display_units() {
+    local s=$1 i=0 n=${#1} unit ch after
+    local flags='🇦🇧🇨🇩🇪🇫🇬🇭🇮🇯🇰🇱🇲🇳🇴🇵🇶🇷🇸🇹🇺🇻🇼🇽🇾🇿'
+    local tones='🏻🏼🏽🏾🏿'
+    while (( i < n )); do
+        unit=${s:i:1}
+        i=$(( i + 1 ))
+        if [[ $flags == *"$unit"* && $i -lt $n ]]; then
+            after=${s:i:1}
+            if [[ $flags == *"$after"* ]]; then unit+=$after; i=$(( i + 1 )); fi
+        fi
+        while (( i < n )); do
+            ch=${s:i:1}
+            case $ch in
+                $'\ufe0e'|$'\ufe0f'|$'\u20e3') unit+=$ch; i=$(( i + 1 )) ;;
+                $'\u200d')
+                    unit+=$ch; i=$(( i + 1 ))
+                    if (( i < n )); then unit+=${s:i:1}; i=$(( i + 1 )); fi ;;
+                *)
+                    if [[ $tones == *"$ch"* ]]; then unit+=$ch; i=$(( i + 1 ))
+                    else break; fi ;;
+            esac
+        done
+        printf '%s\n' "$unit"
+    done
+}
+
+# Only multi-code-point emoji sequences need the subprocess-backed grapheme
+# splitter. Ordinary CJK/ASCII text is split directly in the calling shell.
+ui_complex_clusters() {
+    local __uc_s=$1
+    case $__uc_s in
+        *$'\u200d'*|*$'\ufe0e'*|*$'\ufe0f'*|*$'\u20e3'*) return 0 ;;
+    esac
+    local LC_ALL=C
+    [[ $__uc_s == *[$'\xf0'-$'\xf4']* ]]
+}
+
+ui_split_units() {
+    local __us_s=$1 __us_dest=$2 __us_i
+    local -n __us_array=$__us_dest
+    __us_array=()
+    if ui_complex_clusters "$__us_s"; then
+        mapfile -t __us_array < <(display_units "$__us_s")
+    else
+        for (( __us_i=0; __us_i < ${#__us_s}; __us_i++ )); do
+            __us_array+=("${__us_s:__us_i:1}")
+        done
+    fi
+}
+
 fit_width() {
     local __fw_s=$1 __fw_max=$2 __fw_cur __fw_out __fw_head __fw_tail __fw_i __fw_ch __fw_w __fw_acc
     str_width "$__fw_s" __fw_cur
@@ -184,10 +288,12 @@ fit_width() {
         return 0
     fi
     strip_ansi "$__fw_s" __fw_s
+    local -a __fw_units=()
+    ui_split_units "$__fw_s" __fw_units
     if (( __fw_max < 8 )); then
         __fw_out='' __fw_acc=0
-        for (( __fw_i = 0; __fw_i < ${#__fw_s}; __fw_i++ )); do
-            __fw_ch=${__fw_s:__fw_i:1}
+        for (( __fw_i = 0; __fw_i < ${#__fw_units[@]}; __fw_i++ )); do
+            __fw_ch=${__fw_units[$__fw_i]}
             str_width "$__fw_ch" __fw_w
             (( __fw_acc + __fw_w <= __fw_max )) || break
             __fw_out+=$__fw_ch
@@ -200,16 +306,16 @@ fit_width() {
     [[ ${4:-} != end ]] || __fw_head=$(( __fw_max - 3 ))
     __fw_tail=$(( __fw_max - 3 - __fw_head ))
     __fw_out='' __fw_acc=0
-    for (( __fw_i = 0; __fw_i < ${#__fw_s}; __fw_i++ )); do
-        __fw_ch=${__fw_s:__fw_i:1}
+    for (( __fw_i = 0; __fw_i < ${#__fw_units[@]}; __fw_i++ )); do
+        __fw_ch=${__fw_units[$__fw_i]}
         str_width "$__fw_ch" __fw_w
         (( __fw_acc + __fw_w <= __fw_head )) || break
         __fw_out+=$__fw_ch
         __fw_acc=$(( __fw_acc + __fw_w ))
     done
     local __fw_back='' __fw_bacc=0
-    for (( __fw_i = ${#__fw_s} - 1; __fw_i >= 0; __fw_i-- )); do
-        __fw_ch=${__fw_s:__fw_i:1}
+    for (( __fw_i = ${#__fw_units[@]} - 1; __fw_i >= 0; __fw_i-- )); do
+        __fw_ch=${__fw_units[$__fw_i]}
         str_width "$__fw_ch" __fw_w
         (( __fw_bacc + __fw_w <= __fw_tail )) || break
         __fw_back=$__fw_ch$__fw_back
@@ -529,7 +635,19 @@ input_eof() {
     exit 0
 }
 
-draft_hash() { jq -S -c . "$DRAFT" 2>/dev/null | sha256sum | cut -c1-16; }
+draft_hash() {
+    {
+        jq -S -c . "$DRAFT" || return 1
+        if (( SNI_POOL_STAGED )); then
+            if [[ -f $STAGE/sni-pool.txt ]]; then
+                printf '%s\n' 'CUSTOM_SNI_POOL_PRESENT'
+                cat -- "$STAGE/sni-pool.txt"
+            else
+                printf '%s\n' 'DEFAULT_SNI_POOL'
+            fi
+        fi
+    } | sha256sum | cut -c1-16
+}
 
 draft_watch_start() { DRAFT_BASE=$(draft_hash); DRAFT_WATCH=1; }
 draft_watch_stop() { DRAFT_WATCH=0; DRAFT_BASE=''; }
@@ -658,10 +776,11 @@ wrap_text() {
         str_width "$__wt_line" __wt_w
         if (( __wt_w <= __wt_max )); then __wt_out+=${__wt_out:+$'\n'}$__wt_line; continue; fi
         __wt_cur='' __wt_acc=0
-        for (( __wt_i = 0; __wt_i < ${#__wt_line}; __wt_i++ )); do
-            __wt_ch=${__wt_line:__wt_i:1}
-            byte_len "$__wt_ch" __wt_b
-            if (( __wt_b > 1 )); then __wt_w=2; else __wt_w=1; fi
+        local -a __wt_units=()
+        ui_split_units "$__wt_line" __wt_units
+        for (( __wt_i = 0; __wt_i < ${#__wt_units[@]}; __wt_i++ )); do
+            __wt_ch=${__wt_units[$__wt_i]}
+            str_width "$__wt_ch" __wt_w
             if (( __wt_acc + __wt_w > __wt_max )); then
                 __wt_hold=''
                 if [[ $__wt_ch == [A-Za-z0-9._/:-] || $__wt_ch == [，。；：、）！？」] ]]; then
@@ -806,8 +925,10 @@ tui_menu() {
                 if [[ ${#__tm_k} == 1 && -n $__tm_keys && $__tm_keys == *"$__tm_k"* ]]; then TUI_KEY=$__tm_k; break; fi
                 if [[ $__tm_k == q || $__tm_k == Q ]]; then TUI_KEY=ESC; break; fi
                 if [[ $__tm_k == [0-9] ]]; then
-                    __tm_now=$(now_ms)
-                    if [[ -n $__tm_dg ]] && (( __tm_now - __tm_dt < 1000 )) && tui_jump "$__tm_dg$__tm_k"; then __tm_dg=''
+                    __tm_now=$(now_ms) || continue
+                    # Modular delta remains correct when the 100000-second counter wraps.
+                    if [[ -n $__tm_dg ]] && (( (__tm_now - __tm_dt + 100000000) % 100000000 < 1000 )) \
+                        && tui_jump "$__tm_dg$__tm_k"; then __tm_dg=''
                     else tui_jump "$__tm_k" || true; __tm_dg=$__tm_k; fi
                     __tm_dt=$__tm_now
                 elif [[ ${#__tm_k} == 1 ]]; then
@@ -902,7 +1023,8 @@ ask_no() {
 ask_number() {
     local __an_pr=$1 __an_min=$2 __an_max=$3 __an_def=${4:-} __an_n
     while :; do
-        read_line "$__an_pr：" __an_n "$__an_def"
+        read_line "$__an_pr（回车保留 ${__an_def:-默认值}，q 取消）：" __an_n
+        case $__an_n in q|Q) return 1 ;; esac
         [[ -n $__an_n ]] || __an_n=$__an_def
         if [[ $__an_n =~ ^[0-9]{1,9}$ ]] && (( 10#$__an_n >= __an_min && 10#$__an_n <= __an_max )); then
             printf -v "$5" '%d' $(( 10#$__an_n ))
@@ -1352,6 +1474,10 @@ write_service() {
                     printf 'CapabilityBoundingSet=\n'
                 fi
                 printf 'NoNewPrivileges=true\n'
+            elif [[ $name == zxray-nginx ]]; then
+                # Nginx master needs privileged bind and worker UID/GID transitions.
+                # CAP_KILL is needed for master to signal workers after UID switch.
+                printf 'NoNewPrivileges=true\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_CHOWN\n'
             fi
             printf 'ProtectSystem=full\nProtectHome=true\nPrivateTmp=true\n'
             if [[ -n $rw ]]; then printf 'ReadWritePaths=%s\n' "$rw"; fi
@@ -1448,7 +1574,7 @@ check_service_access() {
     have su || return 0
     su -s /bin/sh -c true "$SERVICE_USER" >/dev/null 2>&1 || return 0
     for f in "$@"; do
-        su -s /bin/sh -c "test -r '$f'" "$SERVICE_USER" >/dev/null 2>&1 && continue
+        su -s /bin/sh -c 'test -r "$1"' "$SERVICE_USER" _ "$f" >/dev/null 2>&1 && continue
         die "运行用户 $SERVICE_USER 读不到 $f。" "请检查它所在各级目录的权限（其他用户需要有 x 权限）。"
         return 1
     done
@@ -1483,7 +1609,7 @@ fw_del() {
     case $1 in
         ufw)
             have ufw || return 0
-            ufw delete allow "$2" >/dev/null 2>&1 || true ;;
+            ufw delete allow "$2" >/dev/null 2>>"${STEP_LOG:-/dev/null}" ;;
         firewalld)
             have firewall-cmd || return 0
             if [[ $(firewall-cmd --state 2>/dev/null || true) == running ]]; then
@@ -1544,7 +1670,12 @@ fw_undo_tx() {
 fw_remove_recorded() {
     local r
     while IFS= read -r r; do
-        [[ -z $r ]] || fw_del "${r%%:*}" "${r#*:}" || ui_warn "防火墙规则 $r 没能删除（firewalld 没在运行），请启动 firewalld 后手动删除。"
+        [[ -n $r ]] || continue
+        if fw_del "${r%%:*}" "${r#*:}"; then
+            [[ -z $TX || ! -f $TX/ready ]] || printf '%s\n' "$r" >> "$TX/fw-removed"
+        else
+            ui_warn "防火墙规则 $r 没能删除，请稍后手动处理。"
+        fi
     done < <(jq -r '.meta.fw_rules // [] | .[]' "$1" 2>/dev/null)
     return 0
 }
@@ -1962,6 +2093,25 @@ listeners() {
     ss -H "$flag" 2>/dev/null | awk -v p="$2" '{n = split($4, a, ":"); if (a[n] == p) print}'
 }
 
+nginx_worker_owned() {
+    local __nw_pid=$1 __nw_fd __nw_target
+    # An orphaned worker keeps its cgroup even if its master exited.
+    if [[ $INIT == systemd && -r /proc/$__nw_pid/cgroup ]] \
+        && grep -Eq '(^|/)zxray-nginx[.]service($|/)' "/proc/$__nw_pid/cgroup" 2>/dev/null; then
+        return 0
+    fi
+    # The managed worker may have inherited the error log on a descriptor
+    # other than 2. Match the exact managed log path, not a broad directory.
+    for __nw_fd in /proc/$__nw_pid/fd/*; do
+        [[ -L $__nw_fd ]] || continue
+        __nw_target=$(readlink -- "$__nw_fd" 2>/dev/null || true)
+        case $__nw_target in
+            "$NGINX_DIR/error.log"|"$NGINX_DIR/error.log (deleted)") return 0 ;;
+        esac
+    done
+    return 1
+}
+
 pid_is_owned() {
     local pid=$1 exe cmd
     [[ -r /proc/$pid/cmdline ]] || return 1
@@ -1973,6 +2123,15 @@ pid_is_owned() {
     [[ $cmd == *nginx* && $cmd == *"$NGINX_DIR/nginx.conf"* ]] && return 0
     if [[ $cmd == 'nginx: worker process'* || $cmd == 'nginx: cache '* ]]; then
         local ppid
+        # Never adopt an unrelated process that merely spoofs nginx's argv.
+        # Accept only recognized nginx executable names, including package upgrades.
+        # The worker still needs independent ownership evidence (cgroup/log fd/parent).
+        case ${exe##*/} in
+            nginx|nginx\ \(deleted\)|nginx-light|nginx-light\ \(deleted\)|nginx-extras|nginx-extras\ \(deleted\)|\
+            nginx-core|nginx-core\ \(deleted\)|nginx-full|nginx-full\ \(deleted\)|nginx.dpkg-new|nginx.dpkg-new\ \(deleted\)) ;;
+            *) return 1 ;;
+        esac
+        if nginx_worker_owned "$pid"; then return 0; fi
         ppid=$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)
         if [[ $ppid =~ ^[0-9]+$ ]] && (( ppid > 1 && ppid != pid )) && pid_is_owned "$ppid"; then return 0; fi
     fi
@@ -2062,21 +2221,34 @@ sni_probe() {
 }
 
 now_ms() {
-    if [[ -n ${EPOCHREALTIME:-} ]]; then
-        local t=${EPOCHREALTIME/./}
-        printf '%s' $(( 10#$t / 1000 ))
+    # Return an eight-digit millisecond wall-clock tick, safe for 32-bit Bash.
+    # Both the TUI and SNI probes handle the modulo-100000000 wrap.
+    local seconds fraction raw
+    if [[ ${EPOCHREALTIME:-} =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+        seconds=${BASH_REMATCH[1]}
+        fraction=${BASH_REMATCH[2]}000
+        seconds=${seconds: -5}
+        printf '%d' $(( 10#$seconds * 1000 + 10#${fraction:0:3} ))
     else
-        date +%s%3N
+        raw=$(date +%s%3N) || return 1
+        [[ $raw =~ ^[0-9]+$ ]] || return 1
+        # Bash printf interprets leading zeros as octal; force decimal first.
+        printf '%d' "$(( 10#${raw: -8} ))"
     fi
 }
 
 sni_probe_job() {
-    local d=$1 out=$2 i t1 t2
+    local d=$1 out=$2 i t1 t2 elapsed
     for i in 1 2 3; do
-        t1=$(now_ms)
+        t1=$(now_ms) || continue
         if sni_probe "$d" "$out.log"; then
-            t2=$(now_ms)
-            printf '%s\n' $(( t2 - t1 )) >> "$out.ms"
+            t2=$(now_ms) || continue
+            elapsed=$(( (t2 - t1 + 100000000) % 100000000 ))
+            # The handshake has a five-second timeout. Discard measurements
+            # distorted by a wall-clock adjustment instead of ranking them.
+            if (( elapsed <= 6000 )); then
+                printf '%s\n' "$elapsed" >> "$out.ms"
+            fi
         fi
     done
     : > "$out.done"
@@ -2084,24 +2256,41 @@ sni_probe_job() {
 
 sni_auto_select() {
     local __sa_out=$1 __sa_dir __sa_i __sa_total __sa_done __sa_best='' __sa_bscore=999999999 __sa_score __sa_ms __sa_ok
+    local __sa_running __sa_pid __sa_deadline=$(( SECONDS + 23 ))
     local -a __sa_pool=() __sa_pids=() __sa_sorted=()
     mapfile -t __sa_pool < <(sni_pool)
     __sa_total=${#__sa_pool[@]}
+    (( __sa_total )) || return 1
     __sa_dir=$STAGE/sni-test
     tty_echo -echo
     rm -rf -- "$__sa_dir"
     mkdir -p -- "$__sa_dir"
     for __sa_i in "${!__sa_pool[@]}"; do
-        sni_probe_job "${__sa_pool[$__sa_i]}" "$__sa_dir/$__sa_i" 3>&- 4>&- 9>&- &
+        (
+            trap - ERR INT TERM HUP EXIT TSTP
+            set +e
+            sni_probe_job "${__sa_pool[$__sa_i]}" "$__sa_dir/$__sa_i"
+        ) 3>&- 4>&- 9>&- &
         __sa_pids+=("$!")
     done
-    while :; do
-        __sa_done=$(find "$__sa_dir" -name '*.done' 2>/dev/null | wc -l)
+    while (( SECONDS <= __sa_deadline )); do
+        __sa_done=$(find "$__sa_dir" -maxdepth 1 -name '*.done' 2>/dev/null | wc -l)
         if [[ -t 4 ]]; then printf '\r  正在测速伪装站点 %d/%d ...' "$__sa_done" "$__sa_total" >&4; fi
         (( __sa_done < __sa_total )) || break
+        __sa_running=0
+        for __sa_pid in "${__sa_pids[@]}"; do
+            if kill -0 "$__sa_pid" 2>/dev/null; then __sa_running=1; break; fi
+        done
+        (( __sa_running )) || break
         sleep 0.3
     done
-    wait "${__sa_pids[@]}" 2>/dev/null || true
+    # Never wait forever: terminate only still-running workers when probes did not finish.
+    if (( __sa_done < __sa_total )); then
+        for __sa_pid in "${__sa_pids[@]}"; do
+            kill -0 "$__sa_pid" 2>/dev/null && kill "$__sa_pid" 2>/dev/null || true
+        done
+    fi
+    for __sa_pid in "${__sa_pids[@]}"; do wait "$__sa_pid" 2>/dev/null || true; done
     if [[ -t 4 ]]; then printf '\r%*s\r' "$UI_W" '' >&4; fi
     for __sa_i in "${!__sa_pool[@]}"; do
         [[ -s $__sa_dir/$__sa_i.ms ]] || continue
@@ -2210,6 +2399,7 @@ parse_ss_link() {
         hostport=$(uri_decode "$right") || { PARSE_ERR='百分号编码不正确'; return 1; }
     else
         decoded=$(b64_decode_relaxed "$(uri_decode "$main")") || { PARSE_ERR='链接无法解码'; return 1; }
+        [[ $decoded == *@* ]] || { PARSE_ERR='SS 链接解码后缺少 @ 分隔符'; return 1; }
         creds=${decoded%@*}
         hostport=${decoded##*@}
     fi
@@ -2223,6 +2413,9 @@ parse_ss_link() {
         *) PARSE_ERR="Xray 不支持这种加密方式：$method"; return 1 ;;
     esac
     if (( klen )); then
+        [[ $password != :* && $password != *: && $password != *::* ]] || {
+            PARSE_ERR='SS2022 多密钥不能存在空字段（连续冒号或首尾冒号）'; return 1;
+        }
         local -a keys=()
         IFS=: read -r -a keys <<< "$password"
         for key in "${keys[@]}"; do
@@ -2290,7 +2483,9 @@ parse_vless_link() {
         return 1
     fi
     [[ -z $header || $header == none ]] || { PARSE_ERR='只支持 headerType=none'; return 1; }
-    [[ -z $spx || $spx == / ]] || { PARSE_ERR='无法保留自定义 spiderX'; return 1; }
+    [[ -z $spx || ( $spx == /* && ${#spx} -le 256 && $spx != *[[:cntrl:]]* ) ]] || {
+        PARSE_ERR='spiderX 必须以 / 开头、长度不超过 256，且不能包含控制字符'; return 1;
+    }
     if [[ $security != reality && -n "$sni$pbk$sid$fp$spx" ]]; then
         PARSE_ERR='非 REALITY 链接带了 REALITY 参数'
         return 1
@@ -2313,9 +2508,9 @@ parse_vless_link() {
             chrome|firefox|safari|ios|android|edge|360|qq|random|randomized|randomizednoalpn) ;;
             *) PARSE_ERR="不认识的指纹：$fp"; return 1 ;;
         esac
-        stream=$(jq -cn --arg sni "$sni" --arg pbk "$pbk" --arg sid "$sid" --arg fp "$fp" \
+        stream=$(jq -cn --arg sni "$sni" --arg pbk "$pbk" --arg sid "$sid" --arg fp "$fp" --arg spx "${spx:-/}" \
             '{method:"raw", security:"reality",
-              realitySettings:({serverName:$sni, publicKey:$pbk, fingerprint:$fp, spiderX:"/"}
+              realitySettings:({serverName:$sni, publicKey:$pbk, fingerprint:$fp, spiderX:$spx}
                 + (if $sid == "" then {} else {shortId:$sid} end))}')
     else
         stream='{"method":"raw"}'
@@ -2439,7 +2634,7 @@ public_ports() {
 
 
 draft_new() {
-    local s=$1
+    local s=$1 p
     PREVIEW_NOTES=()
     jq -n --arg s "$s" --arg v4 "$NET_V4" --arg v6 "$NET_V6" --argjson schema "$STATE_SCHEMA" \
         --arg name "$(default_node_name)" --argjson jitter "$(limit_jitter_new)" '{
@@ -2460,12 +2655,11 @@ draft_new() {
         landings: [],
         meta: {nginx_packages: [], nginx_hash: "", created_user: 0, selinux_note: 0, fw_rules: [], extra_packages: []}
     }' > "$DRAFT"
-    local p
     PORT_NOTE=''
     if scheme_has_reality "$s"; then
         p=443
         if port_taken tcp 443; then
-            p=$(random_free_port)
+            p=$(random_free_port) || return 1
             if [[ $s == triple ]]; then note_add "TCP 443 被 $(port_owner_label tcp 443) 占用，REALITY 改用随机端口 $p。"
             else PORT_NOTE="443 已被 $(port_owner_label tcp 443) 占用"; fi
         fi
@@ -2475,9 +2669,18 @@ draft_new() {
             st_set .meta.selinux_note 1
         fi
     fi
-    if scheme_has_ss "$s"; then st_set .ss.port "$(random_free_port)"; fi
-    if scheme_has_enc_inbound "$s"; then st_set .enc.port "$(random_free_port)"; fi
-    if [[ $(scheme_transport "$s") == xhttp ]]; then st_sets .xhttp.path "$(random_path)"; fi
+    if scheme_has_ss "$s"; then
+        p=$(random_free_port) || return 1
+        st_set .ss.port "$p"
+    fi
+    if scheme_has_enc_inbound "$s"; then
+        p=$(random_free_port) || return 1
+        st_set .enc.port "$p"
+    fi
+    if [[ $(scheme_transport "$s") == xhttp ]]; then
+        p=$(random_path) || return 1
+        st_sets .xhttp.path "$p"
+    fi
     if [[ $s == enc-split ]]; then
         st_filter '.enc.rtt = "1rtt" | .enc.shape = "random" | .enc.auth = "mlkem768" | .enc.pad = "aggressive"'
     fi
@@ -2485,40 +2688,57 @@ draft_new() {
 }
 
 finalize_identity() {
-    local xray=$1 s out i n id
+    local xray=$1 s out i n id p private public secret
     s=$(scheme)
     n=$(jq '.users | length' "$DRAFT")
     for (( i = 0; i < n; i++ )); do
         id=$(jq -r ".users[$i].id" "$DRAFT")
         [[ -z $id ]] || continue
         if [[ $s == ss ]] && [[ $(jq -r ".users[$i].name" "$DRAFT") != direct ]]; then
-            id=$(ss_new_password)
+            id=$(ss_new_password) || return 1
         else
-            id=$(new_uuid)
+            id=$(new_uuid) || return 1
         fi
+        [[ -n $id ]] || { die '生成用户凭据失败。'; return 1; }
         st_filter --arg v "$id" ".users[$i].id = \$v"
     done
     if scheme_has_reality "$s"; then
         if [[ -z $(st .reality.private_key) ]]; then
-            out=$("$xray" x25519)
-            st_sets .reality.private_key "$(awk '/PrivateKey:|Private key:/{print $NF; exit}' <<< "$out")"
-            st_sets .reality.public_key "$(awk '/Password \(PublicKey\):|Password:|Public key:/{print $NF; exit}' <<< "$out")"
+            out=$("$xray" x25519) || { die 'Xray 生成 REALITY 密钥失败。'; return 1; }
+            private=$(awk '/PrivateKey:|Private key:/{print $NF; exit}' <<< "$out")
+            public=$(awk '/Password \(PublicKey\):|Password:|Public key:/{print $NF; exit}' <<< "$out")
+            [[ -n $private && -n $public ]] || { die '无法解析 REALITY 密钥。'; return 1; }
+            st_sets .reality.private_key "$private"
+            st_sets .reality.public_key "$public"
         elif [[ -z $(st .reality.public_key) ]]; then
-            out=$("$xray" x25519 -i "$(st .reality.private_key)")
-            st_sets .reality.public_key "$(awk '/Password \(PublicKey\):|Password:|Public key:/{print $NF; exit}' <<< "$out")"
+            out=$("$xray" x25519 -i "$(st .reality.private_key)") || return 1
+            public=$(awk '/Password \(PublicKey\):|Password:|Public key:/{print $NF; exit}' <<< "$out")
+            [[ -n $public ]] || { die '无法从 REALITY 私钥恢复公钥。'; return 1; }
+            st_sets .reality.public_key "$public"
         fi
-        [[ -n $(st .reality.public_key) ]] || { die '无法生成 REALITY 密钥。'; return 1; }
-        [[ -n $(st .reality.short_id) ]] || st_sets .reality.short_id "$(rand_hex 8)"
+        if [[ -z $(st .reality.short_id) ]]; then
+            secret=$(rand_hex 8) || return 1
+            [[ $secret =~ ^[0-9a-f]{16}$ ]] || { die '生成 REALITY shortId 失败。'; return 1; }
+            st_sets .reality.short_id "$secret"
+        fi
         if [[ $(st .reality.guard) == nginx ]]; then
-            [[ $(st .reality.internal) != 0 ]] || st_set .reality.internal "$(random_free_port)"
+            p=$(st .reality.internal)
+            if [[ $p == 0 ]] || port_foreign tcp "$p"; then
+                p=$(random_free_port) || return 1
+                st_set .reality.internal "$p"
+            fi
         else
-            [[ $(st .reality.gate) != 0 ]] || st_set .reality.gate "$(random_free_port)"
+            p=$(st .reality.gate)
+            if [[ $p == 0 ]] || port_foreign tcp "$p"; then
+                p=$(random_free_port) || return 1
+                st_set .reality.gate "$p"
+            fi
         fi
     fi
     if needs_enc_keys; then
         if [[ -z $(st .enc.server_key) || -z $(st .enc.client_key) ]]; then
             local want line_dec line_enc
-            out=$("$xray" vlessenc)
+            out=$("$xray" vlessenc) || { die 'Xray 生成 VLESS-ENC 密钥失败。'; return 1; }
             if [[ $(st .enc.auth) == mlkem768 ]]; then want='Authentication: ML-KEM-768'; else want='Authentication: X25519'; fi
             line_dec=$(awk -v w="$want" 'index($0,w){f=1;next} f && /"decryption":/{sub(/.*"decryption": *"/,""); sub(/".*/,""); print; exit}' <<< "$out")
             line_enc=$(awk -v w="$want" 'index($0,w){f=1;next} f && /"encryption":/{sub(/.*"encryption": *"/,""); sub(/".*/,""); print; exit}' <<< "$out")
@@ -2527,7 +2747,11 @@ finalize_identity() {
             st_sets .enc.client_key "${line_enc##*.}"
         fi
     fi
-    if scheme_has_ss "$s" && [[ -z $(st .ss.password) ]]; then st_sets .ss.password "$(ss_new_password)"; fi
+    if scheme_has_ss "$s" && [[ -z $(st .ss.password) ]]; then
+        secret=$(ss_new_password) || return 1
+        [[ -n $secret ]] || { die '生成 SS2022 密钥失败。'; return 1; }
+        st_sets .ss.password "$secret"
+    fi
     return 0
 }
 
@@ -2998,6 +3222,7 @@ pv_changed_count() {
     for key in "${PV_KEYS[@]}"; do
         item_changed "$key" "$(item_value "$key")" && n=$(( n + 1 ))
     done
+    if sni_pool_changed; then n=$(( n + 1 )); fi
     printf '%d' "$n"
 }
 
@@ -3064,8 +3289,8 @@ preview_ready() {
         edit_sni
         return 1
     fi
-    if scheme_is_split "$s" && [[ -z $(st .net.v4) || -z $(st .net.v6) ]]; then
-        ui_warn '上下行分离需要填写本机的 IPv4 和 IPv6 地址。'
+    if scheme_is_split "$s" && { ! valid_ipv4 "$(st .net.v4)" || ! valid_ipv6 "$(st .net.v6)"; }; then
+        ui_warn '上下行分离需要填写有效的 IPv4 和 IPv6 地址。'
         ui_pause
         edit_addr
         return 1
@@ -3110,6 +3335,10 @@ pc_build() {
             done
             (( shown )) || ui_kv "$lab" "${C_YELLOW}已修改$C_RESET" '细节参数有改动'
         done
+    fi
+    if sni_pool_changed; then
+        ui_kv '候选站点' "${C_YELLOW}已修改${C_RESET}" '应用时才写入正式文件'
+        n=$(( n + 1 ))
     fi
     if (( n == 0 )); then ui_line '没有修改，会按当前设置重新生成配置并重启服务。'; fi
     ui_blank
@@ -3162,7 +3391,11 @@ preview_loop() {
                 case $key in
                     y|a)
                         preview_ready || continue
-                        if [[ $MODE == modify ]]; then pv_confirm || continue; fi
+                        if [[ $MODE == modify ]]; then pv_confirm || continue
+                        elif state_ok; then
+                            ui_warn '重新安装会生成全新的节点，现有节点全部失效。'
+                            ask_no '确定重新安装' || continue
+                        fi
                         draft_watch_stop
                         PREVIEW_RESULT=0
                         return 0 ;;
@@ -3381,10 +3614,10 @@ confirm_landing_add() {
     ui_kv '地址' "$(uri_host "$PARSED_HOST")"
     ui_kv '端口' "$PARSED_PORT"
     if [[ $PARSED_KIND == ss ]]; then
-        ui_kv '加密方式' "$(jq -r '.settings.servers[0].method // "unknown"' <<< "$PARSED_OUTBOUND_JSON")"
+        ui_kv '加密方式' "$(jq -r '.settings.method // "unknown"' <<< "$PARSED_OUTBOUND_JSON")"
     else
         local encryption security
-        encryption=$(jq -r '.settings.vnext[0].users[0].encryption // "none"' <<< "$PARSED_OUTBOUND_JSON")
+        encryption=$(jq -r '.settings.encryption // "none"' <<< "$PARSED_OUTBOUND_JSON")
         security=$(jq -r '.streamSettings.security // "none"' <<< "$PARSED_OUTBOUND_JSON")
         if [[ $security == reality ]]; then
             ui_kv '安全类型' 'REALITY'
@@ -3547,17 +3780,18 @@ edit_xmux() {
             r0=$(jq -r '.xhttp.xmux | (.maxConcurrency // .maxConnections // "") ' "$DRAFT")
             s0=$(jq -r '.xhttp.xmux.hMaxReusableSecs // "1800-3000"' "$DRAFT")
             [[ $c == "$cur" ]] || r0=''
-            if [[ $c == 2 ]]; then input_page 'XMUX' '按并发数' '每条底层连接最多同时承载几路请求，可以填数字或区间。'
-            else input_page 'XMUX' '按连接数' '客户端最多开几条底层连接，可以填数字或区间。'; fi
+            if [[ $c == 2 ]]; then input_page 'XMUX' '按并发数' '每条底层连接最多同时承载几路请求。输入 q 或空回车取消。'
+            else input_page 'XMUX' '按连接数' '客户端最多开几条底层连接，可以填数字或区间。输入 q 或空回车取消。'; fi
             while :; do
-                if [[ $c == 2 ]]; then read_line '每条连接承载几路（例如 16-32）：' r "${r0:-16-32}"
-                else read_line '底层连接数（例如 2-4）：' r "${r0:-2-4}"; fi
-                [[ -n $r ]] || return 0
+                if [[ $c == 2 ]]; then read_line '每条连接承载几路（例如 16-32）：' r "$r0"
+                else read_line '底层连接数（例如 2-4）：' r "$r0"; fi
+                [[ -n $r && $r != q && $r != Q ]] || return 0
                 [[ $r =~ ^[0-9]{1,4}(-[0-9]{1,4})?$ ]] && break
                 ui_warn '请填写数字或区间，例如 16-32。'
             done
             while :; do
                 read_line '每条连接最长复用几秒：' s "$s0"
+                [[ $s != q && $s != Q ]] || return 0
                 [[ -n $s ]] || s=$s0
                 [[ $s =~ ^[0-9]{1,6}(-[0-9]{1,6})?$ ]] && break
                 ui_warn '请填写数字或区间，例如 1800-3000。'
@@ -3658,7 +3892,7 @@ edit_encp() {
             5)
                 input_page '票据有效期' '' $'0-RTT 会话票据在服务端保留多久。\n只影响服务端，客户端不用重新导入。' \
                     '当前' "$(st .enc.ticket | tr -d s) 秒" '可以填' '1-86400 秒'
-                ask_number '有效期（秒）' 1 86400 "$(st .enc.ticket | tr -d s)" v
+                ask_number '有效期（秒）' 1 86400 "$(st .enc.ticket | tr -d s)" v || continue
                 st_sets .enc.ticket "${v}s" ;;
         esac
     done
@@ -3677,16 +3911,16 @@ edit_padding() {
         2) st_sets .enc.pad gentle ;;
         3) st_sets .enc.pad aggressive ;;
         4)
-            input_page '填充' '自定义' $'格式：多段「概率-最小-最大」用点连接，\n第一段概率须为 100，长度不小于 35。'
+            input_page '填充' '自定义' $'格式：多段「概率-最小-最大」用点连接，\n第一段概率须为 100，长度不小于 35。\n示例：100-96-768.60-0-80。输入 q 或直接空回车取消。'
             while :; do
-                read_line '客户端规则：' p "$(st .enc.pad_client | grep . || printf '100-96-768.60-0-80')"
-                [[ -n $p ]] || return 0
+                read_line '客户端规则：' p "$( [[ $(st .enc.pad) != custom ]] || st .enc.pad_client )"
+                [[ -n $p && $p != q && $p != Q ]] || return 0
                 valid_padding "$p" && break
                 ui_warn '格式不正确。'
             done
             while :; do
-                read_line '服务端规则：' q "$(st .enc.pad_server | grep . || printf '100-128-1024.70-0-96')"
-                [[ -n $q ]] || return 0
+                read_line '服务端规则：' q "$( [[ $(st .enc.pad) != custom ]] || st .enc.pad_server )"
+                [[ -n $q && $q != q && $q != Q ]] || return 0
                 valid_padding "$q" && break
                 ui_warn '格式不正确。'
             done
@@ -3712,10 +3946,10 @@ edit_conn() {
     local a b total
     input_page '连接上限' '' $'Nginx 在验证之前限制并发连接，超出的直接断开。\n对正常客户端同样生效，多人共用时请适当调大。' \
         '每个 IP' "$(st .reality.conn_ip)，可以填 16-65535" '总计' "$(st .reality.conn_total)，不能小于每个 IP 的上限"
-    ask_number '每个 IP 最多几条' 16 65535 "$(st .reality.conn_ip)" a
+    ask_number '每个 IP 最多几条' 16 65535 "$(st .reality.conn_ip)" a || return 0
     total=$(st .reality.conn_total)
     (( total >= a )) || total=$a
-    ask_number '总计最多几条' "$a" 65535 "$total" b
+    ask_number '总计最多几条' "$a" 65535 "$total" b || return 0
     st_set .reality.conn_ip "$a"
     st_set .reality.conn_total "$b"
 }
@@ -3734,10 +3968,10 @@ edit_limit() {
         2) st_sets .reality.limit std ;;
         3)
             input_page '回落限速' '自定义' '单位是字节，1KiB = 1024，1MiB = 1048576。'
-            ask_number '上行传多少字节后限速' 0 104857600 "$(st .reality.limit_custom.ua)" ua
-            ask_number '上行每秒多少字节' 1 104857600 "$(st .reality.limit_custom.ur)" ur
-            ask_number '下行传多少字节后限速' 0 104857600 "$(st .reality.limit_custom.da)" da
-            ask_number '下行每秒多少字节' 1 104857600 "$(st .reality.limit_custom.dr)" dr
+            ask_number '上行传多少字节后限速' 0 104857600 "$(st .reality.limit_custom.ua)" ua || return 0
+            ask_number '上行每秒多少字节' 1 104857600 "$(st .reality.limit_custom.ur)" ur || return 0
+            ask_number '下行传多少字节后限速' 0 104857600 "$(st .reality.limit_custom.da)" da || return 0
+            ask_number '下行每秒多少字节' 1 104857600 "$(st .reality.limit_custom.dr)" dr || return 0
             st_set .reality.limit_custom "$(jq -cn --argjson a "$ua" --argjson b "$ur" --argjson c "$da" --argjson d "$dr" \
                 '{ua:$a, ur:$b, da:$c, dr:$d}')"
             st_sets .reality.limit custom ;;
@@ -4124,10 +4358,10 @@ render_xray_config() {
     if (( ${#direct_tags[@]} )); then tags_json=$(printf '%s\n' "${direct_tags[@]}" | jq -R . | jq -cs .); fi
     if scheme_has_reality "$s" && [[ $(st .reality.guard) == xray ]]; then
         # Keep decoy/guard traffic isolated from optional CN/BT policies.
-        fallback_out=$(jq -cn --arg strat "$strategy" --argjson rules "$(base_final_rules_json)" '[
+        fallback_out=$(jq -cn --argjson rules "$(base_final_rules_json)" '[
           {tag:"reality-fallback", protocol:"freedom",
-           settings:{domainStrategy:$strat, finalRules:$rules},
-           streamSettings:{sockopt:{domainStrategy:$strat}}}]')
+           settings:{domainStrategy:"UseIPv4v6", finalRules:$rules},
+           streamSettings:{sockopt:{domainStrategy:"UseIPv4v6"}}}]')
     fi
     jq -n --slurpfile inb "$inb" --slurpfile routed "$rules" \
         --argjson gate "$gate" --argjson tags "$tags_json" --arg strategy "$strategy" \
@@ -4200,6 +4434,8 @@ nginx_detect() {
     fi
     v=$(sed -n 's#.*nginx/\([0-9.]*\).*#\1#p' <<< "$build" | head -n 1)
     if [[ -n $v ]] && ver_ge "$v" 1.19.4; then NGINX_REJECT_TLS=1; else NGINX_REJECT_TLS=0; fi
+    # -e overrides the compiled-in error log before nginx parses our config (since 1.19.5).
+    if [[ -n $v ]] && ver_ge "$v" 1.19.5; then NGINX_SUPPORTS_E=1; else NGINX_SUPPORTS_E=0; fi
 }
 
 render_nginx() {
@@ -4691,16 +4927,32 @@ wanted_services() {
 }
 
 stop_owned_services() {
-    local s pid n
+    local s pid n state
     for s in "${MANAGED_SERVICES[@]}"; do svc_stop_disable "$s"; done
     while read -r pid; do
         [[ -n $pid ]] || continue
-        if pid_is_owned "$pid"; then
-            kill "$pid" 2>/dev/null || true
-            for n in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
-            if kill -0 "$pid" 2>/dev/null; then die "进程 $pid 未能停止。"; return 1; fi
+        pid_is_owned "$pid" || continue
+        kill -TERM "$pid" 2>/dev/null || true
+        for n in 1 2 3 4 5 6 7 8 9 10; do
+            if [[ ! -d /proc/$pid ]] || [[ $(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true) == Z ]]; then break; fi
+            pid_is_owned "$pid" || break
+            sleep 0.2
+        done
+        if [[ -d /proc/$pid ]] && pid_is_owned "$pid" \
+            && [[ $(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true) != Z ]]; then
+            kill -KILL "$pid" 2>/dev/null || true
+            for n in 1 2 3 4 5; do
+                [[ -d /proc/$pid ]] || break
+                state=$(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)
+                [[ $state != Z ]] || break
+                sleep 0.2
+            done
+            if [[ -d /proc/$pid ]] && pid_is_owned "$pid" \
+                && [[ $(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true) != Z ]]; then
+                die "托管进程 $pid 未能停止。"; return 1
+            fi
         fi
-    done < <(pgrep -x 'xray|ssserver|nginx' 2>/dev/null || true)
+    done < <(pgrep -x 'xray|ssserver|nginx(-light|-extras|-core|-full|[.]dpkg-new)?' 2>/dev/null || true)
 }
 
 remove_old_files() {
@@ -4771,8 +5023,16 @@ install_files_and_services() {
         make_dir "$NGINX_DIR/tmp" "$NGINX_RUN"
         chmod 755 "$NGINX_RUN"
         atomic_install "$STAGE/nginx.conf" "$NGINX_DIR/nginx.conf" 644
-        nginx -t -c "$NGINX_DIR/nginx.conf" -p "$NGINX_DIR/" >> "$STEP_LOG" 2>&1 || { die 'Nginx 配置检查没有通过。'; return 1; }
-        write_service zxray-nginx "$(command -v nginx)" "-c $NGINX_DIR/nginx.conf -p $NGINX_DIR/ -g 'daemon off;'" \
+        local -a nginx_test_opts=()
+        local nginx_service_opts=''
+        if (( NGINX_SUPPORTS_E )); then
+            nginx_test_opts=(-e "$NGINX_DIR/error.log")
+            nginx_service_opts="-e $NGINX_DIR/error.log "
+        fi
+        nginx "${nginx_test_opts[@]}" -t -c "$NGINX_DIR/nginx.conf" -p "$NGINX_DIR/" >> "$STEP_LOG" 2>&1 || {
+            die 'Nginx 配置检查没有通过。'; return 1;
+        }
+        write_service zxray-nginx "$(command -v nginx)" "${nginx_service_opts}-c $NGINX_DIR/nginx.conf -p $NGINX_DIR/ -g 'daemon off;'" \
             'Xray Manager Nginx' root 0 '' "$NGINX_DIR" zxray-nginx
     fi
 }
@@ -4946,7 +5206,7 @@ apply_draft() {
 }
 
 ports_preflight() {
-    local proto port label
+    local proto port label internal
     while read -r proto port label; do
         [[ -n $port ]] || continue
         if port_foreign "$proto" "$port"; then
@@ -4954,6 +5214,14 @@ ports_preflight() {
             return 1
         fi
     done <<< "$(public_ports)"
+    if scheme_has_reality "$(scheme)"; then
+        if [[ $(st .reality.guard) == nginx ]]; then internal=$(st .reality.internal)
+        else internal=$(st .reality.gate); fi
+        if ! valid_port "$internal" || port_foreign tcp "$internal"; then
+            die "REALITY 本地转发端口 $internal 无法使用，请重新运行以自动分配空闲端口。"
+            return 1
+        fi
+    fi
     return 0
 }
 
@@ -4971,7 +5239,10 @@ write_node_files() {
     jq -r '.[].link' "$STAGE/nodes.json" > "$STAGE/sub.txt"
     atomic_install "$STAGE/sub.txt" "$SUB_FILE" 600
     b64_oneline < "$SUB_FILE" | atomic_write "$SUB_B64" 600
-    if [[ -f $STAGE/sni-pool.txt ]]; then atomic_install "$STAGE/sni-pool.txt" "$SNI_POOL_FILE" 600; fi
+    if (( SNI_POOL_STAGED )); then
+        if [[ -f $STAGE/sni-pool.txt ]]; then atomic_install "$STAGE/sni-pool.txt" "$SNI_POOL_FILE" 600
+        else rm -f -- "$SNI_POOL_FILE"; fi
+    fi
 }
 
 post_commit_cleanup() {
@@ -4984,7 +5255,8 @@ release_nginx_packages() {
     pk=$(jq -c '.meta.nginx_packages // []' "$STATE" 2>/dev/null || echo '[]')
     [[ $pk != '[]' ]] || return 0
     hash=$(jq -r '.meta.nginx_hash // empty' "$STATE")
-    if svc_active nginx || pgrep -x nginx >/dev/null 2>&1 || [[ $(nginx_system_hash) != "$hash" ]]; then
+    if [[ -z $hash ]] || svc_active nginx || pgrep -x 'nginx(-light|-extras|-core|-full|[.]dpkg-new)?' >/dev/null 2>&1 \
+        || [[ $(nginx_system_hash) != "$hash" ]]; then
         ui_note 'Nginx 还在被其他程序使用或配置被改过，保留它的软件包。'
         return 0
     fi
@@ -5133,8 +5405,10 @@ action_install() {
     ui_line '正在检测本机公网地址...'
     detect_public_ips
     DRAFT=$STAGE/draft.json
-    local def=1 curidx=0
-    if state_ok; then
+    local def=1 curidx=0 cli_first=1 had_old=0 s
+    if state_ok; then had_old=1; fi
+    sni_stage_begin
+    if (( had_old )); then
         curidx=$(scheme_index "$(jq -r .scheme "$STATE")")
         MODE=modify
         load_state_draft
@@ -5148,34 +5422,45 @@ action_install() {
             1) exit "$RC_QUIET" ;;
         esac
     fi
-    local cli_first=1
     [[ -z $CLI_SCHEME ]] || def=$(scheme_index "$CLI_SCHEME")
     while :; do
         MODE=new
-        local s
         if (( cli_first )) && [[ -n $CLI_SCHEME ]]; then s=$CLI_SCHEME
         else choose_scheme s "$def" "$curidx"; fi
         cli_first=0
-        [[ -n $s ]] || exit "$RC_QUIET"
-        if scheme_is_split "$s" && [[ -z $NET_V4 || -z $NET_V6 ]]; then
-            ui_warn '上下行分离需要本机同时有公网 IPv4 和 IPv6。'
-            ui_note "检测结果：IPv4 ${NET_V4:-无}，IPv6 ${NET_V6:-无}"
-            ui_pause
-            continue
+        if [[ -z $s ]]; then
+            if (( had_old )); then
+                # Escape from scheme selection returns to the installed scheme's preview.
+                MODE=modify
+                PORT_NOTE='' SNI_BEST_MS=0
+                sni_stage_begin
+                load_state_draft
+                PREVIEW_NOTES=()
+                refresh_net_in_draft
+                preview_loop
+                case $PREVIEW_RESULT in
+                    0) apply_draft; show_modify_result; return 0 ;;
+                    1) exit "$RC_QUIET" ;;
+                    2) continue ;;
+                esac
+            fi
+            exit "$RC_QUIET"
         fi
         draft_new "$s"
+        if scheme_is_split "$s" && [[ -z $NET_V4 || -z $NET_V6 ]]; then
+            note_add "公网地址自动检测不完整：IPv4 ${NET_V4:-未检测到}，IPv6 ${NET_V6:-未检测到}。请在「节点地址」中手动补全，安装前会校验。"
+        fi
         carry_meta_from_state
         [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
         prepare_new_draft
         preview_loop
-        if [[ $PREVIEW_RESULT != 0 ]]; then def=$(scheme_index "$s"); continue; fi
-        if state_ok; then
-            ui_warn '重新安装会生成全新的节点，现有节点全部失效。'
-            if ! ask_no '确定重新安装'; then continue; fi
+        if [[ $PREVIEW_RESULT == 0 ]]; then
+            # The confirmation is performed inside preview_loop. No edits are lost.
+            apply_draft
+            show_install_result
+            return 0
         fi
-        apply_draft
-        show_install_result
-        return 0
+        def=$(scheme_index "$s")
     done
 }
 
@@ -5447,8 +5732,13 @@ action_update() {
 update_cores() {
     local -a todo=() notes=()
     local cur new tag t dir want
-    require_state
-    (( STATE_READY )) || return 0
+    STATE_READY=0
+    if ! state_ok; then ui_warn '还没有安装，请先在主页选择「安装」。'; return 0; fi
+    # A core-only update never runs load_state_draft, which normalizes fingerprints
+    # and landing JSON. Such changes require a full configuration regeneration.
+    DRAFT=$STAGE/draft.json
+    cp -f -- "$STATE" "$DRAFT"
+    STATE_READY=1
     MODE=modify
     [[ ${1:-} == keep ]] || { STEP_NO=0; STEP_TOTAL=1; }
     ui_step '检查核心版本'
@@ -5459,7 +5749,7 @@ update_cores() {
         cur=$(installed_version xray)
         want=$(st .core.xray)
         case $want in
-            compat|latest) tag=$(xray_resolve_tag "$want") ;;
+            compat|latest) tag=$(xray_resolve_tag "$want") || return 1 ;;
             *) tag=''; notes+=("Xray 已固定为 $want") ;;
         esac
         if [[ -n $tag && ${tag#v} != "${cur#v}" ]] && { [[ $want == compat ]] || ver_ge "${tag#v}" "${cur#v}"; }; then
@@ -5485,22 +5775,18 @@ update_cores() {
         todo+=("GeoIP Full / GeoSite Expanded 更新")
         [[ -n $USE_XRAY ]] || USE_XRAY=$XRAY_BIN
     fi
+    # Compat preference is only a version-selection alias and does not change live nodes.
+    [[ $(st .core.xray) != compat ]] || st_sets .core.xray latest
     if (( ${#todo[@]} == 0 )); then
         if (( ${#notes[@]} )); then ui_step_skip "${notes[0]}"; else ui_step_skip '已是最新'; fi
-        # A prior install can still have the legacy compat preference.
-        if [[ $(jq -r '.core.xray // empty' "$STATE") == compat && $(st .core.xray) == latest ]]; then
-            atomic_install "$DRAFT" "$STATE" 600
-        fi
+        install_self
+        st_sets .script "$SCRIPT_VERSION"
+        atomic_install "$DRAFT" "$STATE" 600
     else
         ui_step_done
         for t in "${todo[@]}"; do ui_line "  $t"; done
         replace_cores
     fi
-    # Persist this repaired manager in the zxray shortcut after successful maintenance.
-    install_self
-    # Metadata version tracks the actual manager script after a successful update.
-    st_sets .script "$SCRIPT_VERSION"
-    atomic_install "$DRAFT" "$STATE" 600
     return 0
 }
 
@@ -5535,6 +5821,8 @@ replace_cores() {
     start_services
     health_check
     record_installed_versions
+    install_self
+    st_sets .script "$SCRIPT_VERSION"
     atomic_install "$DRAFT" "$STATE" 600
     tx_commit
     ui_step_done
@@ -5604,8 +5892,26 @@ action_status() {
     ui_rule
 }
 
+sni_stage_begin() {
+    SNI_POOL_STAGED=1
+    rm -f -- "$STAGE/sni-pool.txt" "$STAGE/sni-pool-base.txt"
+    if [[ -f $SNI_POOL_FILE ]]; then
+        cp -f -- "$SNI_POOL_FILE" "$STAGE/sni-pool.txt"
+        cp -f -- "$SNI_POOL_FILE" "$STAGE/sni-pool-base.txt"
+    fi
+}
+
+sni_pool_changed() {
+    (( SNI_POOL_STAGED )) || return 1
+    local old=$STAGE/sni-pool-base.txt new=$STAGE/sni-pool.txt
+    if [[ -f $old && ! -f $new || ! -f $old && -f $new ]]; then return 0; fi
+    [[ ! -f $old ]] && return 1
+    ! cmp -s -- "$old" "$new"
+}
+
 sni_pool_file() {
-    if state_ok; then printf '%s' "$SNI_POOL_FILE"; else printf '%s' "$STAGE/sni-pool.txt"; fi
+    if (( SNI_POOL_STAGED )); then printf '%s' "$STAGE/sni-pool.txt"
+    else printf '%s' "$SNI_POOL_FILE"; fi
 }
 
 POOL=()
@@ -5645,7 +5951,11 @@ edit_sni_pool() {
                 [[ -n $d ]] || continue
                 d=${d,,}
                 if ! valid_domain "$d"; then TUI_MSG='格式不对：只填域名，例如 www.example.com。'; (( TUI )) || ui_warn "$TUI_MSG"; continue; fi
-                in_list "$d" "${POOL[@]}" && continue
+                if in_list "$d" "${POOL[@]}"; then
+                    TUI_MSG='该站点已经在列表里了。'
+                    (( TUI )) || ui_warn "$TUI_MSG"
+                    continue
+                fi
                 printf '%s\n' "${POOL[@]}" "$d" | atomic_write "$f" 600 ;;
             r)
                 ask_no '删除自定义列表，恢复默认' && rm -f -- "$f" ;;
@@ -5668,6 +5978,24 @@ action_sni_pool() {
 }
 
 
+release_uninstall_packages() {
+    local old=$1 pk hash
+    local -a pkgs=()
+    pk=$(jq -c '.meta.nginx_packages // []' "$old" 2>/dev/null || printf '[]')
+    if [[ $pk != '[]' ]]; then
+        hash=$(jq -r '.meta.nginx_hash // empty' "$old" 2>/dev/null || true)
+        if [[ -z $hash ]] || svc_active nginx || pgrep -x 'nginx(-light|-extras|-core|-full|[.]dpkg-new)?' >/dev/null 2>&1 \
+            || [[ $(nginx_system_hash) != "$hash" ]]; then
+            ui_note 'Nginx 仍在使用或配置发生变更，保留其软件包。'
+        else
+            mapfile -t pkgs < <(jq -r '.[]' <<< "$pk")
+            pkg_remove_safe "${pkgs[@]}" >/dev/null 2>&1 || ui_warn 'Nginx 软件包未能移除，可手动检查。'
+        fi
+    fi
+    release_extra_packages "$old" || true
+    return 0
+}
+
 action_uninstall() {
     local own_user=0 p
     local -a progs=()
@@ -5684,7 +6012,7 @@ action_uninstall() {
             ui_rule
             if ask_no '只删除脚本本身和 zxray 命令'; then
                 remove_self_files
-                ui_ok '已删除。'
+                ui_ok '已删除托管脚本；原始下载文件保留。'
                 exit 20
             fi
             exit "$RC_QUIET"
@@ -5692,48 +6020,35 @@ action_uninstall() {
         return 0
     fi
     DRAFT=$STATE
-    cp -f "$DATA_DIR/sources.ndjson" "$STAGE/sources.ndjson" 2>/dev/null || : > "$STAGE/sources.ndjson"
-    if [[ -n $SOURCE_PATH && -f $SOURCE_PATH && $SOURCE_PATH != "$SELF_DIR"/* && $SOURCE_PATH != /proc/* && $SOURCE_PATH != /dev/* ]] \
-        && grep -q "$SCRIPT_MARKER" "$SOURCE_PATH" 2>/dev/null; then
-        jq -cn --arg p "$SOURCE_PATH" --arg h "$(sha256_of "$SOURCE_PATH")" '{path:$p, sha256:$h}' >> "$STAGE/sources.ndjson"
-    fi
-    ui_hint '会删除下面这些内容，客户端将无法再连接：'
+    ui_hint '会删除本工具管理的节点、服务、配置及可撤销的系统改动。'
     ui_blank
     ui_kv '节点' "$(jq 'length' "$NODES_JSON" 2>/dev/null || echo 0) 条" '链接和配置全部删除'
     while read -r p; do [[ -z $p ]] || progs+=("$(svc_label "$p")"); done <<< "$(wanted_services)"
     ui_kv '程序' "$(join_by '、' "${progs[@]}")"
     ui_kv '系统改动' "$(uninstall_changes)"
-    ui_kv '本脚本' 'zxray 命令和脚本文件'
-    if [[ -s $STAGE/sources.ndjson ]]; then
-        local lab='下载的脚本'
-        while IFS= read -r p; do ui_kv "$lab" "$p"; lab=''; done < <(jq -r '.path' "$STAGE/sources.ndjson" 2>/dev/null | sort -u)
-    fi
+    ui_kv '托管脚本' 'zxray 命令和托管安装文件'
+    ui_note '你自行下载或保存的 .sh 安装包不会删除。'
     ui_rule
     ask_no '确定完整卸载' || exit "$RC_QUIET"
     if [[ $(jq -r '.meta.created_user // 0' "$STATE" 2>/dev/null) == 1 ]]; then own_user=1; fi
+    cp -f -- "$STATE" "$STAGE/state-old.json"
     STEP_NO=0 STEP_TOTAL=3
     ui_blank
-    ui_step '停止服务'
+    ui_step '保护快照并停止服务'
     : > "$STEP_LOG"
+    tx_begin
     stop_owned_services
     ui_step_done
-    ui_step '清理系统改动'
+
+    ui_step '撤销规则与清除托管文件'
     : > "$STEP_LOG"
     fw_remove_recorded "$STATE"
-    state_update '.meta.fw_rules = []'
-    release_nginx_packages || true
-    release_extra_packages "$STATE"
-    state_update '.meta.extra_packages = []'
     if is_managed_file "$SYSCTL_FILE"; then rm -f -- "$SYSCTL_FILE"; fi
     restore_bbr_original
-    if (( own_user )); then remove_service_user; state_update '.meta.created_user = 0'; fi
-    ui_step_done
-    ui_step '删除文件和脚本'
-    : > "$STEP_LOG"
-    cp -f "$STATE" "$STAGE/state-old.json"
-    tx_begin
     for p in "${MANAGED_PATHS[@]}"; do
-        [[ $p != "$SYSCTL_FILE" && $p != "$QUICK_BIN" ]] || continue
+        # Never delete a system file installed by someone else.
+        if [[ $p == "$SYSCTL_FILE" ]] && ! is_managed_file "$p"; then continue; fi
+        if [[ $p == "$QUICK_BIN" ]] && ! is_managed_file "$p"; then continue; fi
         rm -rf -- "$p"
     done
     rm -rf -- "$NGINX_RUN" "$ROOT/etc/runlevels/default/"{xray,zxray-ss,zxray-nginx}
@@ -5741,12 +6056,21 @@ action_uninstall() {
     if [[ $INIT == systemd ]]; then
         for p in "${MANAGED_SERVICES[@]}"; do systemctl reset-failed "$p" >/dev/null 2>&1 || true; done
     fi
+    ui_step_done
+
+    ui_step '提交卸载并清理依赖'
+    : > "$STEP_LOG"
+    # No packages or service users are removed before the rollback point.
     tx_commit
-    delete_recorded_sources
+    release_uninstall_packages "$STAGE/state-old.json"
+    if (( own_user )); then
+        remove_service_user
+        user_exists "$SERVICE_USER" && ui_warn "运行用户 $SERVICE_USER 未能删除，可稍后手动清理。"
+    fi
     remove_self_files
     jq -r '.meta.created_dirs // [] | .[]' "$STAGE/state-old.json" 2>/dev/null | remove_created_dirs
     ui_step_done
-    ui_ok '卸载完成。curl、jq 等通用工具没有删除。'
+    ui_ok '卸载完成。原始 .sh 文件与 curl、jq 等通用工具均已保留。'
     exit 20
 }
 
@@ -5772,20 +6096,7 @@ remove_self_files() {
     for d in "$STAGE_BASE".*; do
         [[ -d $d && $d != "$STAGE" ]] && rm -rf -- "$d"
     done
-    rm -f -- "$LOCK_FILE"
-}
-
-delete_recorded_sources() {
-    local rec path sha
-    [[ -f $STAGE/sources.ndjson ]] || return 0
-    while IFS= read -r rec; do
-        path=$(jq -r '.path' <<< "$rec")
-        sha=$(jq -r '.sha256' <<< "$rec")
-        [[ $path == /* && -f $path && ! -L $path ]] || continue
-        if [[ $(sha256_of "$path") == "$sha" ]] && grep -q "$SCRIPT_MARKER" "$path" 2>/dev/null; then
-            rm -f -- "$path"
-        fi
-    done < "$STAGE/sources.ndjson"
+    # Keep the /run lock inode until process exit/reboot: unlinking it breaks flock exclusion.
     return 0
 }
 
