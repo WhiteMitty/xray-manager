@@ -14,19 +14,15 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
-### 使用
+### 使用 & 卸载
 ```bash
 zxray
 ```
 - 快速调用脚本
-<br>
-### 卸载
-```bash
-zxray
-```
+- 按需求装代理
 - 选择完整卸载
 <br>
-### 其他
+### 局限说明
 - xhttp 只做了 v4 v6 分离，刚需双栈机器，此脚本不支持 CDN 分离方案
 - 若 xray 内核过新，sing-box 客户端将无法使用订阅，此脚本仅考虑 xray 客户端兼容性
 <br>
