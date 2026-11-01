@@ -3,7 +3,7 @@
 ### 2026-11-02
 <br>
 
-### 安装
+### 安装脚本
 #### curl
 ```bash
 curl -fsSL -o xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manager/main/xray-manager.sh && bash xray-manager.sh
@@ -14,13 +14,13 @@ wget -qO xray-manager.sh https://raw.githubusercontent.com/WhiteMitty/xray-manag
 ```
 <br>
 
-### 使用 & 卸载
+### 快捷命令
 ```bash
 zxray
 ```
 - 快速调用脚本
 - 按需求装代理
-- 选择完整卸载
+- 可选完整卸载
 <br>
 
 ### 局限说明
