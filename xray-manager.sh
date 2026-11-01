@@ -33,9 +33,9 @@ set -Eeuo pipefail
 umask 077
 exec 4>&1 5>&2
 
-readonly SCRIPT_VERSION="0.2.2"
+readonly SCRIPT_VERSION="0.2.3"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
-readonly XRAY_MIN_VERSION="26.3.27"
+readonly XRAY_MIN_VERSION="26.10.31"
 readonly STATE_SCHEMA=5
 readonly SERVICE_USER="zxray"
 readonly MANAGED_TAG="# Managed by Xray Manager"
@@ -99,7 +99,7 @@ PARSE_ERR=''
 SERVICE_USER_CREATED=0
 NGINX_MODULE_LINE='' NGINX_REJECT_TLS=1
 USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
-NEW_XRAY=0 NEW_SS=0
+NEW_XRAY=0 NEW_SS=0 GEO_REFRESH=0 FULL_GEO_DIR=''
 UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1
 TUI=0 TUI_KEY='' TUI_CUR=0 TUI_TOP=0 TUI_HEAD=0 TUI_PREV_OK=0 INPUT_DIRTY=0 STEP_PW=0 TUI_MSG='' TUI_RESIZED=0 TUI_HELP_H=0 TUI_HELP_DIM=1 TUI_FOOT='' TUI_FOOT_PLAIN=''
 UI_BUF_ON=0 SPIN_PID=''
@@ -1280,6 +1280,7 @@ ensure_deps() {
                 [timeout]=coreutils [shuf]=coreutils [flock]=util-linux [ss]=iproute2 [pgrep]=procps-ng [base64]=coreutils
                 [date]=coreutils [bash]=bash) ;;
     esac
+    pkg_of[gzip]=gzip
     for c in "${!pkg_of[@]}"; do
         [[ $c == setcap && $INIT != openrc ]] && continue
         have "$c" || need+=("${pkg_of[$c]}")
@@ -2236,7 +2237,7 @@ parse_ss_link() {
     PARSED_LABEL=${PARSED_LABEL//[[:cntrl:]]/}
     [[ -n $PARSED_LABEL ]] || PARSED_LABEL='SS 落地'
     PARSED_OUTBOUND_JSON=$(jq -cn --arg h "$PARSED_HOST" --argjson p "$PARSED_PORT" --arg m "$method" --arg pw "$password" \
-        '{protocol:"shadowsocks",settings:{servers:[{address:$h,port:$p,method:$m,password:$pw}]}}')
+        '{protocol:"shadowsocks",settings:{address:$h,port:$p,method:$m,password:$pw}}')
 }
 
 parse_vless_link() {
@@ -2313,11 +2314,11 @@ parse_vless_link() {
             *) PARSE_ERR="不认识的指纹：$fp"; return 1 ;;
         esac
         stream=$(jq -cn --arg sni "$sni" --arg pbk "$pbk" --arg sid "$sid" --arg fp "$fp" \
-            '{network:"raw", security:"reality",
+            '{method:"raw", security:"reality",
               realitySettings:({serverName:$sni, publicKey:$pbk, fingerprint:$fp, spiderX:"/"}
                 + (if $sid == "" then {} else {shortId:$sid} end))}')
     else
-        stream='{"network":"raw"}'
+        stream='{"method":"raw"}'
     fi
     PARSED_KIND=vless
     PARSED_LABEL=$(uri_decode "$frag" 2>/dev/null || true)
@@ -2326,8 +2327,8 @@ parse_vless_link() {
     PARSED_OUTBOUND_JSON=$(jq -cn --arg h "$PARSED_HOST" --argjson p "$PARSED_PORT" --arg id "$id" --arg enc "$encryption" \
         --arg flow "$flow" --argjson stream "$stream" \
         '{protocol:"vless",
-          settings:{vnext:[{address:$h, port:$p,
-            users:[({id:$id, encryption:$enc} + (if $flow == "" then {} else {flow:$flow} end))]}]},
+          settings:({address:$h, port:$p, id:$id, encryption:$enc}
+            + (if $flow == "" then {} else {flow:$flow} end)),
           streamSettings:$stream}')
 }
 
@@ -2390,6 +2391,10 @@ load_state_draft() {
     # Existing installations must not re-emit a former Firefox fingerprint.
     if [[ $(st .reality.fp) != chrome ]]; then st_sets .reality.fp chrome; fi
     if [[ $(st .core.xray) == compat ]]; then st_sets .core.xray latest; fi
+    # STATE_SCHEMA stays 5: read old state.json without losing existing installation.
+    # Only these additive settings are changed. All user identities are preserved.
+    st_filter '.egress = {cn: (.egress.cn // 0), bt: (.egress.bt // 0)}'
+    normalize_landing_outbounds
 }
 
 scheme() { st .scheme; }
@@ -2402,7 +2407,8 @@ ss_core() {
     local n mode
     n=$(jq '.landings | length' "$DRAFT")
     mode=$(st .outbound)
-    if (( n == 0 )) && ss_arch_supported && [[ $mode == v4first || $mode == v6first ]]; then
+    if (( n == 0 )) && [[ $(st ".egress.cn // 0") != 1 && $(st ".egress.bt // 0") != 1 ]] \
+        && ss_arch_supported && [[ $mode == v4first || $mode == v6first ]]; then
         printf 'ss-rust'
     else
         printf 'xray'
@@ -2441,6 +2447,7 @@ draft_new() {
         net: {host: (if $v4 != "" then $v4 elif $v6 != "" then $v6 else "" end), v4: $v4, v6: $v6, manual: 0, v6_link: 1},
         outbound: (if $v4 == "" and $v6 != "" then "v6first" else "v4first" end),
         bbr: 1, firewall: "auto",
+        egress: {cn: 0, bt: 0},
         core: {xray: "latest", ss: "latest"},
         reality: {port: 0, internal: 0, gate: 0, sni: "", sni_auto: 1, private_key: "", public_key: "", short_id: "",
                   fp: "chrome", guard: "nginx", limit: "orig", limit_custom: {ua: 8192, ur: 1024, da: 32768, dr: 2048},
@@ -2595,33 +2602,52 @@ limit_jitter_new() {
 }
 
 limit_preset() {
+    # 6 values: upload threshold / steady rate / burst, download threshold / steady rate / burst.
+    # 4 independent jitter percentages are retained for per-machine variability.
     local base
     case $1 in
-        orig) base='8192 1024 32768 2048' ;;
-        std) base='262144 32768 1048576 65536' ;;
+        orig) base='1048576 262144 524288 4194304 1048576 2097152' ;;
+        std) base='4194304 524288 1048576 16777216 2097152 4194304' ;;
+        *) return 1 ;;
     esac
-    jq -r --arg b "$base" '(.reality.limit_jitter // [100,100,100,100]) as $j | ($b | split(" ") | map(tonumber)) as $v
-        | [range(0; 4) | ($v[.] * $j[.] / 100 | floor | tostring)] | join(" ")' "$DRAFT"
+    jq -r --arg b "$base" '
+      (.reality.limit_jitter // [100,100,100,100]) as $j
+      | ($b | split(" ") | map(tonumber)) as $v
+      | [($v[0]*$j[0]/100|floor), ($v[1]*$j[1]/100|floor), ($v[2]*$j[1]/100|floor),
+         ($v[3]*$j[2]/100|floor), ($v[4]*$j[3]/100|floor), ($v[5]*$j[3]/100|floor)]
+      | map(tostring) | join(" ")' "$DRAFT"
 }
 
 limit_values() {
     case $(st .reality.limit) in
+        off) return 0 ;;
         orig|std) limit_preset "$(st .reality.limit)" ;;
-        custom) jq -r '.reality.limit_custom | "\(.ua) \(.ur) \(.da) \(.dr)"' "$DRAFT" ;;
+        custom)
+            jq -r '.reality.limit_custom |
+              "\(.ua) \(.ur) \(.ur * 2) \(.da) \(.dr) \(.dr * 2)"' "$DRAFT" ;;
+        *) return 1 ;;
     esac
 }
 
 limit_label() {
     case $(st .reality.limit) in
-        orig) printf '严格' ;; std) printf '宽松' ;; custom) printf '自定义' ;;
+        off) printf '回落不限速' ;;
+        orig) printf '严格' ;;
+        std) printf '宽松' ;;
+        custom) printf '自定义' ;;
     esac
 }
 
 limit_text() {
+    if (( $# == 0 )) && [[ $(st .reality.limit) == off ]]; then
+        printf '未设置回落限速；未认证连接仍可转发到 REALITY target'
+        return 0
+    fi
     local -a lv=()
     read -r -a lv <<< "${1:-$(limit_values)}"
+    (( ${#lv[@]} == 6 )) || return 1
     printf '上行 %s 后 %s/s\n下行 %s 后 %s/s' "$(human_bytes "${lv[0]}")" "$(human_bytes "${lv[1]}")" \
-        "$(human_bytes "${lv[2]}")" "$(human_bytes "${lv[3]}")"
+        "$(human_bytes "${lv[3]}")" "$(human_bytes "${lv[4]}")"
 }
 
 rtt_label() { if [[ $1 == 1rtt ]]; then printf '1-RTT'; else printf '0-RTT'; fi; }
@@ -2787,7 +2813,7 @@ preview_items() {
         if [[ $(st .reality.guard) == nginx ]]; then printf '%s\n' conn; fi
         printf '%s\n' limit
     fi
-    printf '%s\n' @高级 system
+    printf '%s\n' @高级 egress system
 }
 
 item_label() {
@@ -2804,6 +2830,7 @@ item_label() {
         guard) printf '过滤方式' ;;
         conn) printf '连接上限' ;;
         limit) printf '回落限速' ;;
+        egress) printf '出口限制' ;;
         system) printf '高级设置' ;;
     esac
 }
@@ -2821,8 +2848,9 @@ item_help() {
         encp) printf '%s' 'VLESS 加密的握手方式、认证方式、外观和填充。' ;;
         guard) printf '%s\n%s' 'SNI 不是伪装站点的连接直接断开，' '防止服务器被当成访问任意网站的跳板。' ;;
         conn) printf '%s' 'Nginx 在验证之前限制并发连接，超出的直接断开。' ;;
-        limit) printf '%s\n%s' '被转给伪装站点的流量，传到一定量后限速，防止被偷流量。' '数值在预设附近随机微调，每台服务器都不一样。' ;;
-        system) printf '%s' '出站 IP、BBR、TLS 指纹、IPv6 链接、防火墙和核心版本。' ;;
+        limit) printf '%s\n%s' 'REALITY 未认证连接可能回落到目标站点，限速按连接生效。' '可关闭限速，但不能移除 REALITY 必需的 target。' ;;
+        egress) printf '%s\n%s' '只约束这台 VPS 的本机直出，落地流量交给落地服务器处理。' '大陆域名/IP 与 BT 可以分别开关；BT 无法保证完全识别。' ;;
+        system) printf '%s' '出站 IP、BBR、固定 Chrome 指纹、IPv6 链接、防火墙和核心版本。' ;;
     esac
 }
 
@@ -2882,6 +2910,7 @@ item_value() {
             else printf 'Xray 内置\t只放行伪装站点的 SNI，无连接上限'; fi ;;
         conn) printf '每个 IP %s，总计 %s' "$(st .reality.conn_ip)" "$(st .reality.conn_total)" ;;
         limit) printf '%s\n' "$(limit_label)"; limit_text | sed 's/^/\t/' ;;
+        egress) egress_label ;;
         system) system_summary ;;
     esac
 }
@@ -2952,6 +2981,7 @@ item_fp() {
         guard) f='[.reality.guard]' ;;
         conn) f='[.reality.conn_ip, .reality.conn_total]' ;;
         limit) f='[.reality.limit, .reality.limit_custom, .reality.limit_jitter]' ;;
+        egress) f='[.egress.cn // 0, .egress.bt // 0]' ;;
         system) f='[.outbound, .bbr, .reality.fp, .net.v6_link, .firewall, .core]' ;;
         *) f='null' ;;
     esac
@@ -3422,6 +3452,29 @@ edit_landings() {
     done
 }
 
+normalize_landing_outbounds() {
+    # Historical versions stored vnext[] / servers[] and network; convert to current
+    # documented flat outbound shapes without changing user links or credentials.
+    st_filter '
+      .landings |= map(
+        .outbound |= (
+          if .protocol == "vless" and (.settings.vnext? | type) == "array" then
+            .settings = (.settings.vnext[0] as $v |
+              {address:$v.address, port:$v.port, id:$v.users[0].id,
+               encryption:$v.users[0].encryption}
+              + (if ($v.users[0].flow // "") != "" then {flow:$v.users[0].flow} else {} end))
+          elif .protocol == "shadowsocks" and (.settings.servers? | type) == "array" then
+            .settings = (.settings.servers[0] |
+              {address, port, method, password})
+          else . end
+          | if .streamSettings.network? != null then
+              .streamSettings.method = .streamSettings.network
+              | del(.streamSettings.network)
+            else . end
+        )
+      )'
+}
+
 add_landing() {
     local link=$1 idx tag port=0
     idx=$(next_landing_index)
@@ -3669,24 +3722,82 @@ edit_conn() {
 
 edit_limit() {
     local c ua ur da dr cur
-    index_of cur "$(st .reality.limit)" orig std custom
-    option_page c "$cur" '回落限速' $'被转给伪装站点的流量，传到一定量后限速，防止被偷流量。\n数值在预设附近随机微调，每台服务器都不一样。' \
-        "严格|$(limit_text "$(limit_preset orig)")" "宽松|$(limit_text "$(limit_preset std)")" '自定义|分别填写 4 个数值'
+    index_of cur "$(st .reality.limit)" orig std custom off
+    option_page c "$cur" '回落限速' $'REALITY 必须连接 target 完成握手，不能直接关闭回落。\n本菜单只控制对未认证回落连接的限速；默认参数按机器随机微调。' \
+        "严格|$(limit_text "$(limit_preset orig)")" "宽松|$(limit_text "$(limit_preset std)")" \
+        '自定义|分别填写 4 个数值；突发带宽自动设为速率的两倍' \
+        '回落不限速|不写限速参数；未认证连接仍会转发到伪装站点'
     [[ -n $c ]] || return 0
     if [[ $c == "$cur" && $c != 3 ]]; then return 0; fi
     case $c in
         1) st_sets .reality.limit orig ;;
         2) st_sets .reality.limit std ;;
         3)
-            input_page '回落限速' '自定义' '单位是字节，1K = 1024，1M = 1048576。'
-            ask_number '上行传多少字节后开始限速' 0 104857600 "$(st .reality.limit_custom.ua)" ua
-            ask_number '上行限速每秒多少字节' 1 104857600 "$(st .reality.limit_custom.ur)" ur
-            ask_number '下行传多少字节后开始限速' 0 104857600 "$(st .reality.limit_custom.da)" da
-            ask_number '下行限速每秒多少字节' 1 104857600 "$(st .reality.limit_custom.dr)" dr
+            input_page '回落限速' '自定义' '单位是字节，1KiB = 1024，1MiB = 1048576。'
+            ask_number '上行传多少字节后限速' 0 104857600 "$(st .reality.limit_custom.ua)" ua
+            ask_number '上行每秒多少字节' 1 104857600 "$(st .reality.limit_custom.ur)" ur
+            ask_number '下行传多少字节后限速' 0 104857600 "$(st .reality.limit_custom.da)" da
+            ask_number '下行每秒多少字节' 1 104857600 "$(st .reality.limit_custom.dr)" dr
             st_set .reality.limit_custom "$(jq -cn --argjson a "$ua" --argjson b "$ur" --argjson c "$da" --argjson d "$dr" \
                 '{ua:$a, ur:$b, da:$c, dr:$d}')"
             st_sets .reality.limit custom ;;
+        4) st_sets .reality.limit off ;;
     esac
+}
+
+egress_label() {
+    local -a marks=()
+    [[ $(st '.egress.cn // 0') != 1 ]] || marks+=('阻止大陆域名/IP')
+    [[ $(st '.egress.bt // 0') != 1 ]] || marks+=('阻止 BT（可识别部分）')
+    if (( ${#marks[@]} )); then join_by '，' "${marks[@]}"; else printf '均关闭'; fi
+    if [[ $(scheme) == ss ]] && [[ $(ss_core) == xray ]]; then
+        printf '（SS2022 使用 Xray）'
+    fi
+}
+
+eg_build() {
+    local cn bt
+    cn=$(st '.egress.cn // 0')
+    bt=$(st '.egress.bt // 0')
+    ui_page '本机出口限制' '两项可分别开关'
+    ui_hint $'只作用于本机直出（Freedom），不会替远端落地封锁。\n大陆域名：入站嗅探＋geosite:cn；大陆 IP：最终拨号前 geoip:cn。\nBT：协议特征嗅探（加密/伪装 BT 可能识别不到）。'
+    ui_blank
+    if [[ $cn == 1 ]]; then
+        tui_item 1 '大陆域名/IP' '已阻止' '回车关闭'
+    else
+        tui_item 1 '大陆域名/IP' '未阻止' '回车开启'
+    fi
+    if [[ $bt == 1 ]]; then
+        tui_item 2 'BT 流量' '已阻止' '回车关闭'
+    else
+        tui_item 2 'BT 流量' '未阻止' '回车开启'
+    fi
+    ui_blank
+    ui_kv '基础安全' '私网/保留 IP、SMTP 端口始终阻止（Xray 直出）'
+    if [[ $(scheme) == ss && ( $cn == 1 || $bt == 1 ) ]]; then
+        ui_note '启用任一限制时，SS2022 自动改用 Xray 核心以确保规则生效。'
+    fi
+    TUI_HELP_H=0
+    TUI_FOOT='上下键 移动   回车 切换   Esc 完成'
+    TUI_FOOT_PLAIN='1/2 切换   0 完成'
+}
+
+edit_egress() {
+    local sel=0 key
+    while :; do
+        tui_menu eg_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        key=${TUI_IKEYS[$TUI_CUR]}
+        case $key in
+            1)
+                if [[ $(st '.egress.cn // 0') == 1 ]]; then st_set .egress.cn 0
+                else st_set .egress.cn 1; fi ;;
+            2)
+                if [[ $(st '.egress.bt // 0') == 1 ]]; then st_set .egress.bt 0
+                else st_set .egress.bt 1; fi ;;
+        esac
+    done
 }
 
 SYS_KEYS=()
@@ -3837,16 +3948,39 @@ edit_core() {
 
 listen_any() { if has_ipv6_stack; then printf '::'; else printf '0.0.0.0'; fi; }
 
-block_rules_json() {
+base_final_rules_json() {
+    # Xray 2026-10 freedom.finalRules executes at the last outbound dial stage.
+    # Do NOT put these rules in global routing: remote landings must retain autonomy.
     jq -cn '[
-      {type:"field", domain:["full:localhost","full:localhost.localdomain"], outboundTag:"blocked"},
-      {type:"field", network:"tcp", port:"25,465,587,2525", outboundTag:"blocked"},
-      {type:"field", network:"udp", port:"443", outboundTag:"blocked"},
-      {type:"field", ip:["geoip:private","0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16",
-        "172.16.0.0/12","192.0.0.0/24","192.0.2.0/24","192.168.0.0/16","198.18.0.0/15","198.51.100.0/24",
-        "203.0.113.0/24","224.0.0.0/4","240.0.0.0/4","255.255.255.255/32","::/128","::1/128","fc00::/7",
-        "fe80::/10","ff00::/8","2001:db8::/32"], outboundTag:"blocked"}
+      {action:"block", ip:["geoip:private"], blockDelay:"0"},
+      {action:"block", network:"tcp", port:"25,465,587,2525", blockDelay:"0"}
     ]'
+}
+
+egress_final_rules_json() {
+    local cn mode
+    cn=$(st '.egress.cn // 0')
+    mode=$(st .outbound)
+    jq -cn --argjson base "$(base_final_rules_json)" --argjson cn "$cn" --arg mode "$mode" '
+      $base
+      + (if $cn == 1 then [{action:"block", ip:["geoip:cn"], blockDelay:"0"}] else [] end)
+      + (if $mode == "v4only" then [{action:"block", ip:["::/0"], blockDelay:"0"}]
+         elif $mode == "v6only" then [{action:"block", ip:["0.0.0.0/0"], blockDelay:"0"}] else [] end)'
+}
+
+reality_limits_json() {
+    if [[ $(st .reality.limit) == off ]]; then
+        printf '{}'
+        return 0
+    fi
+    local -a lv=()
+    read -r -a lv <<< "$(limit_values)"
+    (( ${#lv[@]} == 6 )) || { die '回落限速参数个数不正确。'; return 1; }
+    jq -cn --argjson ua "${lv[0]}" --argjson ur "${lv[1]}" --argjson ub "${lv[2]}" \
+        --argjson da "${lv[3]}" --argjson dr "${lv[4]}" --argjson db "${lv[5]}" '{
+      limitFallbackUpload:{afterBytes:$ua, bytesPerSec:$ur, burstBytesPerSec:$ub},
+      limitFallbackDownload:{afterBytes:$da, bytesPerSec:$dr, burstBytesPerSec:$db}
+    }'
 }
 
 shared_users_json() {
@@ -3855,17 +3989,25 @@ shared_users_json() {
 }
 
 render_xray_config() {
-    local out=$1 s listen strategy
+    local out=$1 s listen strategy cn bt sniff fallback_json
     s=$(scheme)
     listen=$(listen_any)
     strategy=$(outbound_xray_strategy "$(st .outbound)")
+    cn=$(st '.egress.cn // 0')
+    bt=$(st '.egress.bt // 0')
     local inb=$STAGE/xr-in.ndjson rules=$STAGE/xr-rules.ndjson
     : > "$inb"
     : > "$rules"
-    local -a direct_tags=()
+    local -a direct_tags=() vless_tags=()
+    sniff='null'
+    if [[ $cn == 1 || $bt == 1 ]]; then
+        # routeOnly never changes the client's original requested destination.
+        # BT sniffing is basic signature detection only, not a complete BT firewall.
+        sniff='{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}'
+    fi
 
     if scheme_has_reality "$s"; then
-        local net flow dec stream users lv
+        local net flow dec stream users
         net=$(scheme_transport "$s")
         flow=xtls-rprx-vision dec=none
         if [[ $net == xhttp ]]; then
@@ -3874,34 +4016,38 @@ render_xray_config() {
         [[ $s != triple ]] || net=raw
         users=$(shared_users_json "$flow")
         [[ $s == triple ]] && users=$(jq -c '[.[] | select(.email == "direct")]' <<< "$users")
-        read -r -a lv <<< "$(limit_values)"
+        fallback_json=$(reality_limits_json)
         stream=$(jq -cn --arg net "$net" --arg sni "$(st .reality.sni)" --arg key "$(st .reality.private_key)" \
             --arg sid "$(st .reality.short_id)" --arg path "$(st .xhttp.path)" --arg guard "$(st .reality.guard)" \
-            --arg gate "127.0.0.1:$(st .reality.gate)" \
-            --argjson ua "${lv[0]}" --argjson ur "${lv[1]}" --argjson da "${lv[2]}" --argjson dr "${lv[3]}" '
-            {network: $net, security: "reality",
-             realitySettings: {show: false, target: (if $guard == "nginx" then ($sni + ":443") else $gate end),
-                serverNames: [$sni], privateKey: $key, shortIds: [$sid], minClientVer: "0.0.0",
-                limitFallbackUpload: {afterBytes: $ua, bytesPerSec: $ur, burstBytesPerSec: 0},
-                limitFallbackDownload: {afterBytes: $da, bytesPerSec: $dr, burstBytesPerSec: 0}}}
+            --arg gate "127.0.0.1:$(st .reality.gate)" --argjson limits "$fallback_json" '
+            {method: $net, security: "reality",
+             realitySettings: ({show: false, target: (if $guard == "nginx" then ($sni + ":443") else $gate end),
+                serverNames: [$sni], privateKey: $key, shortIds: [$sid], minClientVer: "0.0.0"} + $limits)}
             + (if $net == "xhttp" then {xhttpSettings: {path: $path, mode: "auto"}} else {} end)
             + (if $guard == "nginx" then {sockopt: {acceptProxyProtocol: true}} else {} end)')
         if [[ $(st .reality.guard) == nginx ]]; then
             jq -cn --argjson p "$(st .reality.internal)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
-                '{tag:"in-reality", listen:"127.0.0.1", port:$p, protocol:"vless", settings:{clients:$u, decryption:$dec}, streamSettings:$st}' >> "$inb"
+                --argjson sn "$sniff" '
+                {tag:"in-reality", listen:"127.0.0.1", port:$p, protocol:"vless",
+                 settings:{clients:$u, decryption:$dec}, streamSettings:$st}
+                + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
         else
             jq -cn --arg l "$listen" --argjson p "$(st .reality.port)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
-                '{tag:"in-reality", listen:$l, port:$p, protocol:"vless", settings:{clients:$u, decryption:$dec}, streamSettings:$st}' >> "$inb"
+                --argjson sn "$sniff" '
+                {tag:"in-reality", listen:$l, port:$p, protocol:"vless",
+                 settings:{clients:$u, decryption:$dec}, streamSettings:$st}
+                + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
             jq -cn --argjson p "$(st .reality.gate)" --arg sni "$(st .reality.sni)" \
                 '{tag:"reality-gate", listen:"127.0.0.1", port:$p, protocol:"tunnel",
                   settings:{address:$sni, port:443, network:"tcp"},
                   sniffing:{enabled:true, destOverride:["tls"], routeOnly:true}}' >> "$inb"
             jq -cn --arg sni "$(st .reality.sni)" \
-                '{type:"field", inboundTag:["reality-gate"], domain:["full:" + $sni], network:"tcp", outboundTag:"direct"}' \
+                '{type:"field", inboundTag:["reality-gate"], domain:["full:" + $sni], network:"tcp", outboundTag:"reality-fallback"}' \
                 >> "$STAGE/xr-gate.ndjson"
             jq -cn '{type:"field", inboundTag:["reality-gate"], network:"tcp", outboundTag:"blocked"}' >> "$STAGE/xr-gate.ndjson"
         fi
         direct_tags+=(in-reality)
+        vless_tags+=(in-reality)
     fi
 
     if scheme_has_enc_inbound "$s"; then
@@ -3910,18 +4056,25 @@ render_xray_config() {
         if [[ $s == enc-split ]]; then users=$(shared_users_json ''); else users=$(shared_users_json xtls-rprx-vision); fi
         [[ $s == enc ]] || users=$(jq -c '[.[] | select(.email == "direct")]' <<< "$users")
         if [[ $s == enc-split ]]; then
-            stream=$(jq -cn --arg path "$(st .xhttp.path)" '{network:"xhttp", security:"none", xhttpSettings:{path:$path, mode:"auto"}}')
+            stream=$(jq -cn --arg path "$(st .xhttp.path)" '{method:"xhttp", security:"none", xhttpSettings:{path:$path, mode:"auto"}}')
         else
-            stream='{"network":"raw","security":"none"}'
+            stream='{"method":"raw","security":"none"}'
         fi
         jq -cn --arg l "$listen" --argjson p "$(st .enc.port)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
-            '{tag:"in-enc", listen:$l, port:$p, protocol:"vless", settings:{clients:$u, decryption:$dec}, streamSettings:$st}' >> "$inb"
+            --argjson sn "$sniff" '
+            {tag:"in-enc", listen:$l, port:$p, protocol:"vless",
+             settings:{clients:$u, decryption:$dec}, streamSettings:$st}
+            + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
         direct_tags+=(in-enc)
+        vless_tags+=(in-enc)
     fi
 
     if scheme_has_ss "$s"; then
         jq -cn --arg l "$listen" --argjson p "$(st .ss.port)" --arg m "$(st .ss.method)" --arg pw "$(st .ss.password)" \
-            '{tag:"in-ss", listen:$l, port:$p, protocol:"shadowsocks", settings:{method:$m, password:$pw, network:"tcp,udp"}}' >> "$inb"
+            --argjson sn "$sniff" '
+            {tag:"in-ss", listen:$l, port:$p, protocol:"shadowsocks",
+             settings:{method:$m, password:$pw, network:"tcp,udp"}}
+            + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
         direct_tags+=(in-ss)
         if [[ $s == ss ]]; then
             jq -c --arg l "$listen" --arg m "$(st .ss.method)" '.users[] | select((.port // 0) > 0) |
@@ -3939,24 +4092,54 @@ render_xray_config() {
             {type:"field", inboundTag:[$t], user:[.name], outboundTag:.out}' "$DRAFT" >> "$rules"
     fi
 
-    local family='[]'
-    case $(st .outbound) in
-        v4only) family='[{"type":"field","ip":["::/0"],"outboundTag":"blocked"}]' ;;
-        v6only) family='[{"type":"field","ip":["0.0.0.0/0"],"outboundTag":"blocked"}]' ;;
-    esac
-    local gate='[]'
+    # Optional censorship applies only to the locally terminating "direct" user.
+    # Other VLESS users are routed to their own remote landing and must not be blocked on A.
+    # "in-ss" is always direct. "in-ss-landingN" is always a landing.
+    local vtags='[]'
+    if (( ${#vless_tags[@]} )); then
+        vtags=$(printf '%s\n' "${vless_tags[@]}" | jq -R . | jq -cs .)
+    fi
+    if [[ $cn == 1 || $bt == 1 ]]; then
+        if [[ $vtags != '[]' ]]; then
+            if [[ $cn == 1 ]]; then
+                jq -cn --argjson ts "$vtags" '{type:"field", inboundTag:$ts, user:["direct"], domain:["geosite:cn"], outboundTag:"blocked"}' >> "$rules"
+            fi
+            if [[ $bt == 1 ]]; then
+                jq -cn --argjson ts "$vtags" '{type:"field", inboundTag:$ts, user:["direct"], protocol:["bittorrent"], outboundTag:"blocked"}' >> "$rules"
+            fi
+        fi
+        if scheme_has_ss "$s"; then
+            if [[ $cn == 1 ]]; then
+                jq -cn '{type:"field", inboundTag:["in-ss"], domain:["geosite:cn"], outboundTag:"blocked"}' >> "$rules"
+            fi
+            if [[ $bt == 1 ]]; then
+                jq -cn '{type:"field", inboundTag:["in-ss"], protocol:["bittorrent"], outboundTag:"blocked"}' >> "$rules"
+            fi
+        fi
+    fi
+
+    local gate='[]' tags_json='[]' fallback_out='[]'
     [[ ! -s $STAGE/xr-gate.ndjson ]] || gate=$(jq -cs . "$STAGE/xr-gate.ndjson")
     rm -f -- "$STAGE/xr-gate.ndjson"
-    local tags_json
-    tags_json=$(printf '%s\n' "${direct_tags[@]}" | jq -R . | jq -cs .)
-    jq -n --slurpfile inb "$inb" --slurpfile landing_rules "$rules" --argjson block "$(block_rules_json)" \
-        --argjson gate "$gate" --argjson family "$family" --argjson tags "$tags_json" --arg strategy "$strategy" \
+    if (( ${#direct_tags[@]} )); then tags_json=$(printf '%s\n' "${direct_tags[@]}" | jq -R . | jq -cs .); fi
+    if scheme_has_reality "$s" && [[ $(st .reality.guard) == xray ]]; then
+        # Keep decoy/guard traffic isolated from optional CN/BT policies.
+        fallback_out=$(jq -cn --arg strat "$strategy" --argjson rules "$(base_final_rules_json)" '[
+          {tag:"reality-fallback", protocol:"freedom",
+           settings:{domainStrategy:$strat, finalRules:$rules},
+           streamSettings:{sockopt:{domainStrategy:$strat}}}]')
+    fi
+    jq -n --slurpfile inb "$inb" --slurpfile routed "$rules" \
+        --argjson gate "$gate" --argjson tags "$tags_json" --arg strategy "$strategy" \
+        --argjson final "$(egress_final_rules_json)" --argjson fallback "$fallback_out" \
         --argjson landings "$(stj '[.landings[] | .outbound + {tag}]')" '{
         log: {loglevel: "warning", access: "none"},
         inbounds: $inb,
-        outbounds: ([{tag: "direct", protocol: "freedom", streamSettings: {sockopt: {domainStrategy: $strategy}}},
-                     {tag: "blocked", protocol: "blackhole"}] + $landings),
-        routing: {domainStrategy: "AsIs", rules: ($gate + $block + $landing_rules + $family
+        outbounds: ([{tag: "direct", protocol: "freedom",
+                     settings: {domainStrategy:$strategy, finalRules:$final},
+                     streamSettings: {sockopt: {domainStrategy: $strategy}}},
+                     {tag: "blocked", protocol: "blackhole"}] + $fallback + $landings),
+        routing: {domainStrategy: "AsIs", rules: ($gate + $routed
             + [{type: "field", inboundTag: $tags, network: "tcp,udp", outboundTag: "direct"},
                {type: "field", network: "tcp,udp", outboundTag: "blocked"}])}
     }' > "$out"
@@ -4245,6 +4428,7 @@ render_info() {
         printf '对外端口\n'
         public_ports | awk '{printf "%s/%s %s\n", $2, toupper($1), $3}'
         printf '\n出站    %s\n' "$(outbound_label "$(st .outbound)")"
+        printf '出口限制  %s\n' "$(egress_label)"
         if scheme_has_reality "$s"; then
             if [[ $(st .reality.guard) == nginx ]]; then printf '防护    Nginx SNI 过滤 + 回落限速\n'
             else printf '防护    Xray 内置 SNI 过滤 + 回落限速\n'; fi
@@ -4277,10 +4461,72 @@ core_satisfied() {
     esac
 }
 
+needs_full_geo() {
+    needs_xray && [[ $(st '.egress.cn // 0') == 1 ]]
+}
+
+full_geo_fresh() {
+    local m=$XRAY_ASSET_DIR/.zxray-full-geo t now
+    [[ -s $XRAY_ASSET_DIR/geoip.dat && -s $XRAY_ASSET_DIR/geosite.dat && -f $m ]] || return 1
+    t=$(stat -c %Y -- "$m" 2>/dev/null || echo 0)
+    now=$(date +%s)
+    [[ $t =~ ^[0-9]+$ ]] && (( t > 0 && now >= t && now - t <= 604800 ))
+}
+
+download_full_geodata() {
+    # Same official XTLS/Xray-rules-dat Full / Expanded assets used by Xray-install.
+    # Download before touching installed files; verify both compressed archives.
+    local name gz digest got base
+    FULL_GEO_DIR=$STAGE/core/full-geodata
+    mkdir -p -- "$FULL_GEO_DIR"
+    base=https://github.com/XTLS/Xray-rules-dat/releases/latest/download
+    for name in geoip-full geosite-expand; do
+        gz=$name.dat.gz
+        fetch "$base/$gz" "$FULL_GEO_DIR/$gz"
+        fetch "$base/$gz.sha256sum" "$FULL_GEO_DIR/$gz.sha256sum"
+        digest=$(awk 'NR==1 {print $1}' "$FULL_GEO_DIR/$gz.sha256sum")
+        [[ $digest =~ ^[0-9a-fA-F]{64}$ ]] || {
+            die "$gz 的 SHA-256 文件格式不正确。"; return 1;
+        }
+        got=$(sha256_of "$FULL_GEO_DIR/$gz")
+        [[ ${got,,} == "${digest,,}" ]] || {
+            die "$gz 的 SHA-256 校验失败。"; return 1;
+        }
+        if [[ $name == geoip-full ]]; then
+            gzip -dc -- "$FULL_GEO_DIR/$gz" > "$FULL_GEO_DIR/geoip.dat" || {
+                die '解压 GeoIP Full 失败。'; return 1;
+            }
+        else
+            gzip -dc -- "$FULL_GEO_DIR/$gz" > "$FULL_GEO_DIR/geosite.dat" || {
+                die '解压 GeoSite Expanded 失败。'; return 1;
+            }
+        fi
+        rm -f -- "$FULL_GEO_DIR/$gz" "$FULL_GEO_DIR/$gz.sha256sum"
+    done
+    [[ -s $FULL_GEO_DIR/geoip.dat && -s $FULL_GEO_DIR/geosite.dat ]] || {
+        die '完整地理规则下载后的文件为空。'; return 1;
+    }
+    printf '%s\n' 'XTLS/Xray-rules-dat: GeoIP Full, GeoSite Expanded' > "$FULL_GEO_DIR/.zxray-full-geo"
+    USE_XRAY_ASSET=$FULL_GEO_DIR
+    GEO_REFRESH=1
+}
+
+install_full_geodata() {
+    (( GEO_REFRESH )) || return 0
+    [[ -s $FULL_GEO_DIR/geoip.dat && -s $FULL_GEO_DIR/geosite.dat ]] || {
+        die '待安装的 Geo Full 数据不存在。'; return 1;
+    }
+    atomic_install "$FULL_GEO_DIR/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
+    atomic_install "$FULL_GEO_DIR/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
+    atomic_install "$FULL_GEO_DIR/.zxray-full-geo" "$XRAY_ASSET_DIR/.zxray-full-geo" 644
+}
+
 plan_cores() {
-    USE_XRAY='' USE_SS='' NEW_XRAY=0 NEW_SS=0
+    USE_XRAY='' USE_SS='' NEW_XRAY=0 NEW_SS=0 GEO_REFRESH=0 FULL_GEO_DIR=''
+    if needs_full_geo && ! full_geo_fresh; then GEO_REFRESH=1; fi
     if needs_xray; then
-        if [[ -x $XRAY_BIN ]] && core_satisfied xray; then USE_XRAY=$XRAY_BIN USE_XRAY_ASSET=$XRAY_ASSET_DIR
+        if [[ -x $XRAY_BIN ]] && core_satisfied xray             && ver_ge "$(xray_version_of "$XRAY_BIN")" "$XRAY_MIN_VERSION"; then
+            USE_XRAY=$XRAY_BIN USE_XRAY_ASSET=$XRAY_ASSET_DIR
         else NEW_XRAY=1; fi
     fi
     if needs_ss_rust; then
@@ -4300,6 +4546,7 @@ download_cores() {
         download_ss "$(st .core.ss)" "$dir/ss-pkg"
         USE_SS=$dir/ss-pkg/ssserver
     fi
+    if (( GEO_REFRESH )); then download_full_geodata; fi
 }
 
 validate_xray_config() {
@@ -4489,10 +4736,14 @@ install_files_and_services() {
     if needs_xray; then
         if [[ $USE_XRAY != "$XRAY_BIN" ]]; then
             install_bin "$USE_XRAY" "$XRAY_BIN"
-            atomic_install "$USE_XRAY_ASSET/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
-            atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
+            if (( ! GEO_REFRESH )) && { ! needs_full_geo || ! full_geo_fresh; }; then
+                atomic_install "$USE_XRAY_ASSET/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
+                atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
+                rm -f -- "$XRAY_ASSET_DIR/.zxray-full-geo"
+            fi
             chmod 755 "$XRAY_ASSET_DIR"
         fi
+        install_full_geodata
         make_dir "$CONFIG_DIR"
         atomic_install "$STAGE/config.json" "$CONFIG_FILE" 640
         chown "root:$SERVICE_USER" "$CONFIG_FILE"
@@ -4626,13 +4877,13 @@ apply_draft() {
     STEP_NO=0
     STEP_TOTAL=4
     local dl=0
-    if (( NEW_XRAY || NEW_SS )); then dl=1; STEP_TOTAL=$(( STEP_TOTAL + 1 )); fi
+    if (( NEW_XRAY || NEW_SS || GEO_REFRESH )); then dl=1; STEP_TOTAL=$(( STEP_TOTAL + 1 )); fi
     local ng=0
     if needs_nginx; then ng=1; STEP_TOTAL=$(( STEP_TOTAL + 1 )); fi
 
     ui_blank
     if (( dl )); then
-        ui_step '下载并校验核心'
+        ui_step '下载核心和地理规则'
         download_cores
         ui_step_done
     fi
@@ -5127,6 +5378,8 @@ action_rollback() {
     jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
         | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema | .reality.fp = "chrome"
         | if .core.xray == "compat" then .core.xray = "latest" else . end' "$prev" > "$DRAFT"
+    st_filter '.egress = {cn: (.egress.cn // 0), bt: (.egress.bt // 0)}'
+    normalize_landing_outbounds
     pv_snapshot "$STATE"
     mapfile -t PV_KEYS < <(preview_items | grep -v '^@')
     cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
@@ -5226,6 +5479,11 @@ update_cores() {
             USE_SS=$dir/ss-pkg/ssserver
         fi
     fi
+    if needs_full_geo && ! full_geo_fresh; then
+        download_full_geodata
+        todo+=("GeoIP Full / GeoSite Expanded 更新")
+        [[ -n $USE_XRAY ]] || USE_XRAY=$XRAY_BIN
+    fi
     if (( ${#todo[@]} == 0 )); then
         if (( ${#notes[@]} )); then ui_step_skip "${notes[0]}"; else ui_step_skip '已是最新'; fi
         # A prior install can still have the legacy compat preference.
@@ -5260,9 +5518,13 @@ replace_cores() {
     tx_begin
     while read -r s; do [[ -z $s ]] || svc_do stop "$s" || true; done <<< "$(wanted_services)"
     if [[ -n $USE_XRAY ]]; then
-        install_bin "$USE_XRAY" "$XRAY_BIN"
-        atomic_install "$USE_XRAY_ASSET/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
-        atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
+        if [[ $USE_XRAY != "$XRAY_BIN" ]]; then install_bin "$USE_XRAY" "$XRAY_BIN"; fi
+        if (( ! GEO_REFRESH )) && { ! needs_full_geo || ! full_geo_fresh; }; then
+            atomic_install "$USE_XRAY_ASSET/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
+            atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
+            rm -f -- "$XRAY_ASSET_DIR/.zxray-full-geo"
+        fi
+        install_full_geodata
         if xray_needs_lowport; then grant_lowport "$XRAY_BIN" 1; fi
     fi
     if [[ -n $USE_SS ]]; then
