@@ -570,6 +570,7 @@ ui_step() {
     tty_echo -echo
     INPUT_DIRTY=1
     STEP_NO=$(( STEP_NO + 1 ))
+    [[ -z $STAGE || ! -d $STAGE ]] || rm -f -- "$STAGE/.step$STEP_NO-break" "$STAGE/.step$STEP_NO-end"
     STEP_LABEL=$1
     step_prefix
     STEP_OPEN=1
@@ -693,6 +694,7 @@ tui_read_key() {
         IFS= read -rsn1 -t 1 -u "$INPUT_FD" __k || __rc=$?
         if (( __rc > 128 )); then
             if (( TUI_RESIZED )); then TUI_RESIZED=0; trap - TSTP; printf -v "$1" '%s' RESIZE; return 0; fi
+            if [[ ${2:-} == timed ]]; then trap - TSTP; printf -v "$1" '%s' TICK; return 0; fi
             continue
         fi
         (( __rc == 0 )) || input_eof
@@ -825,7 +827,7 @@ tui_draw() {
         (( se - sel < avail )) || se=$(( sel + avail - 1 ))
         top=$TUI_TOP
         (( top >= hd )) || top=$hd
-        (( TUI_CUR > 0 )) || top=$hd
+        (( TUI_CUR > 0 || ${#TUI_ITEMS[@]} == 0 )) || top=$hd
         (( sel < 0 || sel >= top )) || top=$sel
         (( se < top + avail )) || top=$(( se - avail + 1 ))
         (( top + avail <= n )) || top=$(( n - avail ))
@@ -5628,11 +5630,12 @@ mt_build() {
     ui_page '更新与维护'
     tui_item 1 '更新' '' '更新 Xray / SS-Rust 正式版并保留定制脚本'
     tui_item 2 '重启' '' '重启服务并检查运行状态'
-    tui_item 3 '运行状态' '' '服务、端口、防火墙和最近日志'
+    tui_item 3 '运行状态' '' '服务、端口、防火墙；日志按需查看'
     tui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
     if prev_state_ok; then
         tui_item 5 '回滚配置' '' "恢复到 $(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M') 那次修改之前"
     fi
+    tui_item g '更新地理规则' '' '单独更新 GeoIP Full / GeoSite Expanded，不升级核心'
     TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
 }
 
@@ -5650,6 +5653,7 @@ action_maintain() {
             3) run_sub action_status ;;
             4) run_sub action_sni_pool ;;
             5) run_sub action_rollback ;;
+            g) run_sub action_geo_update ;;
         esac
     done
 }
@@ -5728,6 +5732,25 @@ action_update() {
     update_cores
 }
 
+action_geo_update() {
+    if ! state_ok; then ui_warn '还没有安装，请先在主页选择「安装」。'; return 0; fi
+    # Read the installed state without normalizing or rewriting user configuration.
+    DRAFT=$STAGE/draft.json
+    cp -f -- "$STATE" "$DRAFT"
+    if ! needs_full_geo; then
+        ui_warn '当前没有启用 Xray 的大陆域名/IP 拦截，不需要完整地理规则。'
+        return 0
+    fi
+    MODE=modify
+    STEP_NO=0 STEP_TOTAL=1
+    ui_step '下载并校验地理规则'
+    : > "$STEP_LOG"
+    download_full_geodata
+    USE_XRAY=$XRAY_BIN
+    ui_step_done
+    replace_cores '地理规则已更新，节点不变。'
+}
+
 
 update_cores() {
     local -a todo=() notes=()
@@ -5791,16 +5814,17 @@ update_cores() {
 }
 
 replace_cores() {
-    local s
+    local s result=${1:-核心已更新，节点不变。} geo_only=0
+    if [[ $USE_XRAY == "$XRAY_BIN" && -z $USE_SS ]] && (( GEO_REFRESH )); then geo_only=1; fi
     STEP_NO=0 STEP_TOTAL=1
     ui_blank
     if [[ -n $USE_XRAY ]]; then
         STEP_TOTAL=2
-        ui_step '用新核心校验配置'
+        if (( geo_only )); then ui_step '校验配置'; else ui_step '用新核心校验配置'; fi
         validate_xray_config "$CONFIG_FILE"
         ui_step_done
     fi
-    ui_step '替换核心并重启'
+    if (( geo_only )); then ui_step '替换规则并重启'; else ui_step '替换核心并重启'; fi
     : > "$STEP_LOG"
     tx_begin
     while read -r s; do [[ -z $s ]] || svc_do stop "$s" || true; done <<< "$(wanted_services)"
@@ -5826,7 +5850,7 @@ replace_cores() {
     atomic_install "$DRAFT" "$STATE" 600
     tx_commit
     ui_step_done
-    ui_ok '核心已更新，节点不变。'
+    ui_ok "$result"
 }
 
 
@@ -5850,10 +5874,8 @@ action_restart() {
     ui_ok '服务已重启，运行正常。'
 }
 
-action_status() {
+status_build() {
     local s v proto port label kind
-    require_state
-    (( STATE_READY )) || return 0
     ui_page '运行状态' "$(scheme_label "$(scheme)")"
     ui_group '服务'
     while read -r s; do
@@ -5877,19 +5899,177 @@ action_status() {
         ui_kv "${proto^^} $port" "$v" "$label"
     done <<< "$(public_ports)"
     ui_blank
-    ui_group '最近日志'
+    tui_item 1 '查看最近日志' '' '按服务查看，最近 50 条并自动刷新'
+    TUI_FOOT='回车 查看日志   Esc 返回'
+    TUI_FOOT_PLAIN='1 查看日志   回车 返回'
+}
+
+LOG_SOURCES=() LOG_SERVICE='' LOG_RAW='' LOG_AUTO=1 LOG_FOLLOW=1
+
+logs_build() {
+    local s note
+    LOG_SOURCES=()
+    ui_page '最近日志'
+    ui_hint '选择要查看的服务；进入后显示最近 50 条完整日志，每 2 秒刷新。'
+    ui_blank
     while read -r s; do
         [[ -n $s ]] || continue
-        printf '  %s%s%s\n' "$C_DIM" "$(svc_label "$s")" "$C_RESET" >&4
-        {
-            if [[ $INIT == systemd ]]; then
-                journalctl -u "$s" -n 8 --no-pager -o cat 2>/dev/null || true
-            elif [[ -f $DATA_DIR/log/$s.log ]]; then
-                tail -n 8 "$DATA_DIR/log/$s.log" || true
-            fi
-        } | grep -v '^[[:space:]]*$' | cut -c1-$(( UI_W - 4 )) | sed 's/^/    /' >&4 || ui_line '  暂无日志'
+        LOG_SOURCES+=("$s")
+        note='服务日志'
+        [[ $s != zxray-nginx ]] || note='优先查看 Nginx error.log'
+        tui_item "${#LOG_SOURCES[@]}" "$(svc_label "$s")" '' "$note"
     done <<< "$(wanted_services)"
-    ui_rule
+    TUI_FOOT='上下键 移动   回车 查看   Esc 返回'
+}
+
+log_fetch() {
+    local s=$1
+    if [[ $s == zxray-nginx && -s $NGINX_DIR/error.log ]]; then
+        tail -n 50 -- "$NGINX_DIR/error.log" 2>/dev/null || true
+    elif [[ $INIT == systemd ]]; then
+        journalctl -q -u "$s" -n 50 --no-pager -o short-iso 2>/dev/null || true
+    elif [[ -f $DATA_DIR/log/$s.log ]]; then
+        tail -n 50 -- "$DATA_DIR/log/$s.log" 2>/dev/null || true
+    fi
+}
+
+log_view_build() {
+    local line wrapped piece
+    ui_page '实时日志' "$(svc_label "$LOG_SERVICE")"
+    if (( TUI )); then
+        ui_hint '最近 50 条；每 2 秒刷新。上下键、PgUp/PgDn 翻阅，End 返回最新。'
+    else
+        ui_hint '最近 50 条；自动刷新需要交互终端。'
+    fi
+    ui_blank
+    if [[ -z $LOG_RAW ]]; then
+        ui_note '暂无日志。'
+    else
+        while IFS= read -r line; do
+            line=${line//$'\r'/}
+            line=${line//$'\t'/    }
+            wrap_text "$line" $(( UI_W - 4 )) wrapped
+            while IFS= read -r piece; do ui_emit "  $piece"; done <<< "$wrapped"
+        done <<< "$LOG_RAW"
+    fi
+    if (( LOG_AUTO )); then
+        TUI_FOOT='上下键 翻阅   a 暂停   r 刷新   Esc 返回'
+    else
+        TUI_FOOT='上下键 翻阅   a 继续   r 刷新   Esc 返回'
+    fi
+}
+
+log_view_bottom() {
+    local hd=$TUI_HEAD n=${#UI_BUF[@]} visible=$(( UI_H - 3 )) top
+    (( hd + 4 <= visible )) || hd=0
+    visible=$(( visible - hd ))
+    (( n - hd <= visible )) || visible=$(( visible - 1 ))
+    (( visible >= 3 )) || visible=3
+    top=$(( n - visible ))
+    (( top >= hd )) || top=$hd
+    printf -v "$1" '%d' "$top"
+}
+
+log_view_rebuild() {
+    local bottom
+    tui_build log_view_build
+    log_view_bottom bottom
+    if (( LOG_FOLLOW )); then TUI_TOP=$bottom
+    else
+        (( TUI_TOP >= TUI_HEAD )) || TUI_TOP=$TUI_HEAD
+        (( TUI_TOP <= bottom )) || TUI_TOP=$bottom
+    fi
+}
+
+log_view() {
+    local k fresh bottom ticks=0 step
+    LOG_SERVICE=$1 LOG_AUTO=1 LOG_FOLLOW=1
+    LOG_RAW=$(log_fetch "$LOG_SERVICE")
+    if (( ! TUI )); then
+        log_view_build
+        ui_rule
+        ui_pause
+        return 0
+    fi
+    ui_measure
+    TUI_TOP=0 TUI_PREV_OK=0
+    log_view_rebuild
+    ui_flush
+    tty_echo -echo
+    tui_cursor off
+    while :; do
+        tui_draw
+        tui_read_key k timed
+        case $k in
+            ESC|q|Q|LEFT) break ;;
+            RESIZE) ui_measure; TUI_PREV_OK=0; log_view_rebuild ;;
+            TICK)
+                ticks=$(( ticks + 1 ))
+                if (( LOG_AUTO && ticks >= 2 )); then
+                    ticks=0
+                    fresh=$(log_fetch "$LOG_SERVICE")
+                    if [[ $fresh != "$LOG_RAW" ]]; then
+                        LOG_RAW=$fresh
+                        log_view_rebuild
+                    fi
+                fi ;;
+            r|R)
+                LOG_RAW=$(log_fetch "$LOG_SERVICE")
+                log_view_rebuild ;;
+            a|A)
+                LOG_AUTO=$(( 1 - LOG_AUTO ))
+                if (( LOG_AUTO )); then
+                    LOG_FOLLOW=1
+                    LOG_RAW=$(log_fetch "$LOG_SERVICE")
+                fi
+                ticks=0
+                log_view_rebuild ;;
+            END)
+                LOG_AUTO=1 LOG_FOLLOW=1 ticks=0
+                LOG_RAW=$(log_fetch "$LOG_SERVICE")
+                log_view_rebuild ;;
+            UP|DOWN|PGUP|PGDN|HOME)
+                if (( LOG_AUTO )); then
+                    LOG_AUTO=0 LOG_FOLLOW=0
+                    log_view_rebuild
+                fi
+                LOG_FOLLOW=0
+                step=1
+                [[ $k != PGUP && $k != PGDN ]] || step=$(( UI_H - 7 ))
+                (( step >= 1 )) || step=1
+                log_view_bottom bottom
+                case $k in
+                    UP|PGUP) TUI_TOP=$(( TUI_TOP - step )) ;;
+                    DOWN|PGDN) TUI_TOP=$(( TUI_TOP + step )) ;;
+                    HOME) TUI_TOP=$TUI_HEAD ;;
+                esac
+                (( TUI_TOP >= TUI_HEAD )) || TUI_TOP=$TUI_HEAD
+                (( TUI_TOP <= bottom )) || TUI_TOP=$bottom ;;
+            b|B) go_home_if_b b || true ;;
+        esac
+    done
+}
+
+logs_menu() {
+    local sel=0
+    while :; do
+        tui_menu logs_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || return 0
+        log_view "${LOG_SOURCES[$TUI_CUR]}"
+    done
+}
+
+action_status() {
+    local sel=0
+    require_state
+    (( STATE_READY )) || return 0
+    while :; do
+        tui_menu status_build "$sel" ''
+        sel=$TUI_CUR
+        [[ $TUI_KEY == ENTER ]] || exit "$RC_QUIET"
+        logs_menu
+    done
 }
 
 sni_stage_begin() {
