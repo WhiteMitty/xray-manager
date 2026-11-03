@@ -88,7 +88,7 @@ OS_FAMILY='' INIT='' PKG=''
 ACTION=menu ASSUME_YES=0 FORCE=0 CLI_SCHEME='' CLI_CORE_TAG=''
 ASSUME_YES_FLAG=()
 STAGE='' TX_ACTIVE=0 KEEP_TX=0 ACTION_PID='' CHILD_RUNNING=0
-INPUT_FD=0 SOURCE_PATH='' DRAFT='' CHECK_PID=''
+INPUT_FD=0 INPUT_TTY_STATE='' SOURCE_PATH='' DRAFT='' CHECK_PID=''
 STEP_NO=0 STEP_TOTAL=0 STEP_OPEN=0 STEP_LOG='' STEP_LABEL='' DIE_SHOWN=0
 CHILD_RC=0 SUB_RC=0 TOP_RC=0 TOP_QUIET=0 STATE_READY=0
 MODE=new PREVIEW_RESULT=1 PORT_NOTE='' DRAFT_WATCH=0 DRAFT_BASE=''
@@ -600,6 +600,7 @@ input_setup() {
     else
         INPUT_FD=0
     fi
+    if input_is_tty; then INPUT_TTY_STATE=$(stty -g <&"$INPUT_FD" 2>/dev/null || true); fi
 }
 
 input_is_tty() { [[ -t $INPUT_FD ]]; }
@@ -618,10 +619,17 @@ ui_flush() {
 }
 
 on_tstp() {
+    local pid=$BASHPID pgrp
+    pgrp=$(awk '{sub(/^.*\) /, ""); print $3}' "/proc/$pid/stat") || return 0
+    [[ $pgrp =~ ^[0-9]+$ ]] && (( pgrp > 1 )) || return 0
     tui_cursor on
+    tty_echo "${INPUT_TTY_STATE:-echo}"
+    if [[ ${LOG_VIEW_ACTIVE:-0} == 1 ]]; then printf '\e[0m\e[?1049l' >&4; fi
     trap - TSTP
-    kill -TSTP "$BASHPID"
+    # Suspend the whole job only after the active view has restored the terminal.
+    kill -STOP -- "-$pgrp"
     trap on_tstp TSTP
+    if [[ ${LOG_VIEW_ACTIVE:-0} == 1 ]]; then printf '\e[?1049h\e[H\e[2J' >&4; fi
     tty_echo -echo
     tui_cursor off
     TUI_PREV_OK=0
@@ -687,20 +695,25 @@ read_line() {
 }
 
 tui_read_key() {
-    local __k='' __c='' __seq='' __rc
+    local __k='' __c='' __seq='' __rc __tty_state=''
+    if input_is_tty; then __tty_state=$(stty -g <&"$INPUT_FD" 2>/dev/null || true); fi
     trap on_tstp TSTP
+    # Read Ctrl+Z as a key so parent shells cannot stop before tty cleanup.
+    [[ -z $__tty_state ]] || stty susp undef <&"$INPUT_FD" 2>/dev/null || true
     while :; do
         __rc=0
         IFS= read -rsn1 -t 1 -u "$INPUT_FD" __k || __rc=$?
         if (( __rc > 128 )); then
-            if (( TUI_RESIZED )); then TUI_RESIZED=0; trap - TSTP; printf -v "$1" '%s' RESIZE; return 0; fi
-            if [[ ${2:-} == timed ]]; then trap - TSTP; printf -v "$1" '%s' TICK; return 0; fi
+            if (( TUI_RESIZED )); then TUI_RESIZED=0; __k=RESIZE; break; fi
+            if [[ ${2:-} == timed ]]; then __k=TICK; break; fi
             continue
         fi
-        (( __rc == 0 )) || input_eof
+        (( __rc == 0 )) || { [[ -z $__tty_state ]] || tty_echo "$__tty_state"; input_eof; }
         break
     done
+    [[ -z $__tty_state ]] || tty_echo "$__tty_state"
     case $__k in
+        $'\x1a') on_tstp; [[ -z $__tty_state ]] || tty_echo "$__tty_state"; TUI_RESIZED=0; __k=RESIZE ;;
         $'\e')
             __rc=0
             IFS= read -rsn1 -t 0.1 -u "$INPUT_FD" __c || __rc=$?
@@ -889,11 +902,13 @@ tui_jump() {
 }
 
 tui_menu() {
-    local __tm_fn=$1 __tm_keys=${3:-} __tm_k __tm_n __tm_dg='' __tm_dt=0 __tm_now
+    local __tm_fn=$1 __tm_keys=${3:-} __tm_k __tm_n __tm_dg='' __tm_dt=0 __tm_now __tm_tty_state=''
     TUI_CUR=${2:-0}
     shift $(( $# < 3 ? $# : 3 ))
     TUI_KEY=''
     if (( ! TUI )); then tui_plain "$__tm_fn" "$__tm_keys" "$@"; return 0; fi
+    __tm_tty_state=$(stty -g <&"$INPUT_FD" 2>/dev/null || true)
+    [[ -z $__tm_tty_state ]] || stty susp undef <&"$INPUT_FD" 2>/dev/null || true
     ui_measure
     TUI_RESIZED=0
     (( ! INPUT_DIRTY )) || ui_flush
@@ -938,6 +953,7 @@ tui_menu() {
                 fi ;;
         esac
     done
+    [[ -z $__tm_tty_state ]] || tty_echo "$__tm_tty_state"
     return 0
 }
 
@@ -1105,11 +1121,11 @@ index_of() {
 ui_pause() {
     local k
     if (( TUI )); then
-        printf '  %s按回车返回%s' "$C_DIM" "$C_RESET" >&4
         ui_flush
         tty_echo -echo
         tui_cursor off
         while :; do
+            printf '\r\e[2K  %s按回车返回%s' "$C_DIM" "$C_RESET" >&4
             tui_read_key k
             case $k in ENTER|ESC|q|Q) break ;; b|B) go_home_if_b b || true ;; esac
         done
@@ -1574,7 +1590,7 @@ install_bin() {
 check_service_access() {
     local f
     have su || return 0
-    su -s /bin/sh -c true "$SERVICE_USER" >/dev/null 2>&1 || return 0
+    su -s /bin/sh -c 'test "$1" = ok' "$SERVICE_USER" _ ok >/dev/null 2>&1 || return 0
     for f in "$@"; do
         su -s /bin/sh -c 'test -r "$1"' "$SERVICE_USER" _ "$f" >/dev/null 2>&1 && continue
         die "运行用户 $SERVICE_USER 读不到 $f。" "请检查它所在各级目录的权限（其他用户需要有 x 权限）。"
@@ -1892,6 +1908,7 @@ run_child() {
     CHILD_RUNNING=1
     run_action "$@"
     CHILD_RC=$?
+    tty_echo "${INPUT_TTY_STATE:-echo}"
     CHILD_RUNNING=0
     set -e
     if [[ -n $ACTION_PID ]]; then trap 'on_action_error $? $LINENO "${FUNCNAME[0]:-}" "$BASH_COMMAND"' ERR; fi
@@ -3610,47 +3627,51 @@ ld_build() {
 confirm_landing_add() {
     local link=$1 k answer
     # Parse has already succeeded. Present details before any draft mutation.
-    ui_page '确认添加落地' '尚未保存'
-    ui_kv '名称' "$PARSED_LABEL"
-    ui_kv '类型' "$PARSED_KIND"
-    ui_kv '地址' "$(uri_host "$PARSED_HOST")"
-    ui_kv '端口' "$PARSED_PORT"
-    if [[ $PARSED_KIND == ss ]]; then
-        ui_kv '加密方式' "$(jq -r '.settings.method // "unknown"' <<< "$PARSED_OUTBOUND_JSON")"
-    else
-        local encryption security
-        encryption=$(jq -r '.settings.encryption // "none"' <<< "$PARSED_OUTBOUND_JSON")
-        security=$(jq -r '.streamSettings.security // "none"' <<< "$PARSED_OUTBOUND_JSON")
-        if [[ $security == reality ]]; then
-            ui_kv '安全类型' 'REALITY'
-            ui_kv 'SNI' "$(jq -r '.streamSettings.realitySettings.serverName // ""' <<< "$PARSED_OUTBOUND_JSON")"
-        elif [[ $encryption != none ]]; then
-            ui_kv '安全类型' 'VLESS-ENC'
+    while :; do
+        ui_page '确认添加落地' '尚未保存'
+        ui_kv '名称' "$PARSED_LABEL"
+        ui_kv '类型' "$PARSED_KIND"
+        ui_kv '地址' "$(uri_host "$PARSED_HOST")"
+        ui_kv '端口' "$PARSED_PORT"
+        if [[ $PARSED_KIND == ss ]]; then
+            ui_kv '加密方式' "$(jq -r '.settings.method // "unknown"' <<< "$PARSED_OUTBOUND_JSON")"
         else
-            ui_kv '安全类型' '无额外加密'
+            local encryption security
+            encryption=$(jq -r '.settings.encryption // "none"' <<< "$PARSED_OUTBOUND_JSON")
+            security=$(jq -r '.streamSettings.security // "none"' <<< "$PARSED_OUTBOUND_JSON")
+            if [[ $security == reality ]]; then
+                ui_kv '安全类型' 'REALITY'
+                ui_kv 'SNI' "$(jq -r '.streamSettings.realitySettings.serverName // ""' <<< "$PARSED_OUTBOUND_JSON")"
+            elif [[ $encryption != none ]]; then
+                ui_kv '安全类型' 'VLESS-ENC'
+            else
+                ui_kv '安全类型' '无额外加密'
+            fi
         fi
-    fi
-    ui_hint $'请核对上面解析出来的落地服务器。\n此时仅保存到草稿，稍后仍需在预览页应用修改。'
-    ui_rule
-    if (( TUI )); then
-        ui_footer '回车 确认添加   Esc 取消'
-        ui_flush
-        tty_echo -echo
-        tui_cursor off
-        while :; do
-            tui_read_key k
-            case $k in
-                ENTER) return 0 ;;
-                ESC|q|Q) return 1 ;;
-                b|B) go_home_if_b b || true ;;
-            esac
-        done
-    fi
-    read_line '按回车确认添加，输入 n 取消：' answer
-    case $answer in
-        ''|y|Y) return 0 ;;
-        *) return 1 ;;
-    esac
+        ui_hint $'请核对上面解析出来的落地服务器。\n此时仅保存到草稿，稍后仍需在预览页应用修改。'
+        ui_rule
+        if (( TUI )); then
+            ui_footer '回车 确认添加   Esc 取消'
+            ui_flush
+            tty_echo -echo
+            tui_cursor off
+            while :; do
+                tui_read_key k
+                case $k in
+                    ENTER) return 0 ;;
+                    ESC|q|Q) return 1 ;;
+                    RESIZE) ui_measure; break ;;
+                    b|B) go_home_if_b b || true; break ;;
+                esac
+            done
+            continue
+        fi
+        read_line '按回车确认添加，输入 n 取消：' answer
+        case $answer in
+            ''|y|Y) return 0 ;;
+            *) return 1 ;;
+        esac
+    done
 }
 
 edit_landings() {
@@ -3716,8 +3737,8 @@ add_landing() {
     tag="landing$idx"
     if [[ $(scheme) == ss ]]; then port=$(random_free_port); fi
     st_filter --arg tag "$tag" --arg link "$link" --argjson ob "$PARSED_OUTBOUND_JSON" --arg kind "$PARSED_KIND" \
-        --arg host "$PARSED_HOST" --argjson port "$PARSED_PORT" --arg label "$PARSED_LABEL" --argjson up "$port" \
-        '.landings += [{tag:$tag, link:$link, outbound:$ob, kind:$kind, host:$host, port:$port, label:$label}]
+        --arg host "$PARSED_HOST" --argjson port "$PARSED_PORT" --arg node_label "$PARSED_LABEL" --argjson up "$port" \
+        '.landings += [{tag:$tag, link:$link, outbound:$ob, kind:$kind, host:$host, port:$port, label:$node_label}]
          | .users += [{name:$tag, id:"", out:$tag} + (if $up > 0 then {port:$up} else {} end)]'
 }
 
@@ -4273,10 +4294,10 @@ render_xray_config() {
                 {tag:"in-reality", listen:$l, port:$p, protocol:"vless",
                  settings:{clients:$u, decryption:$dec}, streamSettings:$st}
                 + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
-            jq -cn --argjson p "$(st .reality.gate)" --arg sni "$(st .reality.sni)" \
+            jq -cn --argjson p "$(st .reality.gate)" \
                 '{tag:"reality-gate", listen:"127.0.0.1", port:$p, protocol:"tunnel",
-                  settings:{address:$sni, port:443, network:"tcp"},
-                  sniffing:{enabled:true, destOverride:["tls"], routeOnly:true}}' >> "$inb"
+                  settings:{address:"127.0.0.1", port:443, network:"tcp"},
+                  sniffing:{enabled:true, destOverride:["tls"], routeOnly:false}}' >> "$inb"
             jq -cn --arg sni "$(st .reality.sni)" \
                 '{type:"field", inboundTag:["reality-gate"], domain:["full:" + $sni], network:"tcp", outboundTag:"reality-fallback"}' \
                 >> "$STAGE/xr-gate.ndjson"
@@ -5287,7 +5308,6 @@ migrate_state() {
         [[ $(jq -r '.schema // 0' "$f" 2>/dev/null || true) == 4 ]] || continue
         tmp=$(mktemp "$f.XXXXXX")
         if jq --argjson s "$STATE_SCHEMA" --argjson j "$(limit_jitter_new)" '.schema = $s
-            | (if .core.xray == "compat" then .core.xray = "latest" else . end)
             | .reality.limit_jitter = (.reality.limit_jitter // $j)' "$f" > "$tmp"; then
             chmod 600 "$tmp"
             mv -f -- "$tmp" "$f"
@@ -5628,14 +5648,14 @@ show_node_link() {
 
 mt_build() {
     ui_page '更新与维护'
-    tui_item 1 '更新' '' '更新 Xray / SS-Rust 正式版并保留定制脚本'
-    tui_item 2 '重启' '' '重启服务并检查运行状态'
-    tui_item 3 '运行状态' '' '服务、端口、防火墙；日志按需查看'
-    tui_item 4 '候选站点' '' '自动挑选伪装站点时测速的网站'
+    tui_item 1 '更新内核' '' '更新 Xray / SS-Rust 正式版并保留定制脚本'
+    tui_item 2 '更新地理' '' '单独更新 GeoIP Full / GeoSite Expanded，不升级核心'
+    tui_item 3 '重启服务' '' '重启服务并检查运行状态'
+    tui_item 4 '运行状态' '' '服务、端口、防火墙；日志按需查看'
+    tui_item 5 '候选站点' '' '自动挑选伪装站点时测速的网站'
     if prev_state_ok; then
-        tui_item 5 '回滚配置' '' "恢复到 $(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M') 那次修改之前"
+        tui_item 6 '回滚配置' '' "恢复到 $(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M') 那次修改之前"
     fi
-    tui_item g '更新地理规则' '' '单独更新 GeoIP Full / GeoSite Expanded，不升级核心'
     TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
 }
 
@@ -5649,11 +5669,11 @@ action_maintain() {
             1)
                 run_sub action_update
                 ;;
-            2) run_sub action_restart ;;
-            3) run_sub action_status ;;
-            4) run_sub action_sni_pool ;;
-            5) run_sub action_rollback ;;
-            g) run_sub action_geo_update ;;
+            2) run_sub action_geo_update ;;
+            3) run_sub action_restart ;;
+            4) run_sub action_status ;;
+            5) run_sub action_sni_pool ;;
+            6) run_sub action_rollback ;;
         esac
     done
 }
@@ -5933,46 +5953,42 @@ log_fetch() {
     fi
 }
 
+log_view_measure() {
+    local sz=''
+    if input_is_tty; then sz=$(stty size <&"$INPUT_FD" 2>/dev/null || true); fi
+    if [[ ! $sz =~ ^[0-9]+\ [0-9]+$ && -t 1 ]]; then sz="$(tput lines 2>/dev/null || true) $(tput cols 2>/dev/null || true)"; fi
+    if [[ $sz =~ ^([0-9]+)\ ([0-9]+)$ ]] && (( BASH_REMATCH[1] > 0 && BASH_REMATCH[2] > 0 )); then
+        UI_H=${BASH_REMATCH[1]} UI_W=${BASH_REMATCH[2]}
+    fi
+    (( UI_H >= 3 )) || UI_H=3
+    (( UI_W >= 4 )) || UI_W=4
+}
+
 log_view_build() {
     local line wrapped piece
-    ui_page '实时日志' "$(svc_label "$LOG_SERVICE")"
-    if (( TUI )); then
-        ui_hint '最近 50 条；每 2 秒刷新。上下键、PgUp/PgDn 翻阅，End 返回最新。'
-    else
-        ui_hint '最近 50 条；自动刷新需要交互终端。'
-    fi
-    ui_blank
+    UI_BUF=() TUI_HEAD=0
     if [[ -z $LOG_RAW ]]; then
-        ui_note '暂无日志。'
+        UI_BUF=('暂无日志。')
     else
         while IFS= read -r line; do
             line=${line//$'\r'/}
             line=${line//$'\t'/    }
-            wrap_text "$line" $(( UI_W - 4 )) wrapped
-            while IFS= read -r piece; do ui_emit "  $piece"; done <<< "$wrapped"
+            strip_ansi "$line" line
+            wrap_text "$line" "$UI_W" wrapped
+            while IFS= read -r piece; do UI_BUF+=("$piece"); done <<< "$wrapped"
         done <<< "$LOG_RAW"
-    fi
-    if (( LOG_AUTO )); then
-        TUI_FOOT='上下键 翻阅   a 暂停   r 刷新   Esc 返回'
-    else
-        TUI_FOOT='上下键 翻阅   a 继续   r 刷新   Esc 返回'
     fi
 }
 
 log_view_bottom() {
-    local hd=$TUI_HEAD n=${#UI_BUF[@]} visible=$(( UI_H - 3 )) top
-    (( hd + 4 <= visible )) || hd=0
-    visible=$(( visible - hd ))
-    (( n - hd <= visible )) || visible=$(( visible - 1 ))
-    (( visible >= 3 )) || visible=3
-    top=$(( n - visible ))
-    (( top >= hd )) || top=$hd
+    local top=$(( ${#UI_BUF[@]} - UI_H + 2 ))
+    (( top >= 0 )) || top=0
     printf -v "$1" '%d' "$top"
 }
 
 log_view_rebuild() {
     local bottom
-    tui_build log_view_build
+    log_view_build
     log_view_bottom bottom
     if (( LOG_FOLLOW )); then TUI_TOP=$bottom
     else
@@ -5981,28 +5997,56 @@ log_view_rebuild() {
     fi
 }
 
-log_view() {
-    local k fresh bottom ticks=0 step
+log_view_draw() {
+    local row line pos out='' status='已暂停' toggle='继续'
+    local -a frame=()
+    if (( LOG_AUTO )); then status='每 2 秒刷新'; toggle='暂停'; fi
+    fit_width " $(svc_label "$LOG_SERVICE") | 最近 50 条 | $status" "$UI_W" line end
+    frame+=("$C_TITLE$line$C_RESET")
+    for (( row = 0; row < UI_H - 2; row++ )); do
+        frame+=("${UI_BUF[$(( TUI_TOP + row ))]-}")
+    done
+    fit_width " Esc/q 返回   上下键 翻阅   PgUp/PgDn 翻页   End 最新   a $toggle   r 刷新   b 主页" "$UI_W" line end
+    frame+=("$C_DIM$line$C_RESET")
+    for row in "${!frame[@]}"; do
+        (( ! TUI_PREV_OK )) || [[ ${frame[$row]} != "${TUI_PREV[$row]-}" ]] || continue
+        printf -v pos '\e[%d;1H\e[2K' $(( row + 1 ))
+        out+=$pos${frame[$row]}
+    done
+    TUI_PREV=("${frame[@]}") TUI_PREV_OK=1
+    printf '%s' "$out" >&4
+}
+
+log_view() (
+    # Isolate full-screen dimensions, buffers and signal cleanup from all menus.
+    local k fresh bottom ticks=0 step tty_state='' LOG_VIEW_ACTIVE=0
     LOG_SERVICE=$1 LOG_AUTO=1 LOG_FOLLOW=1
     LOG_RAW=$(log_fetch "$LOG_SERVICE")
     if (( ! TUI )); then
-        log_view_build
-        ui_rule
+        printf '\n%s - 最近 50 条日志\n%s\n' "$(svc_label "$LOG_SERVICE")" "${LOG_RAW:-暂无日志。}" >&4
         ui_pause
         return 0
     fi
-    ui_measure
-    TUI_TOP=0 TUI_PREV_OK=0
+    tty_state=$(stty -g <&"$INPUT_FD" 2>/dev/null || true)
+    trap 'printf "\e[0m\e[?1049l\e[?25h" >&4; [[ -z $tty_state ]] || stty "$tty_state" <&"$INPUT_FD" 2>/dev/null || true' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    trap 'TUI_RESIZED=1' WINCH
+    LOG_VIEW_ACTIVE=1
+    [[ -z $tty_state ]] || stty susp undef <&"$INPUT_FD" 2>/dev/null || true
+    printf '\e[?1049h\e[H\e[2J' >&4
+    log_view_measure
+    TUI_TOP=0 TUI_PREV_OK=0 TUI_RESIZED=0
     log_view_rebuild
     ui_flush
     tty_echo -echo
     tui_cursor off
     while :; do
-        tui_draw
+        log_view_draw
         tui_read_key k timed
         case $k in
             ESC|q|Q|LEFT) break ;;
-            RESIZE) ui_measure; TUI_PREV_OK=0; log_view_rebuild ;;
+            RESIZE) log_view_measure; TUI_PREV_OK=0; log_view_rebuild ;;
             TICK)
                 ticks=$(( ticks + 1 ))
                 if (( LOG_AUTO && ticks >= 2 )); then
@@ -6035,7 +6079,7 @@ log_view() {
                 fi
                 LOG_FOLLOW=0
                 step=1
-                [[ $k != PGUP && $k != PGDN ]] || step=$(( UI_H - 7 ))
+                [[ $k != PGUP && $k != PGDN ]] || step=$(( UI_H - 2 ))
                 (( step >= 1 )) || step=1
                 log_view_bottom bottom
                 case $k in
@@ -6048,7 +6092,7 @@ log_view() {
             b|B) go_home_if_b b || true ;;
         esac
     done
-}
+)
 
 logs_menu() {
     local sel=0
@@ -6567,7 +6611,7 @@ on_main_int() {
 
 on_main_exit() {
     tui_cursor on
-    tty_echo echo
+    tty_echo "${INPUT_TTY_STATE:-echo}"
 }
 
 run_top() {
