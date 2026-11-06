@@ -5049,7 +5049,7 @@ render_xray_config() {
         # Keep decoy/guard traffic isolated from optional CN/BT policies.
         fallback_out=$(jq -cn --argjson rules "$(base_final_rules_json)" --arg strategy "$strategy" '[
           {tag:"reality-fallback", protocol:"freedom",
-           settings:{domainStrategy:$strategy, finalRules:$rules},
+           settings:{finalRules:$rules},
            streamSettings:{sockopt:{domainStrategy:$strategy}}}]')
     fi
     jq -n --slurpfile inb "$inb" --slurpfile routed "$rules" \
@@ -5059,7 +5059,7 @@ render_xray_config() {
         log: {loglevel: "warning", access: "none"},
         inbounds: $inb,
         outbounds: ([{tag: "direct", protocol: "freedom",
-                     settings: {domainStrategy:$strategy, finalRules:$final},
+                     settings: {finalRules:$final},
                      streamSettings: {sockopt: {domainStrategy: $strategy}}},
                      {tag: "blocked", protocol: "blackhole"}] + $fallback + $landings),
         routing: {domainStrategy: "AsIs", rules: ($gate + $routed
