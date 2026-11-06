@@ -1830,16 +1830,18 @@ install_bin() {
 }
 
 check_service_access() {
-    local bad check='for f do test -r "$f" || { printf "%s\n" "$f"; exit 1; }; done'
+    local bad setpriv_help='' check='for f do test -r "$f" || { printf "%s\n" "$f"; exit 1; }; done'
     local -a cmd=()
-    if have setpriv; then
+    # BusyBox setpriv exists on Alpine but cannot change UID/GID.
+    if have setpriv && setpriv_help=$(LC_ALL=C LANGUAGE=C timeout -k 2 5 setpriv --help 2>/dev/null) \
+        && [[ $setpriv_help == *--reuid* && $setpriv_help == *--regid* && $setpriv_help == *--init-groups* ]]; then
         cmd=(setpriv --reuid="$SERVICE_USER" --regid="$SERVICE_USER" --init-groups /bin/sh -c "$check" _)
     elif have runuser; then
         cmd=(runuser -u "$SERVICE_USER" -- /bin/sh -c "$check" _)
     elif have su; then
-        cmd=(su -s /bin/sh -c "$check" "$SERVICE_USER" _)
+        cmd=(su -s /bin/sh -c "$check" -- "$SERVICE_USER" _)
     else
-        die '缺少用户权限检查工具（setpriv / runuser / su）。'
+        die '没有可用的用户权限检查工具。' '需要支持切换用户的 setpriv、runuser 或 su。'
         return 1
     fi
     if ! bad=$(timeout -k 2s 10s "${cmd[@]}" "$@" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 9>&-); then
