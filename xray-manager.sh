@@ -99,7 +99,7 @@ NET_V4='' NET_V6=''
 SNI_BEST_MS=0
 PARSE_ERR=''
 SERVICE_USER_CREATED=0
-NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0
+NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0 NGINX_PROBE_ERR=''
 USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
 NEW_XRAY=0 NEW_SS=0 GEO_REFRESH=0 FULL_GEO_DIR=''
 UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1 UI_UTF8=1
@@ -1548,7 +1548,7 @@ pkg_install() {
 
 pkg_refresh() {
     case $PKG in
-        apt) pkg_run apt-get -o DPkg::Lock::Timeout=180 update -qq ;;
+        apt) pkg_run apt-get -o DPkg::Lock::Timeout=180 -o APT::Update::Error-Mode=any update -qq ;;
         *) : ;;
     esac
 }
@@ -2315,7 +2315,10 @@ tx_rollback() {
             [[ ! -f $p ]] || setcap "$s" "$p" 2>/dev/null || failed=1
         done < "$TX/caps"
     fi
-    if [[ -f $TX/nginx-masked && $INIT == systemd ]]; then systemctl unmask nginx >/dev/null 2>&1 || true; fi
+    if [[ -f $TX/nginx-masked && $INIT == systemd ]]; then
+        if timeout -k 2 15 systemctl unmask nginx >/dev/null 2>&1; then rm -f -- "$TX/nginx-masked"
+        else failed=1; fi
+    fi
     if [[ -f $TX/pkgs-before ]]; then comm -13 "$TX/pkgs-before" <(pkg_snapshot) >> "$TX/new-packages" 2>/dev/null || true; fi
     if [[ -s $TX/new-packages ]]; then
         local -a pkgs=() removable=()
@@ -5116,24 +5119,50 @@ ACL
 }
 
 
-nginx_detect() {
-    local build v
-    build=$(nginx -V 2>&1)
-    NGINX_MODULE_LINE=''
-    if [[ $build == *--with-stream=dynamic* ]]; then
-        local m
-        for m in /usr/lib/nginx/modules/ngx_stream_module.so /usr/lib64/nginx/modules/ngx_stream_module.so \
-            /usr/share/nginx/modules/ngx_stream_module.so; do
-            if [[ -f $m ]]; then NGINX_MODULE_LINE="load_module $m;"; break; fi
+nginx_probe() {
+    local build v m module_dir=''
+    local -a modules=()
+    NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0 NGINX_PROBE_ERR=''
+    if ! build=$(LC_ALL=C LANGUAGE=C timeout -k 2 5 nginx -V 2>&1); then
+        printf '%s\n' "$build" >> "${STEP_LOG:-/dev/null}"
+        NGINX_PROBE_ERR='读取 Nginx 编译信息失败或超时。'; return 2
+    fi
+    # Match complete options: --with-stream_ssl_module alone is not Stream.
+    if [[ ! $build =~ (^|[[:space:]])--with-stream(=dynamic)?([[:space:]]|$) ]]; then
+        NGINX_PROBE_ERR='当前 Nginx 没有编译 Stream 模块。'; return 2
+    fi
+    if [[ ! $build =~ (^|[[:space:]])--with-stream_ssl_preread_module([[:space:]]|$) ]]; then
+        NGINX_PROBE_ERR='当前 Nginx 缺少 SSL preread 功能。'; return 2
+    fi
+    if [[ $build =~ (^|[[:space:]])--without-stream_(map|return|limit_conn)_module([[:space:]]|$) ]]; then
+        NGINX_PROBE_ERR='当前 Nginx 缺少前置防护需要的 Stream 功能。'; return 2
+    fi
+    if [[ $build =~ (^|[[:space:]])--with-stream=dynamic([[:space:]]|$) ]]; then
+        if [[ $build =~ --modules-path=([^[:space:]]+) ]]; then
+            module_dir=${BASH_REMATCH[1]}
+            module_dir=${module_dir#\'}; module_dir=${module_dir%\'}
+            module_dir=${module_dir#\"}; module_dir=${module_dir%\"}
+            if [[ $module_dir =~ ^/[A-Za-z0-9_./+-]+$ && $module_dir != */../* && $module_dir != */.. ]]; then
+                modules+=("$ROOT$module_dir/ngx_stream_module.so")
+            fi
+        fi
+        modules+=("$ROOT/usr/lib/nginx/modules/ngx_stream_module.so" "$ROOT/usr/lib64/nginx/modules/ngx_stream_module.so"
+                  "$ROOT/usr/share/nginx/modules/ngx_stream_module.so")
+        for m in "${modules[@]}"; do
+            if [[ -f $m ]]; then NGINX_MODULE_LINE="load_module \"$m\";"; break; fi
         done
-        [[ -n $NGINX_MODULE_LINE ]] || { die '找不到 Nginx Stream 动态模块。'; return 1; }
-    elif [[ $build != *--with-stream* ]]; then
-        die '当前 Nginx 没有编译 Stream 模块。'
-        return 1
+        # Only a missing dynamic library is eligible for a module package install.
+        [[ -n $NGINX_MODULE_LINE ]] || { NGINX_PROBE_ERR='找不到 Nginx Stream 动态模块。'; return 1; }
     fi
     v=$(sed -n 's#.*nginx/\([0-9.]*\).*#\1#p' <<< "$build" | head -n 1)
     # -e overrides the compiled-in error log before nginx parses our config (since 1.19.5).
     if [[ -n $v ]] && ver_ge "$v" 1.19.5; then NGINX_SUPPORTS_E=1; else NGINX_SUPPORTS_E=0; fi
+}
+
+nginx_detect() {
+    nginx_probe && return 0
+    die "$NGINX_PROBE_ERR"
+    return 1
 }
 
 render_nginx() {
@@ -5512,37 +5541,88 @@ nginx_system_hash() {
     (cd "$ROOT/etc/nginx" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'
 }
 
-prepare_nginx() {
-    local p
-    local -a want=() missing=()
-    mapfile -t want < <(nginx_packages)
-    for p in "${want[@]}"; do pkg_installed "$p" || missing+=("$p"); done
-    if (( ${#missing[@]} )); then
-        local had_nginx=0 rc=0 added=''
-        if have nginx || svc_exists nginx; then had_nginx=1; : > "$TX/shared-nginx"; fi
-        pkg_refresh >> "$STEP_LOG" 2>&1 || true
-        pkg_snapshot > "$TX/pkgs-before"
-        if (( ! had_nginx )) && [[ $INIT == systemd ]]; then
+nginx_install_batch() {
+    local __nb_var=$1 __nb_shared=$2 __nb_plan __nb_op __nb_pkg __nb_rest __nb_after __nb_added='' __nb_rc=0 __nb_mask='' __nb_mrc=0
+    shift 2
+    local -a __nb_args=("$@")
+    [[ -f $TX/ready ]] || { die '缺少 Nginx 安装恢复记录，已停止。'; return 1; }
+    if [[ $PKG == apt ]]; then
+        __nb_args=(--no-remove --no-upgrade --no-install-recommends "$@")
+        # Package-name snapshots cannot roll back upgrades of existing packages.
+        if ! __nb_plan=$(LC_ALL=C LANGUAGE=C timeout -k 5 30 apt-get -s install "${__nb_args[@]}" 2>&1); then
+            printf '%s\n' "$__nb_plan" >> "$STEP_LOG"
+            die 'Nginx 依赖无法满足。' '请检查 Nginx 与模块的软件源、版本及 hold 设置；详细原因见日志。'; return 1
+        fi
+        printf '%s\n' "$__nb_plan" >> "$STEP_LOG"
+        while read -r __nb_op __nb_pkg __nb_rest; do
+            case $__nb_op in
+                Remv|Purg) die '安装 Nginx 会移除已有软件包，已停止。'; return 1 ;;
+                Inst|Conf)
+                    if pkg_installed "$__nb_pkg" || [[ $__nb_op == Inst && $__nb_rest == \[* ]]; then
+                        die "安装 Nginx 需要改动已有软件包 $__nb_pkg，已停止。" '请先自行协调软件源和版本，再重试。'; return 1
+                    fi ;;
+            esac
+        done <<< "$__nb_plan"
+    fi
+    pkg_snapshot > "$TX/pkgs-before" || { die '无法记录安装前的软件包状态。'; return 1; }
+    if (( ! __nb_shared )) && [[ $INIT == systemd ]]; then
+        __nb_mask=$(timeout -k 2 5 systemctl is-enabled nginx 2>/dev/null) || __nb_mrc=$?
+        if [[ $__nb_mask != masked && $__nb_mask != masked-runtime ]]; then
+            case $__nb_mrc in 0|1|4) ;; *) die '无法确认 Nginx 系统服务状态。'; return 1 ;; esac
             : > "$TX/nginx-masked"
-            systemctl mask nginx >> "$STEP_LOG" 2>&1 || true
-        fi
-        pkg_install_tracked added "${missing[@]}" >> "$STEP_LOG" 2>&1 || rc=$?
-        if [[ -f $TX/nginx-masked ]]; then
-            systemctl unmask nginx >> "$STEP_LOG" 2>&1 || true
-            rm -f -- "$TX/nginx-masked"
-        fi
-        [[ -z $added ]] || tr -s ' ' '\n' <<< "$added" >> "$TX/new-packages"
-        rm -f -- "$TX/pkgs-before"
-        (( rc == 0 )) || { die 'Nginx 安装失败，原因见下方日志。'; return 1; }
-        if (( ! had_nginx )); then
-            svc_stop_disable nginx
-            st_filter --argjson add "$(json_words "$added")" '.meta.nginx_packages = ((.meta.nginx_packages + $add) | unique)'
-            if [[ -z $(st .meta.nginx_hash) ]]; then st_sets .meta.nginx_hash "$(nginx_system_hash)"; fi
-        elif [[ -n $added ]]; then
-            st_filter --argjson add "$(json_words "$added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)'
+            timeout -k 2 15 systemctl mask nginx >> "$STEP_LOG" 2>&1 || { die '无法暂时阻止系统 Nginx 自动启动。'; return 1; }
         fi
     fi
-    nginx_detect
+    pkg_install "${__nb_args[@]}" >> "$STEP_LOG" 2>&1 || __nb_rc=$?
+    # Keep the baseline if querying or writing the delta fails, for tx_rollback.
+    __nb_after=$(pkg_snapshot) || { die '无法核实安装后的软件包状态，已保留恢复记录。'; return 1; }
+    __nb_added=$(comm -13 "$TX/pkgs-before" <(printf '%s\n' "$__nb_after") | paste -sd ' ' -) || return 1
+    if [[ -n $__nb_added ]]; then
+        tr -s ' ' '\n' <<< "$__nb_added" >> "$TX/new-packages" || return 1
+    fi
+    printf -v "$__nb_var" '%s' "$__nb_added"
+    rm -f -- "$TX/pkgs-before"
+    if [[ -f $TX/nginx-masked ]]; then
+        timeout -k 2 15 systemctl unmask nginx >> "$STEP_LOG" 2>&1 || { die '恢复 Nginx 系统服务状态失败。'; return 1; }
+        rm -f -- "$TX/nginx-masked"
+    fi
+    (( __nb_rc == 0 )) || { die 'Nginx 软件包安装失败，原因见下方日志。'; return 1; }
+}
+
+prepare_nginx() {
+    local p had_nginx=0 rc=0 added='' all_added=''
+    local -a modules=() want=()
+    if have nginx; then
+        had_nginx=1
+        nginx_probe || rc=$?
+        (( rc != 0 )) || return 0
+        if (( rc != 1 )); then die "$NGINX_PROBE_ERR" '请使用包含所需功能的 Nginx，或改用「Xray 内置」防护。'; return 1; fi
+    elif svc_exists nginx || pkg_installed nginx; then
+        die '检测到已有 Nginx，但 nginx 命令不可用。' '请先修复已有安装后重试。'; return 1
+    fi
+    (( ! had_nginx )) || : > "$TX/shared-nginx"
+    pkg_refresh >> "$STEP_LOG" 2>&1 || { die '软件源索引更新失败，已停止安装 Nginx。'; return 1; }
+    if (( ! had_nginx )); then
+        # nginx.org includes Stream in nginx itself; do not mix in Debian modules.
+        nginx_install_batch added "$had_nginx" nginx || return 1
+        all_added=$added
+        rc=0; nginx_probe || rc=$?
+    fi
+    if (( rc == 1 )); then
+        mapfile -t want < <(nginx_packages)
+        for p in "${want[@]}"; do [[ $p == nginx ]] || modules+=("$p"); done
+        if (( ${#modules[@]} == 0 )); then die "$NGINX_PROBE_ERR"; return 1; fi
+        nginx_install_batch added "$had_nginx" "${modules[@]}" || return 1
+        all_added+=" $added"
+        nginx_detect || return 1
+    elif (( rc != 0 )); then die "$NGINX_PROBE_ERR"; return 1; fi
+    if (( ! had_nginx )); then
+        svc_stop_disable nginx
+        st_filter --argjson add "$(json_words "$all_added")" '.meta.nginx_packages = ((.meta.nginx_packages + $add) | unique)'
+        if [[ -z $(st .meta.nginx_hash) ]]; then st_sets .meta.nginx_hash "$(nginx_system_hash)"; fi
+    elif [[ -n $all_added ]]; then
+        st_filter --argjson add "$(json_words "$all_added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)'
+    fi
 }
 
 
