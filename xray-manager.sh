@@ -2694,6 +2694,9 @@ show_step_log() {
 
 run_action() {
     # run_child provides the only subprocess boundary, so its $! is ACTION_PID.
+    # Undo Bash's asynchronous INT default before installing our traps,
+    # so foreground commands inherit normal keyboard-interrupt handling.
+    trap - INT
     set -Eeuo pipefail
     ACTION_PID=$BASHPID
     trap 'on_action_error $? $LINENO "${FUNCNAME[0]:-}" "$BASH_COMMAND"' ERR
@@ -2719,11 +2722,14 @@ run_child() {
     # Waiting on an asynchronous child lets the supervising shell forward a
     # signal addressed only to its PID. Explicit stdin keeps interactive reads.
     # Send once: a second request must not interrupt the child's rollback.
-    trap 'if (( __rc_cancel == 0 )); then __rc_cancel=130; [[ -z $__rc_pid ]] || kill -TERM "$__rc_pid" 2>/dev/null || true; fi' INT
+    trap 'if (( __rc_cancel == 0 )); then __rc_cancel=130; [[ -z $__rc_pid ]] || kill -INT "$__rc_pid" 2>/dev/null || true; fi' INT
     trap 'if (( __rc_cancel == 0 )); then __rc_cancel=143; [[ -z $__rc_pid ]] || kill -TERM "$__rc_pid" 2>/dev/null || true; fi' TERM HUP
     run_action "$@" <&0 &
     __rc_pid=$!
-    (( ! __rc_cancel )) || kill -TERM "$__rc_pid" 2>/dev/null || true
+    case $__rc_cancel in
+        130) kill -INT "$__rc_pid" 2>/dev/null || true ;;
+        143) kill -TERM "$__rc_pid" 2>/dev/null || true ;;
+    esac
     while :; do
         wait "$__rc_pid"
         __rc_status=$?
@@ -3941,9 +3947,9 @@ cs_build() {
     local i
     local -a name=('RAW + Vision' 'XHTTP 单路' 'XHTTP 上下行分离' 'SS2022' 'VLESS-ENC'
         'SS2022 + VLESS-ENC' 'REALITY + SS + ENC' 'XHTTP + ENC 分离')
-    local -a note=('推荐，各种客户端都能用' '可选 XMUX；sing-box 不支持' '需要双栈；sing-box 不支持'
-        '客户端支持最广' '抗量子握手；sing-box 不支持' '两个入口，各给一条链接' '三个入口，各给一条链接'
-        '需要双栈；sing-box 不支持')
+    local -a note=('推荐，各种客户端都能用' '可选 XMUX' '需要双栈'
+        '客户端支持最广' '抗量子握手' '两个入口，各给一条链接' '三个入口，各给一条链接'
+        '需要双栈')
     local -a group=([0]='REALITY：借用伪装站点的 TLS 握手' [3]='不需要伪装站点' [5]='多入口组合' [7]='实验')
     ui_page '选择方案'
     for i in "${!SCHEMES[@]}"; do
@@ -5534,6 +5540,14 @@ node_add_with_v6() {
     fi
 }
 
+ss_link_userinfo() {
+    # SIP002 requires percent-encoded userinfo for AEAD-2022.
+    case $1 in
+        2022-*) printf '%s:%s' "$(url_encode "$1")" "$(url_encode "$2")" ;;
+        *) b64url_nopad "$1:$2" ;;
+    esac
+}
+
 render_nodes() {
     local out=$1 s host hu
     s=$(scheme)
@@ -5612,7 +5626,7 @@ render_nodes() {
         local m pw ui
         m=$(st .ss.method)
         pw=$(st .ss.password)
-        ui=$(b64url_nopad "$m:$pw")
+        ui=$(ss_link_userinfo "$m" "$pw")
         label=$(node_label SS)
         link="ss://$ui@$hu:$(st .ss.port)#$(url_encode "$label")"
         node_add_with_v6 "$label" "$link" "$host" "$(st .ss.port)"
@@ -5621,7 +5635,7 @@ render_nodes() {
                 port=$(jq -r ".users[$i].port // 0" "$DRAFT")
                 [[ $port != 0 ]] || continue
                 outtag=$(jq -r ".users[$i].out" "$DRAFT")
-                ui=$(b64url_nopad "$m:$(jq -r ".users[$i].id" "$DRAFT")")
+                ui=$(ss_link_userinfo "$m" "$(jq -r ".users[$i].id" "$DRAFT")")
                 label=$(node_label SS "$outtag")
                 node_add_with_v6 "$label" "ss://$ui@$hu:$port#$(url_encode "$label")" "$host" "$port"
             done
@@ -6785,10 +6799,6 @@ link_preview() {
     printf '%s' "$out"
 }
 
-node_tag() {
-    if [[ $1 == *type=xhttp* || $1 == *encryption=mlkem* ]]; then printf 'sing-box 不支持'; fi
-}
-
 nd_build() {
     local i n lw0=$LABEL_W
     if state_ok; then DRAFT=$STATE; ui_page '节点链接' "$(scheme_label "$(scheme)")"
@@ -6797,7 +6807,7 @@ nd_build() {
     KEY_W=${#n}
     LABEL_W=24
     for i in "${!NODE_LABELS[@]}"; do
-        tui_item $(( i + 1 )) "${NODE_LABELS[$i]}" '' "$(node_tag "${NODE_LINKS[$i]}")" "$(link_preview "${NODE_LINKS[$i]}")"
+        tui_item $(( i + 1 )) "${NODE_LABELS[$i]}" '' '' "$(link_preview "${NODE_LINKS[$i]}")"
         (( TUI )) || printf '%s\n\n' "${NODE_LINKS[$i]}" >&4
     done
     LABEL_W=$lw0
