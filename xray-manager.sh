@@ -89,6 +89,7 @@ OS_FAMILY='' INIT='' PKG=''
 ACTION=menu ASSUME_YES=0 FORCE=0 CLI_SCHEME='' CLI_CORE_TAG=''
 STAGE='' TX_ACTIVE=0 KEEP_TX=0 ACTION_PID='' CHILD_RUNNING=0
 INPUT_FD=0 INPUT_TTY_STATE='' SOURCE_PATH='' DRAFT=''
+SOURCE_RECORD='' SOURCE_CLEANUP_LEFT=0
 STEP_NO=0 STEP_TOTAL=0 STEP_OPEN=0 STEP_LOG='' STEP_LABEL='' DIE_SHOWN=0
 CHILD_RC=0 SUB_RC=0 TOP_RC=0 TOP_QUIET=0 STATE_READY=0
 MODE=new PREVIEW_RESULT=1 PORT_NOTE='' DRAFT_WATCH=0 DRAFT_BASE=''
@@ -6573,6 +6574,92 @@ foreign_install_hint() {
 }
 
 
+source_script_record() {
+    local p=$1 d info owner mode identity digest
+    [[ $p == /* ]] || p=$PWD/$p
+    [[ ! $p =~ [[:cntrl:]] && -f $p && ! -L $p ]] || return 1
+    # Reject writable or linked ancestors before resolving the supplied path.
+    # A root-owned file in an untrusted directory is not safe to delete later.
+    d=$p
+    while :; do
+        [[ ! -L $d ]] || return 1
+        info=$(stat -c '%u:%a' -- "$d" 2>/dev/null) || return 1
+        [[ $info =~ ^([0-9]+):([0-7]{3,4})$ ]] || return 1
+        owner=${BASH_REMATCH[1]} mode=${BASH_REMATCH[2]}
+        (( (owner == 0 || owner == EUID) && (8#$mode & 0022) == 0 )) || return 1
+        [[ $d != / ]] || break
+        d=$(dirname -- "$d")
+    done
+    p=$(readlink -f -- "$p") || return 1
+    is_managed_path "$p" && return 1
+    [[ $p != "$TX" && $p != "$TX"/* && $p != "$STAGE_BASE".* ]] || return 1
+    grep -Fxq 'readonly SCRIPT_MARKER="ZXRAY_MANAGER"' "$p" || return 1
+    identity=$(stat -c '%d:%i' -- "$p") || return 1
+    digest=$(timeout -k 2 5 sha256sum < "$p") || return 1
+    digest=${digest%% *}
+    [[ $identity =~ ^[0-9]+:[0-9]+$ && $digest =~ ^[0-9a-f]{64}$ ]] || return 1
+    jq -cn --arg path "$p" --arg sha256 "$digest" --arg identity "$identity" \
+        '{path:$path,sha256:$sha256,identity:$identity}'
+}
+
+record_source_script() {
+    [[ -n $SOURCE_RECORD ]] || return 0
+    local p current
+    p=$(jq -r '.path' <<< "$SOURCE_RECORD") || return 1
+    current=$(source_script_record "$p") || return 0
+    [[ $current == "$SOURCE_RECORD" ]] || return 0
+    st_filter --argjson source "$current" \
+        '.meta.source_files = ([.meta.source_files[]? | select(.path != $source.path)] + [$source])'
+}
+
+source_records_json() {
+    jq -ec '
+        if type == "array" and all(.[]; type == "object"
+            and (.path | type == "string" and startswith("/") and (test("[\\x00-\\x1f\\x7f]") | not))
+            and (.sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+            and (.identity | type == "string" and test("^[0-9]+:[0-9]+$")))
+        then map({path,sha256,identity}) else error("invalid source records") end'
+}
+
+prepare_source_cleanup() {
+    local state=${1:-} records='[]'
+    SOURCE_CLEANUP_LEFT=0
+    if [[ -n $state ]]; then
+        records=$(jq -ce '.meta.source_files // []' "$state") || return 1
+    fi
+    if ! jq -n --argjson records "$records" --argjson current "${SOURCE_RECORD:-null}" \
+        '$records + (if $current == null then [] else [$current] end)' \
+        | source_records_json \
+        | jq -c 'reduce .[] as $r ([]; [.[] | select(.path != $r.path)] + [$r])' > "$STAGE/source-cleanup.json"; then
+        die '原始脚本记录异常，已停止卸载。'
+        return 1
+    fi
+}
+
+cleanup_source_scripts() {
+    local record p current records
+    SOURCE_CLEANUP_LEFT=0
+    if ! records=$(source_records_json < "$STAGE/source-cleanup.json" | jq -c '.[]'); then
+        SOURCE_CLEANUP_LEFT=1
+        ui_warn '原始脚本清单无法读取，未完成原始文件清理。'
+        return 0
+    fi
+    while IFS= read -r record; do
+        [[ -n $record ]] || continue
+        p=$(jq -r '.path' <<< "$record") || return 1
+        [[ -e $p || -L $p ]] || continue
+        current=$(source_script_record "$p") || current=''
+        if [[ $current != "$record" ]]; then
+            SOURCE_CLEANUP_LEFT=$((SOURCE_CLEANUP_LEFT + 1))
+            ui_warn "原始脚本已变化或路径不安全，已保留：$p"
+        elif ! rm -f -- "$p"; then
+            SOURCE_CLEANUP_LEFT=$((SOURCE_CLEANUP_LEFT + 1))
+            ui_warn "原始脚本无法删除，请手动清理：$p"
+        fi
+    done <<< "$records"
+    return 0
+}
+
 install_self() {
     local src=$SOURCE_PATH
     make_dir "$SELF_DIR" "$(dirname -- "$QUICK_BIN")"
@@ -6582,6 +6669,7 @@ install_self() {
         cur_v=$(script_version_of "$SELF_SCRIPT_PATH")
         if [[ -z $cur_v ]] || ver_ge "$src_v" "$cur_v"; then
             atomic_install "$src" "$SELF_SCRIPT_PATH" 700
+            record_source_script
         fi
     fi
     [[ -f $SELF_SCRIPT_PATH ]] || return 0
@@ -6637,7 +6725,7 @@ refresh_net_in_draft() {
 carry_meta_from_state() {
     state_ok || return 0
     st_filter --slurpfile o "$STATE" '.meta = (.meta + ($o[0].meta // {}
-            | {nginx_packages, nginx_hash, created_user, created_dirs, fw_rules, extra_packages}
+            | {nginx_packages, nginx_hash, created_user, created_dirs, fw_rules, extra_packages, source_files}
             | with_entries(select(.value != null))))
         | .name = ($o[0].name // .name)
         | .firewall = ($o[0].firewall // .firewall)'
@@ -7478,7 +7566,7 @@ remove_service_links() {
 }
 
 action_uninstall() {
-    local own_user=0 p
+    local own_user=0 p source_count
     local -a progs=()
     ui_page '卸载'
     if ! state_ok; then
@@ -7489,11 +7577,15 @@ action_uninstall() {
             return 1
         fi
         ui_line '没有检测到本脚本部署的服务。'
-        if [[ -f $SELF_SCRIPT_PATH || -f $QUICK_BIN ]]; then
+        prepare_source_cleanup '' || return 1
+        source_count=$(jq 'length' "$STAGE/source-cleanup.json")
+        if [[ -f $SELF_SCRIPT_PATH || -f $QUICK_BIN ]] || (( source_count > 0 )); then
             ui_rule
-            if ask_no '只删除脚本本身和 zxray 命令'; then
+            if ask_no '删除管理脚本、zxray 命令及已确认的原始脚本'; then
                 remove_self_files
-                ui_ok '已删除托管脚本；原始下载文件保留。'
+                cleanup_source_scripts
+                if (( SOURCE_CLEANUP_LEFT )); then ui_warn '管理脚本已删除；部分原始文件保留，见上方路径。'
+                else ui_ok '管理脚本及已确认的原始文件已删除。'; fi
                 exit 20
             fi
             exit "$RC_QUIET"
@@ -7501,6 +7593,8 @@ action_uninstall() {
         return 0
     fi
     DRAFT=$STATE
+    prepare_source_cleanup "$STATE" || return 1
+    source_count=$(jq 'length' "$STAGE/source-cleanup.json")
     ui_hint '会删除本工具管理的节点、服务、配置及可撤销的系统改动。'
     ui_blank
     ui_kv '节点' "$(jq 'length' "$NODES_JSON" 2>/dev/null || echo 0) 条" '链接和配置全部删除'
@@ -7508,7 +7602,12 @@ action_uninstall() {
     ui_kv '程序' "$(join_by '、' "${progs[@]}")"
     ui_kv '系统改动' "$(uninstall_changes)"
     ui_kv '托管脚本' 'zxray 命令和托管安装文件'
-    ui_note '你自行下载或保存的 .sh 安装包不会删除。'
+    if (( source_count > 0 )); then
+        ui_kv '原始脚本' "$source_count 个" '校验通过后一并删除'
+        ui_note '校验不符或路径不安全的原始文件保留。'
+    else
+        ui_note '无可确认的原始脚本记录，旧下载文件需手动清理。'
+    fi
     ui_rule
     ask_no '确定完整卸载' || exit "$RC_QUIET"
     if [[ $(jq -r '.meta.created_user // 0' "$STATE" 2>/dev/null) == 1 ]]; then own_user=1; fi
@@ -7551,7 +7650,10 @@ action_uninstall() {
     remove_self_files
     jq -r '.meta.created_dirs // [] | .[]' "$STAGE/state-old.json" 2>/dev/null | remove_created_dirs
     ui_step_done
-    ui_ok '卸载完成。原始 .sh 文件与 curl、jq 等通用工具均已保留。'
+    cleanup_source_scripts
+    if (( SOURCE_CLEANUP_LEFT )); then ui_warn '卸载完成；部分原始脚本保留，见上方路径。'
+    else ui_ok '卸载完成，托管文件及已确认的原始脚本已清理。'; fi
+    ui_note 'curl、jq 等通用工具保留。'
     exit 20
 }
 
@@ -7929,6 +8031,7 @@ main() {
     trap 'exit 143' TERM HUP
     trap 'on_main_exit' EXIT
     SOURCE_PATH=${BASH_SOURCE[0]}
+    SOURCE_RECORD=$(source_script_record "$SOURCE_PATH" 2>/dev/null) || SOURCE_RECORD=''
     if [[ -f $SOURCE_PATH ]]; then SOURCE_PATH=$(readlink -f -- "$SOURCE_PATH"); fi
     tx_recover_if_needed
     migrate_state
