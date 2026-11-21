@@ -34,7 +34,7 @@ set -Eeuo pipefail
 umask 077
 exec 4>&1 5>&2
 
-readonly SCRIPT_VERSION="0.2.7"
+readonly SCRIPT_VERSION="0.2.8"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
 readonly XRAY_MIN_VERSION="26.10.31"
 readonly STATE_SCHEMA=5
@@ -514,11 +514,12 @@ footer_line() {
     done
     segs+=("$s")
     for seg in "${segs[@]}"; do
-        case ${seg%% *} in Esc|q|Q) tail=$seg ;; esac
+        case ${seg%% *} in Esc|q|Q|q/Esc) tail=$seg ;; esac
     done
     [[ -n $tail || -z $ACTION_PID ]] || tail='b 主页'
-    [[ -z $tail ]] || suffix="$sep$tail"
     for seg in "${segs[@]}"; do [[ $seg == "$tail" ]] || body+=("$seg"); done
+    case ${tail%% *} in Esc|q|Q) tail="q/Esc ${tail#* }" ;; esac
+    [[ -z $tail ]] || suffix="$sep$tail"
     for seg in "${body[@]}"; do
         str_width "$plain${plain:+$sep}$seg$suffix" w
         (( w + 2 <= UI_W )) || break
@@ -717,20 +718,80 @@ go_home_if_b() {
     exit 130
 }
 
+draw_input_line() {
+    local prompt=$1 left=$2 right=$3 w room
+    fit_width "$prompt" "$(( UI_W - 6 ))" prompt end
+    str_width "$prompt" w
+    room=$(( UI_W - w - 3 ))
+    if (( ${#left} > room )); then left=${left: -room}; fi
+    str_width "$left" w
+    while (( w > room )); do left=${left:1}; str_width "$left" w; done
+    right=${right:0:room-w}
+    str_width "$left$right" w
+    while (( w > room )); do right=${right%?}; str_width "$left$right" w; done
+    printf '\r\e[2K  %s%s\e7%s\e8' "$prompt" "$left" "$right" >&4
+}
+
+tty_edit_line() {
+    local prompt=$1 mode=$4 left=$3 right='' key saved rc=0
+    saved=$(stty -g <&"$INPUT_FD") || return 1
+    stty -echo -icanon min 1 time 0 susp undef <&"$INPUT_FD" || return 1
+    trap on_tstp TSTP
+    tui_cursor on
+    if [[ $mode == secret ]]; then printf '  %s' "$prompt" >&4
+    else draw_input_line "$prompt" "$left" "$right"; fi
+    while :; do
+        tui_read_key key edit
+        case $key in
+            ENTER) break ;;
+            ESC) rc=1; break ;;
+            q|Q) if [[ $mode == numeric ]]; then rc=1; break; fi; left+=$key ;;
+            LEFT|$'\x02') right=${left: -1}$right; left=${left%?} ;;
+            RIGHT|$'\x06') left+=${right:0:1}; right=${right:1} ;;
+            HOME|$'\x01') right=$left$right; left='' ;;
+            END|$'\x05') left+=$right; right='' ;;
+            BACKSPACE) left=${left%?} ;;
+            DELETE) right=${right:1} ;;
+            $'\x15') left='' ;;
+            $'\x0b') right='' ;;
+            RESIZE)
+                ui_measure
+                stty -echo -icanon min 1 time 0 susp undef <&"$INPUT_FD"
+                tui_cursor on ;;
+            *) [[ ${#key} != 1 || $key == [[:cntrl:]] ]] || left+=$key ;;
+        esac
+        # Redraw once at the end of a paste. Never paint private key material.
+        if [[ $mode != secret ]] && ! IFS= read -r -t 0 -u "$INPUT_FD"; then
+            draw_input_line "$prompt" "$left" "$right"
+        fi
+    done
+    trap - TSTP
+    tty_echo "$saved"
+    printf '\n' >&4
+    if (( rc )); then INPUT_DIRTY=1; return 1; fi
+    printf -v "$2" '%s' "$left$right"
+}
+
 read_line() {
-    local __rl_p=$1 __rl_v='' __rl_pre=${3:-}
+    local __rl_p=$1 __rl_v='' __rl_pre=${3:-} __rl_mode=${4:-text}
     ui_flush
     while :; do
-        tty_echo echo
-        tui_cursor on
-        if (( TUI )) && [[ -n $__rl_pre ]]; then
-            IFS= read -r -e -i "$__rl_pre" -p "  $__rl_p" -u "$INPUT_FD" __rl_v 2>&4 || input_eof
+        printf -v "$2" '%s' ''
+        if input_is_tty && [[ -t 1 && ${TERM:-dumb} != dumb ]] && (( UI_UTF8 )); then
+            tty_edit_line "$__rl_p" __rl_v "$__rl_pre" "$__rl_mode" || return 1
         else
             printf '  %s' "$__rl_p" >&4
-            IFS= read -r -u "$INPUT_FD" __rl_v || input_eof
+            if [[ $__rl_mode == secret ]]; then
+                IFS= read -rs -u "$INPUT_FD" __rl_v || input_eof
+                printf '\n' >&4
+            else
+                tty_echo echo
+                IFS= read -r -u "$INPUT_FD" __rl_v || input_eof
+            fi
         fi
         __rl_v=${__rl_v#"${__rl_v%%[![:space:]]*}"}
         __rl_v=${__rl_v%"${__rl_v##*[![:space:]]}"}
+        case $__rl_v in q|Q|$'\e') return 1 ;; esac
         # Declining to leave means retry this prompt, never synthesize Enter.
         go_home_if_b "$__rl_v" || continue
         printf -v "$2" '%s' "$__rl_v"
@@ -738,12 +799,16 @@ read_line() {
     done
 }
 
+read_secret_line() { read_line "$1" "$2" '' secret; }
+
 tui_read_key() {
     local __k='' __c='' __seq='' __rc __tty_state=''
-    if input_is_tty; then __tty_state=$(stty -g <&"$INPUT_FD" 2>/dev/null || true); fi
-    trap on_tstp TSTP
-    # Read Ctrl+Z as a key so parent shells cannot stop before tty cleanup.
-    [[ -z $__tty_state ]] || stty susp undef <&"$INPUT_FD" 2>/dev/null || true
+    # The line editor configures the terminal once for the whole input, including pastes.
+    if [[ ${2:-} != edit ]]; then
+        if input_is_tty; then __tty_state=$(stty -g <&"$INPUT_FD" 2>/dev/null || true); fi
+        trap on_tstp TSTP
+        [[ -z $__tty_state ]] || stty susp undef <&"$INPUT_FD" 2>/dev/null || true
+    fi
     while :; do
         __rc=0
         IFS= read -rsn1 -t 1 -u "$INPUT_FD" __k || __rc=$?
@@ -769,7 +834,7 @@ tui_read_key() {
                 done
                 case $__seq in
                     A) __k=UP ;; B) __k=DOWN ;; C) __k=RIGHT ;; D) __k=LEFT ;;
-                    H|1~|7~) __k=HOME ;; F|4~|8~) __k=END ;; 5~) __k=PGUP ;; 6~) __k=PGDN ;;
+                    H|1~|7~) __k=HOME ;; F|4~|8~) __k=END ;; 5~) __k=PGUP ;; 6~) __k=PGDN ;; 3~) __k=DELETE ;;
                     *) __k=NONE ;;
                 esac
             else
@@ -778,9 +843,9 @@ tui_read_key() {
         ''|$'\r'|$'\n') __k=ENTER ;;
         $'\x04') input_eof ;;
         $'\t') __k=TAB ;;
-        $'\x7f'|$'\b') __k=ESC ;;
+        $'\x7f'|$'\b') if [[ ${2:-} == edit ]]; then __k=BACKSPACE; else __k=ESC; fi ;;
     esac
-    trap - TSTP
+    [[ ${2:-} == edit ]] || trap - TSTP
     printf -v "$1" '%s' "$__k"
 }
 
@@ -1011,7 +1076,10 @@ tui_menu() {
             HOME|PGUP) TUI_CUR=0 ;;
             END|PGDN) (( __tm_n == 0 )) || TUI_CUR=$(( __tm_n - 1 )) ;;
             ENTER) (( __tm_n == 0 )) || { TUI_KEY=ENTER; break; } ;;
-            ESC|LEFT) TUI_KEY=ESC; break ;;
+            ESC|q|Q)
+                if [[ $__tm_keys == *q* ]]; then TUI_KEY=q; else TUI_KEY=ESC; fi
+                break ;;
+            LEFT) TUI_KEY=ESC; break ;;
             b|B)
                 if [[ -n $ACTION_PID ]]; then
                     go_home_if_b b || true
@@ -1021,7 +1089,6 @@ tui_menu() {
                 fi ;;
             *)
                 if [[ ${#__tm_k} == 1 && -n $__tm_keys && $__tm_keys == *"$__tm_k"* ]]; then TUI_KEY=$__tm_k; break; fi
-                if [[ $__tm_k == q || $__tm_k == Q ]]; then TUI_KEY=ESC; break; fi
                 if [[ $__tm_k == [0-9] ]]; then
                     __tm_now=$(now_ms) || continue
                     # Modular delta remains correct when the 100000-second counter wraps.
@@ -1045,9 +1112,12 @@ tui_plain() {
     "$__tp_fn" "$@"
     # Render notices after the builder clears the screen, including resize fallback.
     if [[ -n $TUI_MSG ]]; then ui_note "$TUI_MSG"; TUI_MSG=''; fi
-    ui_footer "${TUI_FOOT_PLAIN:-$(key_range ${#TUI_IKEYS[@]}) 选择   回车 返回}"
+    ui_footer "${TUI_FOOT_PLAIN:-$(key_range ${#TUI_IKEYS[@]}) 选择   回车 返回}   q/Esc ${TUI_FOOT##* }"
     while :; do
-        read_line '请选择：' __tp_k
+        if ! read_line '请选择：' __tp_k '' numeric; then
+            if [[ $__tp_keys == *q* ]]; then TUI_KEY=q; else TUI_KEY=ESC; fi
+            return 0
+        fi
         if [[ -z $__tp_k ]]; then TUI_KEY=ESC; return 0; fi
         if tui_jump "$__tp_k"; then TUI_KEY=ENTER; return 0; fi
         if [[ ${#__tp_k} == 1 && -n $__tp_keys && $__tp_keys == *"$__tp_k"* ]]; then TUI_KEY=$__tp_k; return 0; fi
@@ -1080,6 +1150,7 @@ tui_confirm() {
     for l in "${pl[@]:0:${#pl[@]} - 1}"; do printf '\r\e[2K  %s\n' "$l" >&4; done
     str_width "$last" w
     if (( w + 15 > UI_W )); then printf '\r\e[2K  %s\n' "$last" >&4; last=''; fi
+    printf '  %sq/Esc 取消%s\n' "$C_DIM" "$C_RESET" >&4
     while :; do
         if (( sel )); then yes=$'\e[7m 是 \e[0m' no=' 否 '; else yes=' 是 ' no=$'\e[7m 否 \e[0m'; fi
         printf '\r\e[2K  %s%s%s  %s' "$last" "${last:+   }" "$yes" "$no" >&4
@@ -1103,7 +1174,7 @@ ask_yes() {
     (( ASSUME_YES )) && return 0
     if (( TUI )); then tui_confirm "$1" 1; return; fi
     while :; do
-        read_line "$1 [Y/n]：" a
+        read_line "$1 [Y/n]（q/Esc 取消）：" a '' numeric || return 1
         case $a in
             ''|y|Y) return 0 ;;
             n|N) return 1 ;;
@@ -1117,7 +1188,7 @@ ask_no() {
     (( ASSUME_YES )) && return 0
     if (( TUI )); then tui_confirm "$1" 0; return; fi
     while :; do
-        read_line "$1 [y/N]：" a
+        read_line "$1 [y/N]（q/Esc 取消）：" a '' numeric || return 1
         case $a in
             y|Y) return 0 ;;
             ''|n|N) return 1 ;;
@@ -1129,8 +1200,7 @@ ask_no() {
 ask_number() {
     local __an_pr=$1 __an_min=$2 __an_max=$3 __an_def=${4:-} __an_n
     while :; do
-        read_line "$__an_pr（回车保留 ${__an_def:-默认值}，q 取消）：" __an_n
-        case $__an_n in q|Q) return 1 ;; esac
+        read_line "$__an_pr（回车保留 ${__an_def:-默认值}，q/Esc 取消）：" __an_n '' numeric || return 1
         [[ -n $__an_n ]] || __an_n=$__an_def
         if [[ $__an_n =~ ^[0-9]{1,9}$ ]] && (( 10#$__an_n >= __an_min && 10#$__an_n <= __an_max )); then
             printf -v "$5" '%d' $(( 10#$__an_n ))
@@ -1218,14 +1288,14 @@ ui_pause() {
         tty_echo -echo
         tui_cursor off
         while :; do
-            printf '\r\e[2K  %s按回车返回%s' "$C_DIM" "$C_RESET" >&4
+            printf '\r\e[2K  %s回车或 q/Esc 返回%s' "$C_DIM" "$C_RESET" >&4
             tui_read_key k
             case $k in ENTER|ESC|q|Q) break ;; b|B) go_home_if_b b || true ;; esac
         done
         printf '\n' >&4
         return 0
     fi
-    read_line '按回车返回：' k
+    read_line '回车或 q/Esc 返回：' k '' numeric || return 0
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -1417,6 +1487,90 @@ valid_vless_id() {
     valid_text_value "$value" || return 1
     [[ ${#value} -ge 1 && ${#value} -le 30 ]] && return 0
     [[ $value =~ ^[[:xdigit:]]{8}-?[[:xdigit:]]{4}-?[[:xdigit:]]{4}-?[[:xdigit:]]{4}-?[[:xdigit:]]{12}$ ]]
+}
+
+# Locally assigned IDs use canonical UUID spelling. Landing links also allow
+# Xray's short string IDs, so keep their more permissive parser separate.
+write_custom_uuid() {
+    local mode=$1 id=${2,,}
+    CREDENTIAL_ERR=''
+    if [[ $(scheme) == ss ]]; then CREDENTIAL_ERR='SS2022 使用密码，不使用 UUID。'; return 1; fi
+    if [[ ! $id =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        CREDENTIAL_ERR='UUID 格式不正确，请按 8-4-4-4-12 输入十六进制字符。'
+        return 1
+    fi
+    if jq -e --arg id "$id" --arg mode "$mode" 'any(.users[];
+        (.name != "direct" or $mode != "primary") and ((.id // "") | ascii_downcase) == $id)' "$DRAFT" >/dev/null; then
+        CREDENTIAL_ERR='这个 UUID 已被其他用户使用。'
+        return 1
+    fi
+    if [[ $mode == primary ]]; then
+        st_filter --arg id "$id" '(.users[] | select(.name == "direct") | .id) = $id'
+    else
+        st_filter --arg id "$id" '([.users[].name | select(test("^uuid[0-9]+$")) | ltrimstr("uuid") | tonumber] | (max // 0) + 1) as $n
+            | .users += [{name:("uuid" + ($n | tostring)), id:$id, out:"direct"}]'
+    fi
+}
+
+set_primary_uuid() { write_custom_uuid primary "$1"; }
+add_custom_uuid() { write_custom_uuid add "$1"; }
+
+valid_raw_key() {
+    local LC_ALL=C key=$1 bytes=$2 canonical
+    (( ${#key} == (bytes * 8 + 5) / 6 )) && [[ $key =~ ^[A-Za-z0-9_-]+$ ]] || return 1
+    canonical=$(b64_decode_relaxed "$key" 1 | base64 | tr -d '\r\n=' | tr '+/' '-_') || return 1
+    [[ $key == "$canonical" ]]
+}
+
+keypair_public() {
+    local algorithm=$1 private=$2 pubbytes=32
+    [[ $algorithm != mlkem768 ]] || pubbytes=1184
+    # Wrap the raw private key in PKCS#8 (RFC 8410 / RFC 9935). The raw
+    # public key is the final BIT STRING payload of SubjectPublicKeyInfo.
+    {
+        if [[ $algorithm == mlkem768 ]]; then
+            printf '\x30\x54\x02\x01\x00\x30\x0b\x06\x09\x60\x86\x48\x01\x65\x03\x04\x04\x02\x04\x42\x80\x40'
+        else
+            printf '\x30\x2e\x02\x01\x00\x30\x05\x06\x03\x2b\x65\x6e\x04\x22\x04\x20'
+        fi
+        b64_decode_relaxed "$private" 1
+    } | openssl pkey -inform DER -pubout -outform DER 2>/dev/null |
+        tail -c "$pubbytes" | base64 | tr -d '\r\n=' | tr '+/' '-_'
+}
+
+store_keypair() {
+    # Both fields are written in one atomic draft replacement. Pass the
+    # private value through a pipe, never as an external process argument.
+    local protocol=$1 private=$2 public=$3
+    if [[ $protocol == reality ]]; then
+        st_filter --rawfile priv <(printf '%s' "$private") --arg pub "$public" '.reality += {private_key:$priv, public_key:$pub}'
+    else
+        st_filter --rawfile priv <(printf '%s' "$private") --arg pub "$public" '.enc += {server_key:$priv, client_key:$pub}'
+    fi
+}
+
+set_custom_keypair() {
+    local protocol=$1 private=$2 public=$3 algorithm=x25519 private_bytes=32 public_bytes=32 derived
+    CREDENTIAL_ERR=''
+    case $protocol in
+        reality) scheme_has_reality "$(scheme)" || { CREDENTIAL_ERR='当前方案没有 REALITY 入站。'; return 1; } ;;
+        enc)
+            needs_enc_keys || { CREDENTIAL_ERR='当前方案没有启用 VLESS-ENC。'; return 1; }
+            algorithm=$(st .enc.auth)
+            if [[ $algorithm == mlkem768 ]]; then private_bytes=64; public_bytes=1184; fi ;;
+        *) CREDENTIAL_ERR='无法识别密钥协议。'; return 1 ;;
+    esac
+    if ! valid_raw_key "$private" "$private_bytes" || ! valid_raw_key "$public" "$public_bytes"; then
+        CREDENTIAL_ERR="$(auth_label "$algorithm") 需要无填充的 Base64URL 密钥，私钥 $private_bytes 字节，公钥 $public_bytes 字节。"
+        return 1
+    fi
+    if ! derived=$(keypair_public "$algorithm" "$private") || [[ -z $derived ]]; then
+        if [[ $algorithm == mlkem768 ]]; then CREDENTIAL_ERR='本机 OpenSSL 无法校验 ML-KEM-768。手动导入需要支持 ML-KEM 的 OpenSSL 3.5 或更高版本。'
+        else CREDENTIAL_ERR='本机 OpenSSL 无法从 X25519 私钥派生公钥。'; fi
+        return 1
+    fi
+    if [[ $derived != "$public" ]]; then CREDENTIAL_ERR='公钥与私钥不配对，请核对后重新输入。'; return 1; fi
+    store_keypair "$protocol" "$private" "$public"
 }
 
 valid_xmux_range() {
@@ -3674,11 +3828,9 @@ finalize_identity() {
             private=$(awk '/PrivateKey:|Private key:/{print $NF; exit}' <<< "$out")
             public=$(awk '/Password \(PublicKey\):|Password:|Public key:/{print $NF; exit}' <<< "$out")
             [[ -n $private && -n $public ]] || { die '无法解析 REALITY 密钥。'; return 1; }
-            st_sets .reality.private_key "$private"
-            st_sets .reality.public_key "$public"
+            store_keypair reality "$private" "$public"
         elif [[ -z $(st .reality.public_key) ]]; then
-            out=$(timeout -k 2 15 "$xray" x25519 -i "$(st .reality.private_key)") || { die '恢复 REALITY 公钥失败或超时。'; return 1; }
-            public=$(awk '/Password \(PublicKey\):|Password:|Public key:/{print $NF; exit}' <<< "$out")
+            public=$(keypair_public x25519 "$(st .reality.private_key)") || { die '恢复 REALITY 公钥失败。'; return 1; }
             [[ -n $public ]] || { die '无法从 REALITY 私钥恢复公钥。'; return 1; }
             st_sets .reality.public_key "$public"
         fi
@@ -3707,8 +3859,7 @@ finalize_identity() {
             line_dec=$(awk -v w="$want" 'index($0,w){f=1;next} f && /"decryption":/{sub(/.*"decryption": *"/,""); sub(/".*/,""); print; exit}' <<< "$out")
             line_enc=$(awk -v w="$want" 'index($0,w){f=1;next} f && /"encryption":/{sub(/.*"encryption": *"/,""); sub(/".*/,""); print; exit}' <<< "$out")
             [[ -n $line_dec && -n $line_enc ]] || { die '无法生成 VLESS-ENC 密钥。'; return 1; }
-            st_sets .enc.server_key "${line_dec##*.}"
-            st_sets .enc.client_key "${line_enc##*.}"
+            store_keypair enc "${line_dec##*.}" "${line_enc##*.}"
         fi
     fi
     if scheme_has_ss "$s" && [[ -z $(st .ss.password) ]]; then
@@ -3888,15 +4039,6 @@ core_label() {
     esac
 }
 
-system_summary() {
-    local -a o=("$(outbound_label "$(st .outbound)")")
-    if [[ $(st .bbr) == 1 ]]; then o+=('BBR 开'); else o+=('BBR 关'); fi
-    if scheme_has_reality "$(scheme)"; then o+=("指纹 chrome"); fi
-    join_by '，' "${o[@]}"
-    if needs_xray; then printf '\nXray %s' "$(core_label xray)"; fi
-    if needs_ss_rust; then printf '\nSS-Rust %s' "$(core_label ss)"; fi
-}
-
 node_name() { st '.name // "zxray"'; }
 
 default_node_name() {
@@ -3984,25 +4126,22 @@ scheme_index() {
 preview_items() {
     local s
     s=$(scheme)
-    printf '%s\n' @基本 port
+    printf '%s\n' port
     if scheme_has_reality "$s"; then printf '%s\n' sni; fi
     printf '%s\n' addr name
     case $s in dual|triple|enc-split) ;; *) printf '%s\n' landings ;; esac
     case $s in
-        reality-xhttp) printf '%s\n' @传输 xhttp ;;
-        reality-split|enc-split) printf '%s\n' @传输 split ;;
+        reality-xhttp) printf '%s\n' xhttp ;;
+        reality-split|enc-split) printf '%s\n' split ;;
     esac
-    if scheme_has_ss "$s" || scheme_has_enc_inbound "$s"; then
-        printf '%s\n' @加密
-        if scheme_has_ss "$s"; then printf '%s\n' ssm; fi
-        if scheme_has_enc_inbound "$s"; then printf '%s\n' encp; fi
-    fi
+    if scheme_has_ss "$s"; then printf '%s\n' ssm; fi
+    if scheme_has_enc_inbound "$s"; then printf '%s\n' encp; fi
     if scheme_has_reality "$s"; then
-        printf '%s\n' @防护 guard
+        printf '%s\n' guard
         if [[ $(st .reality.guard) == nginx ]]; then printf '%s\n' conn; fi
         printf '%s\n' limit
     fi
-    printf '%s\n' @高级 egress system
+    printf '%s\n' egress system
 }
 
 item_label() {
@@ -4039,7 +4178,7 @@ item_help() {
         conn) printf '%s' 'Nginx 在验证之前限制并发连接，超出的直接断开。' ;;
         limit) printf '%s\n%s' 'REALITY 未认证连接可能回落到目标站点，限速按连接生效。' '可关闭限速，但不能移除 REALITY 必需的 target。' ;;
         egress) printf '%s\n%s' '只约束这台 VPS 的本机直出，落地流量交给落地服务器处理。' '大陆域名/IP 与 BT 可以分别开关；BT 无法保证完全识别。' ;;
-        system) printf '%s' '出站 IP、BBR、固定 Chrome 指纹、IPv6 链接、防火墙和核心版本。' ;;
+        system) printf '%s' '设置出站 IP、BBR、协议凭据和核心版本。' ;;
     esac
 }
 
@@ -4100,7 +4239,7 @@ item_value() {
         conn) printf '每个 IP %s，总计 %s' "$(st .reality.conn_ip)" "$(st .reality.conn_total)" ;;
         limit) printf '%s\n' "$(limit_label)"; limit_text | sed 's/^/\t/' ;;
         egress) egress_label ;;
-        system) system_summary ;;
+        system) outbound_label "$(st .outbound)" ;;
     esac
 }
 
@@ -4143,7 +4282,7 @@ pv_snapshot() {
 
 link_fields() {
     jq -S -c '{scheme, name, net: (.net | {host, v4, v6}),
-        reality: (.reality | {port, sni, fp, public_key, short_id}), xhttp, enc: (.enc | del(.ticket)), ss,
+        reality: (.reality | {port, sni, fp, public_key, short_id}), xhttp, enc: (.enc | del(.ticket, .server_key)), ss,
         v6_link: (if .net.host == .net.v4 and (.net.v6 // "") != "" then (.net.v6_link // 1) else null end),
         users: [.users[] | {name, id, port}], landings: [.landings[] | .tag]}' "$1"
 }
@@ -4156,20 +4295,21 @@ links_will_change() {
 item_fp() {
     local f
     case $1 in
-        port) f='[.reality.port, .ss.port, .enc.port, [.users[] | .port // 0]]' ;;
+        port) f='[.reality.port, .ss.port, .enc.port, [.users[] | .port // 0 | select(. > 0)]]' ;;
         sni) f='[.reality.sni]' ;;
         addr) f='[.net.host, .net.v4, .net.v6]' ;;
         name) f='[.name]' ;;
-        landings) f='[.landings, [.users[] | {name, out}]]' ;;
-        xhttp) f='[.xhttp, (if .xhttp.enc == 1 then (.enc | del(.port)) else null end)]' ;;
+        landings) f='[.landings, [.users[] | select(.out != "direct") | {name, out}]]' ;;
+        xhttp) f='[.xhttp, (if .xhttp.enc == 1 then (.enc | del(.port, .server_key, .client_key)) else null end)]' ;;
         split) f='[.xhttp]' ;;
-        ssm) f='[.ss.method, .ss.password, [.users[] | .id]]' ;;
-        encp) f='[.enc | del(.port)]' ;;
+        ssm) f='[.ss.method, .ss.password, [.users[] | select((.port // 0) > 0) | .id]]' ;;
+        encp) f='[.enc | del(.port, .server_key, .client_key)]' ;;
         guard) f='[.reality.guard]' ;;
         conn) f='[.reality.conn_ip, .reality.conn_total]' ;;
         limit) f='[.reality.limit, .reality.limit_custom, .reality.limit_jitter]' ;;
         egress) f='[.egress.cn // 0, .egress.bt // 0]' ;;
-        system) f='[.outbound, .bbr, .reality.fp, .net.v6_link, .firewall, .core]' ;;
+        system) f='[.outbound, .bbr, .firewall, .core, .reality.public_key, .enc.client_key,
+                    [.users[] | select(.out == "direct") | .id]]' ;;
         *) f='null' ;;
     esac
     jq -c "$f" "$DRAFT"
@@ -4193,13 +4333,12 @@ pv_build() {
     local key v note n=0 i full orig
     local -a rows=() vals=() olds=() marks=()
     mapfile -t rows < <(preview_items)
-    for key in "${rows[@]}"; do [[ $key == @* ]] || n=$(( n + 1 )); done
+    n=${#rows[@]}
     if [[ $MODE == modify ]]; then ui_page '当前配置' "$(scheme_label "$(scheme)")"
     else ui_page '预览' "$(scheme_label "$(scheme)")"; fi
     KEY_W=${#n}
     PV_KEYS=()
     for key in "${rows[@]}"; do
-        if [[ $key == @* ]]; then ui_group "${key#@}"; continue; fi
         PV_KEYS+=("$key")
         full=$(item_value "$key")
         mapfile -t vals <<< "$full"
@@ -4217,7 +4356,8 @@ pv_build() {
                 [[ -z $note ]] || v+=${v:+  }$note
                 v="$C_YELLOW* $v$C_RESET"
                 note=''
-                if [[ ${marks[$i]} == 2 ]]; then note='细节参数有改动'
+                if [[ $key == system ]]; then note=''
+                elif [[ ${marks[$i]} == 2 ]]; then note='细节参数有改动'
                 elif (( i == 0 )) && [[ -n $orig && $orig != "${vals[$i]%%$'\t'*}" ]]; then note="原 $orig"; fi
             fi
             if (( i == 0 )); then tui_item "${#PV_KEYS[@]}" "$(item_label "$key")" "$v" "$note" "$(item_help "$key")"
@@ -4305,7 +4445,7 @@ pc_build() {
     fi
     if (( n == 0 )); then ui_line '没有修改，会按当前设置重新生成配置并重启服务。'; fi
     ui_blank
-    if links_will_change; then ui_warn '应用后节点链接会变，客户端需要重新导入。'
+    if links_will_change; then ui_warn '应用后请从订阅导入新增或变更的节点。'
     else ui_ok '节点链接不变，客户端不用改动。'; fi
     ui_rule
     tui_item 1 "$PC_TITLE" '' '写入配置并重启服务'
@@ -4390,14 +4530,17 @@ input_page() {
         ui_kv "$1" "$2"
         shift 2
     done
-    ui_footer '按下方提示输入'
+    ui_footer '回车 确认   q/Esc 取消'
 }
 
 
 ask_port() {
     local __ap_cur=$1 __ap_proto=$2 __ap_p __ap_x __ap_busy __ap_rc
     while :; do
-        read_line '新端口：' __ap_p "$__ap_cur"
+        if ! read_line '新端口：' __ap_p "$__ap_cur" numeric; then
+            printf -v "$3" '%s' "$__ap_cur"
+            return 0
+        fi
         [[ -n $__ap_p && $__ap_p != "$__ap_cur" ]] || { printf -v "$3" '%s' "$__ap_cur"; return 0; }
         if [[ $__ap_p == r || $__ap_p == R ]]; then
             __ap_p=$(random_free_port) || return 1
@@ -4476,7 +4619,7 @@ edit_sni() {
             confirm_identity_change '更换伪装站点' || return 0
             input_page '伪装站点' '手动输入' '只填域名，例如 www.example.com，不带 https:// 和路径。' '当前' "${cur:-未选择}"
             while :; do
-                read_line '域名：' d "$cur"
+                read_line '域名：' d "$cur" || return 0
                 [[ -n $d && $d != "$cur" ]] || return 0
                 d=${d,,}
                 if ! valid_domain "$d"; then ui_warn '只填域名，例如 www.example.com，不带 https:// 和路径。'; continue; fi
@@ -4494,23 +4637,28 @@ edit_sni() {
 }
 
 edit_addr() {
-    local c v cur=0 host i
+    local c v cur=0 host i v4 v6
     local -a opts=() vals=()
     if scheme_is_split "$(scheme)"; then
         input_page '节点地址' '上下行分离' '上传和下载分别连本机的 IPv4 和 IPv6 地址。' \
             'IPv4' "$(st .net.v4 | grep . || printf '未填写')" 'IPv6' "$(st .net.v6 | grep . || printf '未填写')"
+        v4=$(st .net.v4)
+        v6=$(st .net.v6)
         while :; do
-            read_line 'IPv4：' v "$(st .net.v4)"
-            [[ -n $v && $v != "$(st .net.v4)" ]] || break
-            if valid_ipv4 "$v" && ! unusable_endpoint_ip "$v"; then st_sets .net.v4 "$v"; st_set .net.manual 1; break; fi
+            read_line 'IPv4：' v "$v4" numeric || return 0
+            [[ -n $v && $v != "$v4" ]] || break
+            if valid_ipv4 "$v" && ! unusable_endpoint_ip "$v"; then v4=$v; break; fi
             ui_warn '请填写可访问的 IPv4，不能使用环回或未指定地址。'
         done
         while :; do
-            read_line 'IPv6：' v "$(st .net.v6)"
-            [[ -n $v && $v != "$(st .net.v6)" ]] || break
-            if valid_ipv6 "$v" && ! unusable_endpoint_ip "$v"; then st_sets .net.v6 "$v"; st_set .net.manual 1; break; fi
+            read_line 'IPv6：' v "$v6" numeric || return 0
+            [[ -n $v && $v != "$v6" ]] || break
+            if valid_ipv6 "$v" && ! unusable_endpoint_ip "$v"; then v6=$v; break; fi
             ui_warn '请填写可访问的 IPv6，不能使用环回或未指定地址。'
         done
+        if [[ $v4 != "$(st .net.v4)" || $v6 != "$(st .net.v6)" ]]; then
+            st_filter --arg v4 "$v4" --arg v6 "$v6" '.net |= (.v4 = $v4 | .v6 = $v6 | .manual = 1)'
+        fi
         return 0
     fi
     host=$(st .net.host)
@@ -4524,7 +4672,7 @@ edit_addr() {
     if (( c <= ${#vals[@]} )); then st_sets .net.host "${vals[$((c - 1))]}"; return 0; fi
     input_page '节点地址' '输入新地址' '填写域名、IPv4 或 IPv6 地址。域名要已经解析到本机。' '当前' "${host:-未填写}"
     while :; do
-        read_line '域名或 IP：' v "$host"
+        read_line '域名或 IP：' v "$host" || return 0
         [[ -n $v && $v != "$host" ]] || return 0
         if valid_host "$v" && ! unusable_endpoint_ip "$v"; then st_sets .net.host "${v,,}"; return 0; fi
         ui_warn '格式不正确，请填写域名、IPv4 或 IPv6 地址。'
@@ -4537,7 +4685,7 @@ edit_name() {
     input_page '节点名称' '' $'用于区分客户端中的节点。\n最多 24 列，汉字占 2 列；可用中文、字母、数字和横线。' \
         '当前' "$cur" '链接名称' "$(name_example | sed 's/^链接里显示为 //')"
     while :; do
-        read_line '新名称：' v "$cur"
+        read_line '新名称：' v "$cur" || return 0
         [[ -n $v && $v != "$cur" ]] || return 0
         if valid_node_name "$v"; then st_sets .name "$v"; return 0; fi
         ui_warn '最多 24 列（汉字占 2 列），不能含空格、引号或 # ? & / \ %。'
@@ -4612,7 +4760,7 @@ confirm_landing_add() {
             done
             continue
         fi
-        read_line '按回车确认添加，输入 n 取消：' answer
+        read_line '按回车确认添加，q/Esc 或 n 取消：' answer '' numeric || return 1
         case $answer in
             ''|y|Y) return 0 ;;
             *) return 1 ;;
@@ -4632,7 +4780,7 @@ edit_landings() {
             if (( n >= 10 )); then TUI_MSG='最多添加 10 个落地。'; continue; fi
             input_page '添加落地' '' $'粘贴落地服务器的分享链接。\n成功解析后需再次按回车确认添加。'
             while :; do
-                read_line '落地链接（回车取消）：' link
+                read_line '落地链接（回车取消）：' link || break
                 [[ -n $link ]] || break
                 if parse_landing_link "$link"; then
                     if confirm_landing_add "$link"; then
@@ -4694,7 +4842,7 @@ edit_path() {
     [[ $MODE != modify ]] || hint+=$'\n改了以后，客户端需要重新导入节点。'
     input_page 'XHTTP 路径' '' "$hint" '当前' "$cur" '可以填' '以 / 开头，字母、数字和 . _ - /，最长 64 位'
     while :; do
-        read_line '新路径：' p "$cur"
+        read_line '新路径：' p "$cur" || return 0
         [[ -n $p && $p != "$cur" ]] || return 0
         if [[ $p =~ ^/[A-Za-z0-9._/-]{1,63}$ ]]; then st_sets .xhttp.path "$p"; return 0; fi
         ui_warn '格式不对：以 / 开头，只用字母、数字和 . _ - /'
@@ -4752,15 +4900,14 @@ edit_xmux() {
             if [[ $c == 2 ]]; then input_page 'XMUX' '按并发数' '每条底层连接最多同时承载几路请求。输入 q 或空回车取消。'
             else input_page 'XMUX' '按连接数' '客户端最多开几条底层连接，可以填数字或区间。输入 q 或空回车取消。'; fi
             while :; do
-                if [[ $c == 2 ]]; then read_line '每条连接承载几路（例如 16-32）：' r "$r0"
-                else read_line '底层连接数（例如 2-4）：' r "$r0"; fi
-                [[ -n $r && $r != q && $r != Q ]] || return 0
+                if [[ $c == 2 ]]; then read_line '每条连接承载几路（例如 16-32）：' r "$r0" numeric || return 0
+                else read_line '底层连接数（例如 2-4）：' r "$r0" numeric || return 0; fi
+                [[ -n $r ]] || return 0
                 valid_xmux_range "$r" 4 && break
                 ui_warn '请输入非负整数或递增区间，例如 16-32。'
             done
             while :; do
-                read_line '每条连接最长复用几秒：' s "$s0"
-                [[ $s != q && $s != Q ]] || return 0
+                read_line '每条连接最长复用几秒：' s "$s0" numeric || return 0
                 [[ -n $s ]] || s=$s0
                 valid_xmux_range "$s" 6 && break
                 ui_warn '请输入非负整数或递增区间，例如 1800-3000。'
@@ -4882,14 +5029,14 @@ edit_padding() {
         4)
             input_page '填充' '自定义' $'格式：多段「概率-最小-最大」用点连接，\n第一段概率须为 100，长度不小于 35。\n示例：100-96-768.60-0-80。输入 q 或直接空回车取消。'
             while :; do
-                read_line '客户端规则：' p "$( [[ $(st .enc.pad) != custom ]] || st .enc.pad_client )"
-                [[ -n $p && $p != q && $p != Q ]] || return 0
+                read_line '客户端规则：' p "$( [[ $(st .enc.pad) != custom ]] || st .enc.pad_client )" numeric || return 0
+                [[ -n $p ]] || return 0
                 valid_padding "$p" && break
                 ui_warn '格式不正确。'
             done
             while :; do
-                read_line '服务端规则：' q "$( [[ $(st .enc.pad) != custom ]] || st .enc.pad_server )"
-                [[ -n $q && $q != q && $q != Q ]] || return 0
+                read_line '服务端规则：' q "$( [[ $(st .enc.pad) != custom ]] || st .enc.pad_server )" numeric || return 0
+                [[ -n $q ]] || return 0
                 valid_padding "$q" && break
                 ui_warn '格式不正确。'
             done
@@ -5006,19 +5153,26 @@ edit_egress() {
 SYS_KEYS=()
 
 sy_build() {
-    local v fw
+    local v fw s count
+    s=$(scheme)
     ui_page '高级设置'
     SYS_KEYS=(outbound bbr)
     tui_item 1 '出站 IP' "$(outbound_label "$(st .outbound)")" '访问网站时用哪种 IP' '服务器访问目标网站时先用哪种 IP。'
     if [[ $(st .bbr) == 1 ]]; then v='开'; else v='关'; fi
     tui_item 2 'BBR' "$v" 'TCP 拥塞控制' '通常能提升高延迟、有丢包线路的速度。'
-    if scheme_has_reality "$(scheme)"; then
-        ui_kv 'TLS 指纹' 'chrome（固定）'
+    if [[ $s != ss ]]; then
+        SYS_KEYS+=(uuid)
+        count=$(jq '[.users[] | select(.out == "direct")] | length' "$DRAFT")
+        tui_item "${#SYS_KEYS[@]}" 'UUID' "$count 个直出身份" '' '可以新增 UUID，也可以修改主节点的 UUID。'
     fi
-    if [[ -n $(st .net.v6) && $(st .net.host) == "$(st .net.v4)" ]] && ! scheme_is_split "$(scheme)"; then
-        SYS_KEYS+=(v6link)
-        if [[ $(st '.net.v6_link // 1') == 1 ]]; then v='附带'; else v='不附带'; fi
-        tui_item "${#SYS_KEYS[@]}" 'IPv6 链接' "$v" '每个节点另给一条 IPv6 链接' '本机有 IPv6 时，每个节点另外生成一条用 IPv6 连接的链接。'
+    if scheme_has_reality "$s"; then
+        SYS_KEYS+=(reality_pair)
+        tui_item "${#SYS_KEYS[@]}" 'REALITY 密钥' 'X25519' '' '导入私钥和公钥，应用到使用 REALITY 的节点。'
+    fi
+    if needs_enc_keys; then
+        SYS_KEYS+=(enc_pair)
+        if [[ $(st .enc.auth) == mlkem768 ]]; then v='ML-KEM-768'; else v='X25519'; fi
+        tui_item "${#SYS_KEYS[@]}" 'VLESS 密钥' "$v" '' '导入与当前 VLESS-ENC 认证方式匹配的密钥对。'
     fi
     fw=$(fw_kind)
     if [[ -n $fw ]]; then
@@ -5042,7 +5196,11 @@ edit_system() {
         tui_menu sy_build "$sel" ''
         sel=$TUI_CUR
         [[ $TUI_KEY == ENTER ]] || return 0
-        "edit_${SYS_KEYS[$TUI_CUR]}"
+        case ${SYS_KEYS[$TUI_CUR]} in
+            reality_pair) edit_keypair reality ;;
+            enc_pair) edit_keypair enc ;;
+            *) "edit_${SYS_KEYS[$TUI_CUR]}" ;;
+        esac
     done
 }
 
@@ -5077,13 +5235,55 @@ edit_bbr() {
 }
 
 
-edit_v6link() {
-    local c cur=1
-    [[ $(st '.net.v6_link // 1') == 1 ]] || cur=2
-    option_page c "$cur" 'IPv6 链接' '本机有 IPv6 时，给每个节点另外生成一条用 IPv6 连接的链接。' \
-        '附带|IPv4 和 IPv6 各一条' '不附带|只生成节点地址那一条'
-    [[ -n $c && $c != "$cur" ]] || return 0
-    if [[ $c == 1 ]]; then st_set .net.v6_link 1; else st_set .net.v6_link 0; fi
+edit_uuid() {
+    local choice value title primary
+    option_page choice 0 'UUID' '' '新增 UUID|为本机直出添加一个节点，原节点继续可用' '修改主 UUID|指定主节点使用的 UUID'
+    case $choice in
+        1) title='新增 UUID' ;;
+        2) title='修改主 UUID' ;;
+        *) return 0 ;;
+    esac
+    primary=$(st '.users[] | select(.name == "direct") | .id')
+    if [[ $choice == 2 ]]; then
+        input_page "$title" '' '填写 8-4-4-4-12 格式的十六进制 UUID。' '主 UUID' "${primary:-安装时自动生成}"
+    else
+        input_page "$title" '' '填写 8-4-4-4-12 格式的十六进制 UUID。'
+    fi
+    while :; do
+        read_line 'UUID：' value || return 0
+        [[ -n $value ]] || return 0
+        if [[ $choice == 1 ]]; then
+            if add_custom_uuid "$value"; then TUI_MSG='新 UUID 已加入草稿，应用后生成节点链接。'; return 0; fi
+        else
+            if set_primary_uuid "$value"; then TUI_MSG='主 UUID 已写入草稿。'; return 0; fi
+        fi
+        ui_warn "$CREDENTIAL_ERR"
+    done
+}
+
+edit_keypair() {
+    local kind=$1 label algorithm='X25519' secret public hint
+    if [[ $kind == reality ]]; then label='REALITY'
+    else
+        label='VLESS-ENC'
+        if [[ $(st .enc.auth) == mlkem768 ]]; then algorithm='ML-KEM-768'; fi
+    fi
+    hint='分别粘贴私钥和公钥。私钥输入时隐藏。'
+    if [[ $algorithm == ML-KEM-768 ]]; then hint='私钥填 Seed，公钥填 Client。私钥输入时隐藏。'; fi
+    if [[ $MODE == modify ]]; then hint+=$'\n更换后，使用这组密钥的节点需要重新导入。'; fi
+    input_page "$label 密钥对" "$algorithm" "$hint"
+    while :; do
+        read_secret_line '私钥：' secret || return 0
+        [[ -n $secret ]] || return 0
+        read_line '公钥：' public || return 0
+        [[ -n $public ]] || return 0
+        if set_custom_keypair "$kind" "$secret" "$public"; then
+            TUI_MSG='密钥对校验通过，已写入草稿。'
+            return 0
+        fi
+        secret=''
+        ui_warn "$CREDENTIAL_ERR"
+    done
 }
 
 edit_firewall() {
@@ -5107,7 +5307,7 @@ co_build() {
 ask_core_version() {
     local __av_cur=$1 __av_v
     while :; do
-        read_line '版本号：' __av_v "$__av_cur"
+        read_line '版本号：' __av_v "$__av_cur" numeric || return 1
         [[ -n $__av_v ]] || return 1
         if [[ $__av_v =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]]; then printf -v "$2" '%s' "$(normalize_tag "$__av_v")"; return 0; fi
         ui_warn '版本号格式不正确，例如 v26.7.28。'
@@ -5188,8 +5388,9 @@ reality_limits_json() {
 }
 
 shared_users_json() {
-    local flow=$1
-    jq -c --arg flow "$flow" '[.users[] | select((.port // 0) == 0) | {id, email: .name} + (if $flow == "" then {} else {flow: $flow} end)]' "$DRAFT"
+    local flow=$1 scope=${2:-all}
+    jq -c --arg flow "$flow" --arg scope "$scope" '[.users[] | select((.port // 0) == 0 and ($scope == "all" or .out == "direct"))
+        | {id, email: .name} + (if $flow == "" then {} else {flow: $flow} end)]' "$DRAFT"
 }
 
 render_xray_config() {
@@ -5218,29 +5419,28 @@ render_xray_config() {
             if [[ $s == reality-xhttp && $(st .xhttp.enc) == 1 ]]; then dec=$(enc_string server); else flow=''; fi
         fi
         [[ $s != triple ]] || net=raw
-        users=$(shared_users_json "$flow")
-        [[ $s == triple ]] && users=$(jq -c '[.[] | select(.email == "direct")]' <<< "$users")
+        if [[ $s == triple ]]; then users=$(shared_users_json "$flow" direct); else users=$(shared_users_json "$flow"); fi
         fallback_json=$(reality_limits_json)
-        stream=$(jq -cn --arg net "$net" --arg sni "$(st .reality.sni)" --arg key "$(st .reality.private_key)" \
+        stream=$(jq -c --arg net "$net" --arg sni "$(st .reality.sni)" \
             --arg sid "$(st .reality.short_id)" --arg path "$(st .xhttp.path)" --arg guard "$(st .reality.guard)" \
             --arg gate "127.0.0.1:$(st .reality.gate)" --argjson limits "$fallback_json" '
             {method: $net, security: "reality",
              realitySettings: ({show: false, target: (if $guard == "nginx" then ($sni + ":443") else $gate end),
-                serverNames: [$sni], privateKey: $key, shortIds: [$sid], minClientVer: "0.0.0"} + $limits)}
+                serverNames: [$sni], privateKey: .reality.private_key, shortIds: [$sid], minClientVer: "0.0.0"} + $limits)}
             + (if $net == "xhttp" then {xhttpSettings: {path: $path, mode: "auto"}} else {} end)
-            + (if $guard == "nginx" then {sockopt: {acceptProxyProtocol: true}} else {} end)')
+            + (if $guard == "nginx" then {sockopt: {acceptProxyProtocol: true}} else {} end)' "$DRAFT")
         if [[ $(st .reality.guard) == nginx ]]; then
-            jq -cn --argjson p "$(st .reality.internal)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
+            jq -c --argjson p "$(st .reality.internal)" --argjson u "$users" --rawfile dec <(printf '%s' "$dec") \
                 --argjson sn "$sniff" '
                 {tag:"in-reality", listen:"127.0.0.1", port:$p, protocol:"vless",
-                 settings:{clients:$u, decryption:$dec}, streamSettings:$st}
-                + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
+                 settings:{clients:$u, decryption:$dec}, streamSettings:.}
+                + (if $sn == null then {} else {sniffing:$sn} end)' <<< "$stream" >> "$inb"
         else
-            jq -cn --arg l "$listen" --argjson p "$(st .reality.port)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
+            jq -c --arg l "$listen" --argjson p "$(st .reality.port)" --argjson u "$users" --rawfile dec <(printf '%s' "$dec") \
                 --argjson sn "$sniff" '
                 {tag:"in-reality", listen:$l, port:$p, protocol:"vless",
-                 settings:{clients:$u, decryption:$dec}, streamSettings:$st}
-                + (if $sn == null then {} else {sniffing:$sn} end)' >> "$inb"
+                 settings:{clients:$u, decryption:$dec}, streamSettings:.}
+                + (if $sn == null then {} else {sniffing:$sn} end)' <<< "$stream" >> "$inb"
             jq -cn --argjson p "$(st .reality.gate)" \
                 '{tag:"reality-gate", listen:"127.0.0.1", port:$p, protocol:"tunnel",
                   settings:{address:"127.0.0.1", port:443, network:"tcp"},
@@ -5257,14 +5457,17 @@ render_xray_config() {
     if scheme_has_enc_inbound "$s"; then
         local users stream dec
         dec=$(enc_string server)
-        if [[ $s == enc-split ]]; then users=$(shared_users_json ''); else users=$(shared_users_json xtls-rprx-vision); fi
-        [[ $s == enc ]] || users=$(jq -c '[.[] | select(.email == "direct")]' <<< "$users")
+        case $s in
+            enc-split) users=$(shared_users_json '' direct) ;;
+            enc) users=$(shared_users_json xtls-rprx-vision) ;;
+            *) users=$(shared_users_json xtls-rprx-vision direct) ;;
+        esac
         if [[ $s == enc-split ]]; then
             stream=$(jq -cn --arg path "$(st .xhttp.path)" '{method:"xhttp", security:"none", xhttpSettings:{path:$path, mode:"auto"}}')
         else
             stream='{"method":"raw","security":"none"}'
         fi
-        jq -cn --arg l "$listen" --argjson p "$(st .enc.port)" --argjson u "$users" --arg dec "$dec" --argjson st "$stream" \
+        jq -cn --arg l "$listen" --argjson p "$(st .enc.port)" --argjson u "$users" --rawfile dec <(printf '%s' "$dec") --argjson st "$stream" \
             --argjson sn "$sniff" '
             {tag:"in-enc", listen:$l, port:$p, protocol:"vless",
              settings:{clients:$u, decryption:$dec}, streamSettings:$st}
@@ -5296,7 +5499,7 @@ render_xray_config() {
             {type:"field", inboundTag:[$t], user:[.name], outboundTag:.out}' "$DRAFT" >> "$rules"
     fi
 
-    # Optional censorship applies only to the locally terminating "direct" user.
+    # Egress restrictions apply to all locally terminating "direct" users.
     # Other VLESS users are routed to their own remote landing and must not be blocked on A.
     # "in-ss" is always direct. "in-ss-landingN" is always a landing.
     local vtags='[]'
@@ -5305,11 +5508,13 @@ render_xray_config() {
     fi
     if [[ $cn == 1 || $bt == 1 ]]; then
         if [[ $vtags != '[]' ]]; then
+            local direct_users
+            direct_users=$(jq -c '[.users[] | select(.out == "direct" and (.port // 0) == 0) | .name]' "$DRAFT")
             if [[ $cn == 1 ]]; then
-                jq -cn --argjson ts "$vtags" '{type:"field", inboundTag:$ts, user:["direct"], domain:["geosite:cn"], outboundTag:"blocked"}' >> "$rules"
+                jq -cn --argjson ts "$vtags" --argjson u "$direct_users" '{type:"field", inboundTag:$ts, user:$u, domain:["geosite:cn"], outboundTag:"blocked"}' >> "$rules"
             fi
             if [[ $bt == 1 ]]; then
-                jq -cn --argjson ts "$vtags" '{type:"field", inboundTag:$ts, user:["direct"], protocol:["bittorrent"], outboundTag:"blocked"}' >> "$rules"
+                jq -cn --argjson ts "$vtags" --argjson u "$direct_users" '{type:"field", inboundTag:$ts, user:$u, protocol:["bittorrent"], outboundTag:"blocked"}' >> "$rules"
             fi
         fi
         if scheme_has_ss "$s"; then
@@ -5443,6 +5648,14 @@ nginx_detect() {
     return 1
 }
 
+test_nginx_config() {
+    local -a opts=()
+    if (( NGINX_SUPPORTS_E )); then opts=(-e "$NGINX_DIR/error.log"); fi
+    timeout -k 2 15 nginx "${opts[@]}" -t -c "$NGINX_DIR/nginx.conf" -p "$NGINX_DIR/" >> "$STEP_LOG" 2>&1 || {
+        die 'Nginx 配置检查没有通过，原因见下方日志。'; return 1
+    }
+}
+
 render_nginx() {
     local out=$1 user group sni
     user=nobody
@@ -5521,9 +5734,10 @@ split_hosts() {
 }
 
 node_label() {
-    local l
+    local l identity=${3:-direct}
     l="$(node_name)-$1"
     [[ ${2:-direct} == direct ]] || l+="-$(landing_label "$2")"
+    if [[ $identity =~ ^uuid([0-9]+)$ ]]; then l+="-UUID${BASH_REMATCH[1]}"; fi
     printf '%s' "$l"
 }
 
@@ -5568,10 +5782,11 @@ render_nodes() {
             outtag=$(jq -r ".users[$i].out" "$DRAFT")
             [[ $s != triple || $outtag == direct ]] || continue
             id=$(jq -r ".users[$i].id" "$DRAFT")
+            name=$(jq -r ".users[$i].name" "$DRAFT")
             port=$(st .reality.port)
             case $s in
                 reality-xhttp)
-                    label=$(node_label XHTTP "$outtag")
+                    label=$(node_label XHTTP "$outtag" "$name")
                     local enc=none flowq='' extra=''
                     if [[ $(st .xhttp.enc) == 1 ]]; then enc=$(enc_string client); flowq='&flow=xtls-rprx-vision'; fi
                     if [[ $(stj .xhttp.xmux) != null ]]; then extra="&extra=$(url_encode "$(jq -c '{xmux: .xhttp.xmux}' "$DRAFT")")"; fi
@@ -5581,7 +5796,7 @@ render_nodes() {
                 reality-split)
                     local up down ex
                     read -r up down <<< "$(split_hosts)"
-                    label=$(node_label XHTTP分离 "$outtag")
+                    label=$(node_label XHTTP分离 "$outtag" "$name")
                     ex=$(jq -cn --arg a "$down" --argjson p "$port" --arg sni "$(st .reality.sni)" --arg fp chrome \
                         --arg pbk "$(st .reality.public_key)" --arg sid "$(st .reality.short_id)" --arg path "$(st .xhttp.path)" \
                         '{downloadSettings:{address:$a, port:$p, network:"xhttp", security:"reality",
@@ -5591,7 +5806,7 @@ render_nodes() {
                     link+="&path=$(url_encode "$(st .xhttp.path)")&mode=auto&extra=$(url_encode "$ex")#$(url_encode "$label")"
                     node_add "$label" "$link" ;;
                 *)
-                    label=$(node_label REALITY "$outtag")
+                    label=$(node_label REALITY "$outtag" "$name")
                     link="vless://$id@$hu:$port?encryption=none&flow=xtls-rprx-vision&$(reality_query)&type=tcp&headerType=none#$(url_encode "$label")"
                     node_add_with_v6 "$label" "$link" "$host" "$port" ;;
             esac
@@ -5605,18 +5820,19 @@ render_nodes() {
             outtag=$(jq -r ".users[$i].out" "$DRAFT")
             [[ $s == enc || $outtag == direct ]] || continue
             id=$(jq -r ".users[$i].id" "$DRAFT")
+            name=$(jq -r ".users[$i].name" "$DRAFT")
             port=$(st .enc.port)
             if [[ $s == enc-split ]]; then
                 local up down ex
                 read -r up down <<< "$(split_hosts)"
-                label=$(node_label ENC分离)
+                label=$(node_label ENC分离 "$outtag" "$name")
                 ex=$(jq -cn --arg a "$down" --argjson p "$port" --arg path "$(st .xhttp.path)" \
                     '{downloadSettings:{address:$a, port:$p, network:"xhttp", xhttpSettings:{path:$path}}}')
                 link="vless://$id@$(uri_host "$up"):$port?encryption=$enc&security=none&type=xhttp"
                 link+="&path=$(url_encode "$(st .xhttp.path)")&mode=auto&extra=$(url_encode "$ex")#$(url_encode "$label")"
                 node_add "$label" "$link"
             else
-                label=$(node_label VLESS-ENC "$outtag")
+                label=$(node_label VLESS-ENC "$outtag" "$name")
                 link="vless://$id@$hu:$port?encryption=$enc&flow=xtls-rprx-vision&security=none&type=tcp&headerType=none#$(url_encode "$label")"
                 node_add_with_v6 "$label" "$link" "$host" "$port"
             fi
@@ -6205,15 +6421,11 @@ install_files_and_services() {
         make_dir "$NGINX_DIR" "$NGINX_RUN"
         chmod 755 "$NGINX_RUN"
         atomic_install "$STAGE/nginx.conf" "$NGINX_DIR/nginx.conf" 644
-        local -a nginx_test_opts=()
         local nginx_service_opts=''
         if (( NGINX_SUPPORTS_E )); then
-            nginx_test_opts=(-e "$NGINX_DIR/error.log")
             nginx_service_opts="-e $NGINX_DIR/error.log "
         fi
-        timeout -k 2 15 nginx "${nginx_test_opts[@]}" -t -c "$NGINX_DIR/nginx.conf" -p "$NGINX_DIR/" >> "$STEP_LOG" 2>&1 || {
-            die 'Nginx 配置检查没有通过。'; return 1;
-        }
+        test_nginx_config || return 1
         local nginx_cmd nginx_args
         nginx_cmd=$(command -v nginx)
         nginx_args="${nginx_service_opts}-c $NGINX_DIR/nginx.conf -p $NGINX_DIR/ -g 'daemon off;'"
@@ -6964,7 +7176,7 @@ show_node_link() {
 
 mt_build() {
     ui_page '更新与维护'
-    tui_item 1 '更新核心' '' '更新 Xray / SS-Rust，保留定制脚本'
+    tui_item 1 '更新组件' '' 'Xray / SS-Rust / Nginx，保留配置'
     tui_item 2 '更新规则' '' '只更新地理规则，不升级核心'
     tui_item 3 '重启服务' '' '重启服务并检查运行状态'
     tui_item 4 '运行状态' '' '服务、端口、防火墙；日志按需查看'
@@ -7065,7 +7277,7 @@ require_state() {
 
 action_update() {
     ui_blank
-    ui_note '此定制版本只检查并更新核心，不自动下载覆盖脚本。'
+    ui_note '更新当前方案使用的组件，保留现有节点和配置。'
     update_cores
 }
 
@@ -7089,6 +7301,88 @@ action_geo_update() {
 }
 
 
+nginx_binary_package() {
+    local bin=$1 owner
+    case $PKG in
+        apt) owner=$(dpkg-query -S "$bin") || return 1; owner=${owner%%:*} ;;
+        apk)
+            apk info -L nginx | sed 's#^/*#/#' | grep -Fx -- "$bin" >/dev/null || return 1
+            owner=nginx ;;
+        dnf|yum) owner=$(rpm -qf --qf '%{NAME}' "$bin") || return 1 ;;
+        pacman) owner=$(pacman -Qqo "$bin") || return 1 ;;
+    esac
+    case $owner in nginx|nginx-core|nginx-full|nginx-light|nginx-extras|nginx-mainline|nginx-stable) printf '%s' "$owner" ;; *) return 1 ;; esac
+}
+
+nginx_running_current() {
+    local bin=$1 pid=''
+    read -r pid 2>/dev/null < "$NGINX_RUN/nginx.pid" || return 1
+    [[ $pid =~ ^[1-9][0-9]*$ && /proc/$pid/exe -ef $bin ]] || return 1
+    # A distro security revision can replace only the loaded module or library.
+    awk '$NF == "(deleted)" && $(NF-1) ~ /[.]so([.]|$)/ {stale=1} END {exit stale}' "/proc/$pid/maps" 2>/dev/null
+}
+
+nginx_package_version() {
+    case $PKG in
+        apt) dpkg-query -W -f='${Version}' "$1" ;;
+        apk) apk list --installed "$1" | awk -v prefix="$1-" 'index($1,prefix)==1 {print substr($1,length(prefix)+1); seen++} END {exit seen!=1}' ;;
+        dnf|yum) rpm -q --qf '%{VERSION}-%{RELEASE}' "$1" ;;
+    esac
+}
+
+update_nginx() {
+    local bin owner installed p before after active=0 i
+    local -a packages=() service_env=()
+    ui_step '更新 Nginx 和模块'
+    check_service_ownership || return 1
+    bin=$(type -P nginx) && bin=$(readlink -f -- "$bin") || { die '找不到当前方案使用的 Nginx。'; return 1; }
+    if ! owner=$(nginx_binary_package "$bin" 2>>"$STEP_LOG"); then
+        ui_step_skip '未自动更新'
+        ui_warn "无法确认 $bin 的软件包来源，请通过原安装方式更新 Nginx。"
+        return 0
+    fi
+    if [[ $PKG == pacman ]]; then
+        ui_step_skip '未自动更新'
+        ui_warn 'Arch 系请运行 pacman -Syu 随系统更新 Nginx，再在维护菜单重启服务。'
+        return 0
+    fi
+    installed=$(pkg_snapshot) || { die '无法核实已安装的 Nginx 软件包。'; return 1; }
+    while IFS= read -r p; do
+        case $p in
+            "$owner"|nginx|nginx-common|nginx-core|nginx-full|nginx-light|nginx-extras|nginx-mod-*|nginx-module-*|libnginx-mod-*) packages+=("$p") ;;
+        esac
+    done <<< "$installed"
+    in_list "$owner" "${packages[@]}" || { die 'Nginx 软件包状态异常，已停止更新。'; return 1; }
+    before=$(nginx_package_version "$owner") || { die '无法读取已安装的 Nginx 软件包版本。'; return 1; }
+    if svc_active zxray-nginx; then active=1; fi
+    if [[ $INIT == systemd ]] && ! svc_active nginx; then
+        # The distro's default web server is separate from the managed SNI gate.
+        service_env=(SYSTEMD_OFFLINE=1)
+    fi
+    [[ -d $NGINX_RUN ]] || install -d -m 755 "$NGINX_RUN" || return 1
+    nginx_detect && test_nginx_config || return 1
+    case $PKG in
+        apt)
+            pkg_refresh && pkg_run env "${service_env[@]}" DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 \
+                apt-get -o DPkg::Lock::Timeout=180 -o Dpkg::Options::=--force-confold install -y \
+                --only-upgrade --no-remove --no-install-recommends "${packages[@]}" ;;
+        apk) pkg_run apk --no-cache upgrade "${packages[@]}" ;;
+        dnf|yum) pkg_run env "${service_env[@]}" "$PKG" -y --setopt=metadata_expire=0 upgrade "${packages[@]}" ;;
+    esac >> "$STEP_LOG" 2>&1 || { die 'Nginx 软件包更新失败，请检查软件源、版本锁定和日志。'; return 1; }
+    nginx_detect && test_nginx_config || return 1
+    if (( active )) && ! nginx_running_current "$bin"; then
+        svc_do restart zxray-nginx && wait_active zxray-nginx 10 || {
+            service_log_to_step zxray-nginx; die '更新后 Nginx 前置服务没有启动成功。'; return 1
+        }
+        for (( i=0; i<20; i++ )); do nginx_running_current "$bin" && break; sleep 0.25; done
+        (( i < 20 )) || { die '无法确认 Nginx 前置服务已加载更新后的程序和模块。'; return 1; }
+    fi
+    after=$(nginx_package_version "$owner") || { die '无法核实更新后的 Nginx 软件包版本。'; return 1; }
+    ui_step_done
+    if [[ $before == "$after" ]]; then ui_line "  Nginx $after（已按当前软件源检查）"
+    else ui_line "  Nginx $before → $after"; fi
+}
+
 update_cores() {
     local -a todo=() notes=()
     local cur new tag t dir want
@@ -7101,6 +7395,8 @@ update_cores() {
     STATE_READY=1
     MODE=modify
     STEP_NO=0; STEP_TOTAL=1
+    : > "$STEP_LOG"
+    if needs_nginx; then STEP_TOTAL=2; update_nginx || return 1; fi
     ui_step '检查核心版本'
     : > "$STEP_LOG"
     dir=$STAGE/core
@@ -7509,7 +7805,7 @@ edit_sni_pool() {
         case $key in
             a)
                 input_page '添加站点' '' '只填域名，例如 www.example.com。'
-                read_line '域名（回车取消）：' d
+                read_line '域名（回车取消）：' d || continue
                 [[ -n $d ]] || continue
                 d=${d,,}
                 if ! valid_domain "$d"; then TUI_MSG='格式不对：只填域名，例如 www.example.com。'; continue; fi
@@ -7695,7 +7991,7 @@ Xray Manager v$SCRIPT_VERSION
                        enc  dual  triple  enc-split
   --core-version 版本  安装时的 Xray 版本：latest（最新正式版，默认）
                        或指定版本号，例如 v26.10.31
-  --update             仅检查并更新核心，不覆盖定制脚本
+  --update             更新当前方案的 Xray / SS-Rust / Nginx，保留配置
   --nodes              输出节点链接
   --uninstall          完整卸载
   --yes                跳过所有确认
