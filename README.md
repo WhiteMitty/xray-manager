@@ -3,6 +3,11 @@
 ### 2026-11-22
 <br>
 
+### 准备工作
+- Debian / Ubuntu / Alpine 环境
+- root 权限
+- 已安装 curl / wget 和 bash
+
 ### 安装脚本
 #### curl
 ```bash
