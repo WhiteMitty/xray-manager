@@ -26,8 +26,7 @@ xray
 ### 局限说明
 - xhttp 只做了 v4 v6 分离，刚需双栈机器，此脚本不支持 CDN 分离方案
 - 若 xray 内核过新，sing-box 等客户端将无法使用订阅，此脚本仅考虑 xray 客户端兼容性
-- 强制采用 nginx 前置过滤 sni 的方案搭建 reality，能一定程度上防止 vps 被盗取流量，fallback 限速可能增加特征，可选择关闭
-<br>
+- 强制采用 nginx 前置过滤 sni 的方案搭建 reality，能一定程度上防止 vps 被盗取流量但非万能
 
 ### License
 MIT
