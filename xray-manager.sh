@@ -1333,7 +1333,11 @@ new_uuid() {
     fi
 }
 
-random_path() { printf '/%s/' "$(rand_hex 6)"; }
+random_path() {
+    local h
+    h=$(rand_hex 6) || return 1
+    printf '/%s/' "$h"
+}
 
 url_encode() { printf '%s' "$1" | jq -sRr @uri; }
 
@@ -3735,6 +3739,21 @@ st_filter() {
 st_set() { st_filter --argjson v "$2" "$1 = \$v"; }
 st_sets() { st_filter --arg v "$2" "$1 = \$v"; }
 
+reality_short_ids() {
+    jq -c '.reality | .short_ids // [.short_id | select(type == "string" and length > 0)]' "${1:-$DRAFT}"
+}
+
+reality_short_id() { reality_short_ids | jq -r '.[0] // empty'; }
+
+reality_short_id_note() {
+    local DRAFT=${1:-$DRAFT} ids
+    [[ -f $DRAFT ]] || return 0
+    scheme_has_reality "$(scheme)" || return 0
+    ids=$(reality_short_ids) || return 1
+    (( $(jq 'length' <<< "$ids") > 1 )) || return 0
+    jq -r '"REALITY shortID：\(.[0])（订阅默认）\n其他可用 shortID：\(.[1:] | join("、"))\n客户端可选用其中任意一个 shortID。"' <<< "$ids"
+}
+
 load_state_draft() {
     DRAFT=$STAGE/draft.json
     cp -f -- "$STATE" "$DRAFT" || return 1
@@ -3850,7 +3869,7 @@ draft_new() {
 }
 
 finalize_identity() {
-    local xray=$1 s out i n id p private public secret field rc
+    local xray=$1 s out i n id p private public secret field rc ids
     s=$(scheme)
     n=$(jq '.users | length' "$DRAFT")
     for (( i = 0; i < n; i++ )); do
@@ -3876,11 +3895,13 @@ finalize_identity() {
             [[ -n $public ]] || { die '无法从 REALITY 私钥恢复公钥。'; return 1; }
             st_sets .reality.public_key "$public"
         fi
-        if [[ -z $(st .reality.short_id) ]]; then
+        ids=$(reality_short_ids) || return 1
+        if [[ $ids == '[]' ]]; then
             secret=$(rand_hex 8) || return 1
             [[ $secret =~ ^[0-9a-f]{16}$ ]] || { die '生成 REALITY shortId 失败。'; return 1; }
-            st_sets .reality.short_id "$secret"
+            ids=$(jq -cn --arg sid "$secret" '[$sid]') || return 1
         fi
+        st_filter --argjson ids "$ids" '.reality.short_ids = $ids | .reality.short_id = $ids[0]' || return 1
         if [[ $(st .reality.guard) == nginx ]]; then field=.reality.internal; else field=.reality.gate; fi
         p=$(st "$field")
         rc=0
@@ -4358,7 +4379,7 @@ item_fp() {
         limit) f='[.reality.limit, .reality.limit_custom, .reality.limit_jitter]' ;;
         egress) f='[.egress.cn // 0, .egress.bt // 0]' ;;
         system) f='[.outbound, .bbr, .firewall, .core, (.reality.fp | if . == null or . == "" then "chrome" else . end),
-                    .reality.public_key, .reality.short_id, .enc.client_key,
+                    .reality.public_key, (.reality | .short_ids // [.short_id | select(type == "string" and length > 0)]), .enc.client_key,
                     [.users[] | select(.out == "direct") | .id]]' ;;
         *) f='null' ;;
     esac
@@ -4498,7 +4519,7 @@ pc_build() {
     links_will_change || links_rc=$?
     case $links_rc in
         0) ui_warn '应用后请从订阅导入新增或变更的节点。' ;;
-        1) ui_ok '节点链接不变，客户端不用改动。' ;;
+        1) ui_ok '订阅中的节点链接没有变化。' ;;
         *) ui_warn '无法确认节点链接是否变化，应用后请核对节点列表。' ;;
     esac
     ui_rule
@@ -4608,7 +4629,8 @@ ask_port() {
         fi
         if ! valid_port "$__ap_p"; then ui_warn '端口需在 1-65535 之间。'; continue; fi
         __ap_p=$(( 10#$__ap_p ))
-        if [[ $__ap_p != "$__ap_cur" ]] && port_in_draft "$__ap_p"; then
+        [[ $__ap_p != "$__ap_cur" ]] || { printf -v "$3" '%s' "$__ap_cur"; return 0; }
+        if port_in_draft "$__ap_p"; then
             ui_warn "端口 $__ap_p 已经被本方案的其他入口用了。"
             continue
         fi
@@ -5244,8 +5266,8 @@ sy_build() {
     fi
     if (( reality )); then
         SYS_KEYS+=(short_id)
-        v=$(st .reality.short_id)
-        tui_item "${#SYS_KEYS[@]}" 'shortId' "${v:-自动生成}" '' 'REALITY 客户端使用的短标识。'
+        v=$(reality_short_ids | jq -r 'join("、")')
+        tui_item "${#SYS_KEYS[@]}" 'shortId' "${v:-自动生成}" '' '支持多个；订阅默认使用第一个。'
     fi
     fw=$(fw_kind)
     if [[ -n $fw ]]; then
@@ -5308,10 +5330,34 @@ edit_bbr() {
 }
 
 edit_short_id() {
-    local current value hint='填 2–16 位十六进制字符，位数须为偶数。留空保留当前设置。'
-    current=$(st .reality.short_id)
-    if [[ $MODE == modify ]]; then hint+=$'\n应用后，使用 REALITY 的客户端需同步 shortId。'; fi
-    input_page 'shortId' 'REALITY' "$hint" '当前' "${current:-安装时自动生成}"
+    local ids current='' value choice selected index=0 i title hint existing=''
+    local -a values=() opts=('新增 shortID|追加到末尾，订阅仍使用第一个') replacements=()
+    ids=$(reality_short_ids) || return 1
+    mapfile -t values < <(jq -r '.[]' <<< "$ids")
+    for i in "${!values[@]}"; do
+        existing+="${existing:+$'\n'}$(( i + 1 )). ${values[$i]}"
+        if (( i == 0 )); then
+            existing+='（订阅默认）'
+            replacements+=("订阅默认|${values[$i]}")
+        else
+            replacements+=("可用|${values[$i]}")
+        fi
+    done
+    if (( ${#values[@]} )); then opts+=('替换已有 shortID|选择一个条目替换，其他条目继续保留'); fi
+    option_page choice 0 'REALITY shortID' "已有 shortID：${existing:+$'\n'}${existing:-安装时自动生成}" "${opts[@]}"
+    case $choice in
+        1) title='新增 shortID' ;;
+        2)
+            option_page selected 0 '替换 shortID' '选择要替换的条目。第一个用于默认订阅。' "${replacements[@]}"
+            [[ -n $selected ]] || return 0
+            index=$(( selected - 1 ))
+            current=${values[$index]}
+            title='替换 shortID' ;;
+        *) return 0 ;;
+    esac
+    hint='填 2–16 位十六进制字符，位数须为偶数。留空保留当前设置。'
+    if [[ $choice == 2 ]]; then hint+=$'\n应用后，使用被替换值的客户端需要更新 shortID。'; fi
+    input_page "$title" 'REALITY' "$hint" '当前条目' "${current:-新增到末尾}"
     while :; do
         read_line '新 shortId：' value '' numeric || return 0
         [[ -n $value ]] || return 0
@@ -5319,9 +5365,19 @@ edit_short_id() {
             ui_warn '需为 2–16 位，长度为偶数，只能使用 0–9 和 A–F（不区分大小写）。'
             continue
         fi
-        [[ ${value,,} != "${current,,}" ]] || return 0
-        st_sets .reality.short_id "${value,,}"
-        TUI_MSG='shortId 已写入草稿。'
+        value=${value,,}
+        [[ $value != "${current,,}" ]] || return 0
+        if jq -e --arg value "$value" 'map(ascii_downcase) | index($value) != null' <<< "$ids" >/dev/null; then
+            ui_warn '这个 shortID 已存在，请输入其他值。'
+            continue
+        fi
+        if [[ $choice == 1 ]]; then
+            ids=$(jq -c --arg value "$value" '. + [$value]' <<< "$ids") || return 1
+        else
+            ids=$(jq -c --arg value "$value" --argjson i "$index" '.[$i] = $value' <<< "$ids") || return 1
+        fi
+        st_filter --argjson ids "$ids" '.reality.short_ids = $ids | .reality.short_id = $ids[0]' || return 1
+        TUI_MSG='shortID 列表已写入草稿。'
         return 0
     done
 }
@@ -5533,11 +5589,11 @@ render_xray_config() {
         if [[ $s == triple ]]; then users=$(shared_users_json "$flow" direct); else users=$(shared_users_json "$flow"); fi
         fallback_json=$(reality_limits_json)
         stream=$(jq -c --arg net "$net" --arg sni "$(st .reality.sni)" \
-            --arg sid "$(st .reality.short_id)" --arg path "$(st .xhttp.path)" --arg guard "$(st .reality.guard)" \
+            --argjson sids "$(reality_short_ids)" --arg path "$(st .xhttp.path)" --arg guard "$(st .reality.guard)" \
             --arg gate "127.0.0.1:$(st .reality.gate)" --argjson limits "$fallback_json" '
             {method: $net, security: "reality",
              realitySettings: ({show: false, target: (if $guard == "nginx" then ($sni + ":443") else $gate end),
-                serverNames: [$sni], privateKey: .reality.private_key, shortIds: [$sid], minClientVer: "0.0.0"} + $limits)}
+                serverNames: [$sni], privateKey: .reality.private_key, shortIds: $sids, minClientVer: "0.0.0"} + $limits)}
             + (if $net == "xhttp" then {xhttpSettings: {path: $path, mode: "auto"}} else {} end)
             + (if $guard == "nginx" then {sockopt: {acceptProxyProtocol: true}} else {} end)' "$DRAFT")
         if [[ $(st .reality.guard) == nginx ]]; then
@@ -5836,7 +5892,7 @@ landing_label() {
 
 reality_query() {
     printf 'security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&spx=%%2F' \
-        "$(url_encode "$(st .reality.sni)")" "$(st .reality.public_key)" "$(st .reality.short_id)"
+        "$(url_encode "$(st .reality.sni)")" "$(st .reality.public_key)" "$(reality_short_id)"
 }
 
 
@@ -5910,7 +5966,7 @@ render_nodes() {
                     read -r up down <<< "$(split_hosts)"
                     label=$(node_label XHTTP分离 "$outtag" "$name")
                     ex=$(jq -cn --arg a "$down" --argjson p "$port" --arg sni "$(st .reality.sni)" --arg fp chrome \
-                        --arg pbk "$(st .reality.public_key)" --arg sid "$(st .reality.short_id)" --arg path "$(st .xhttp.path)" \
+                        --arg pbk "$(st .reality.public_key)" --arg sid "$(reality_short_id)" --arg path "$(st .xhttp.path)" \
                         '{downloadSettings:{address:$a, port:$p, network:"xhttp", security:"reality",
                           realitySettings:{serverName:$sni, fingerprint:$fp, publicKey:$pbk, shortId:$sid, spiderX:"/"},
                           xhttpSettings:{path:$path}}}')
@@ -5980,6 +6036,7 @@ render_info() {
         printf '方案    %s\n' "$(scheme_label "$s")"
         printf '时间    %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
         jq -r '.[] | "\(.label)\n\(.link)\n"' "$nodes"
+        reality_short_id_note
         if (( $(jq '.landings | length' "$DRAFT") > 0 )); then
             printf '落地原始链接\n'
             jq -r '.landings[] | "\(.tag | sub("landing"; "落地 ")): \(.link)"' "$DRAFT"
@@ -7386,7 +7443,7 @@ show_modify_result() {
         while IFS= read -r l; do ui_line "  $l"; done <<< "$removed"
     fi
     if [[ -z $changed && -z $removed ]]; then
-        ui_ok '节点链接没有变化，客户端不用改动。'
+        ui_ok '订阅中的节点链接没有变化。'
     elif [[ -z $changed ]]; then
         ui_ok '其余节点的链接没有变化。'
     else
@@ -7401,7 +7458,7 @@ show_modify_result() {
 
 
 print_nodes() {
-    local n i label
+    local n i label note
     if [[ ! -f $NODES_JSON ]]; then ui_line '还没有节点，请先在主页选择「安装」。'; return 0; fi
     n=$(jq 'length' "$NODES_JSON")
     for (( i = 0; i < n; i++ )); do
@@ -7410,6 +7467,9 @@ print_nodes() {
         printf '  %s%*d%s  %s%s%s\n' "$C_KEY" "${#n}" "$(( i + 1 ))" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" >&4
         jq -r ".[$i].link" "$NODES_JSON" >&4
     done
+    note=$(reality_short_id_note "$STATE") || return 1
+    [[ -z $note ]] || ui_note "$note"
+    return 0
 }
 
 NODE_LABELS=() NODE_LINKS=()
@@ -7424,7 +7484,7 @@ link_preview() {
 }
 
 nd_build() {
-    local i n lw0=$LABEL_W
+    local i n lw0=$LABEL_W note
     if state_ok; then DRAFT=$STATE; ui_page '节点链接' "$(scheme_label "$(scheme)")"
     else ui_page '节点链接'; fi
     n=${#NODE_LABELS[@]}
@@ -7438,6 +7498,8 @@ nd_build() {
     ui_blank
     ui_kv '链接文件' "$INFO_FILE"
     ui_kv '订阅 Base64' "$SUB_B64"
+    note=$(reality_short_id_note "$STATE") || return 1
+    [[ -z $note ]] || ui_note "$note"
     TUI_HELP_H=5
     TUI_HELP_DIM=0
     TUI_FOOT='上下键 选节点   回车 链接   c 复制   Esc 返回'
@@ -7491,9 +7553,11 @@ action_nodes() {
 
 
 show_node_link() {
-    local link=$1 label=$2
+    local link=$1 label=$2 note
     ui_page "$label" '完整节点链接'
     printf '%s\n' "$link" >&4
+    note=$(reality_short_id_note "$STATE") || return 1
+    [[ -z $note ]] || ui_note "$note"
     ui_rule
     ui_pause
 }
