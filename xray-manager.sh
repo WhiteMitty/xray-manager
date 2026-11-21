@@ -8,7 +8,21 @@ if [ -z "${BASH_VERSION:-}" ]; then
     fi
     if ! command -v bash >/dev/null 2>&1; then
         if [ "$(id -u)" = 0 ] && command -v apk >/dev/null 2>&1; then
-            apk add --no-cache bash curl ca-certificates >/dev/null || exit 1
+            if [ "$#" -eq 0 ]; then
+                printf '%s\n' 'Xray Manager'
+                if [ ! -e /usr/local/share/zxray/state.json ] && [ ! -e /usr/local/share/zxray-transaction ]; then
+                    printf '%s\n' '  状态  未安装'
+                fi
+                printf '%s\n' '  1  打开主页（先补齐 Bash）' '  0  退出'
+                if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then exec 3</dev/tty; else exec 3<&0; fi
+                while :; do
+                    printf '输入 1 打开主页，0、q 或 Esc 退出，按回车确认：'
+                    IFS= read -r choice <&3 || exit 0
+                    case $choice in 1) break ;; 0|q|Q|"$(printf '\033')") exit 0 ;; esac
+                done
+                exec 3<&-
+            fi
+            apk add --no-cache bash >/dev/null || exit 1
         else
             echo "请先安装 bash，再运行：sh xray-manager.sh" >&2
             exit 1
@@ -1059,6 +1073,7 @@ tui_menu() {
         tui_draw
         TUI_MSG=''
         tui_read_key __tm_k
+        [[ $__tm_k == [0-9] ]] || __tm_dg=''
         case $__tm_k in
             RESIZE)
                 ui_measure
@@ -1090,10 +1105,11 @@ tui_menu() {
             *)
                 if [[ ${#__tm_k} == 1 && -n $__tm_keys && $__tm_keys == *"$__tm_k"* ]]; then TUI_KEY=$__tm_k; break; fi
                 if [[ $__tm_k == [0-9] ]]; then
-                    __tm_now=$(now_ms) || continue
+                    # BusyBox date may lack milliseconds before dependencies are installed.
+                    __tm_now=$(now_ms) || __tm_now=$(( (SECONDS % 100000) * 1000 ))
                     # Modular delta remains correct when the 100000-second counter wraps.
                     if [[ -n $__tm_dg ]] && (( (__tm_now - __tm_dt + 100000000) % 100000000 < 1000 )) \
-                        && tui_jump "$__tm_dg$__tm_k"; then __tm_dg=''
+                        && tui_jump "$__tm_dg$__tm_k"; then __tm_dg+=$__tm_k
                     else tui_jump "$__tm_k" || true; __tm_dg=$__tm_k; fi
                     __tm_dt=$__tm_now
                 elif [[ ${#__tm_k} == 1 ]]; then
@@ -1377,6 +1393,11 @@ valid_ipv6() {
 
 valid_host() { valid_ipv4 "$1" || valid_ipv6 "$1" || valid_domain "$1"; }
 
+valid_short_id() {
+    local LC_ALL=C
+    [[ $1 =~ ^([0-9A-Fa-f]{2}){1,8}$ ]]
+}
+
 # Compare addresses numerically, including compressed and IPv4-mapped IPv6.
 ip_key() {
     local a=${1,,} part left right missing i
@@ -1417,7 +1438,7 @@ unusable_endpoint_ip() {
     local key
     key=$(ip_key "$1") || return 1
     case $key in
-        v4:0.*|v4:127.*|v4:169.254.*|v4:255.255.255.255|v6:0:0:0:0:0:0:0:0|v6:0:0:0:0:0:0:0:1|v6:fe[89ab]?:*|v6:ff*) return 0 ;;
+        v4:0.*|v4:127.*|v4:169.254.*|v4:255.255.255.255|v6:0:0:0:0:0:0:0:0|v6:0:0:0:0:0:0:0:1|v6:fe[89ab]?:*|v6:ff[0-9a-f][0-9a-f]:*) return 0 ;;
     esac
     if [[ $key == v4:* ]]; then
         local first=${key#v4:}; first=${first%%.*}
@@ -1590,6 +1611,7 @@ valid_vless_encryption() {
     (( ${#parts[@]} >= 4 )) || return 1
     [[ ${parts[0]} == mlkem768x25519plus && ${parts[1]} =~ ^(native|xorpub|random)$ && ${parts[2]} =~ ^(0rtt|1rtt)$ && $value != *. ]] || return 1
     for segment in "${parts[@]:3}"; do
+        [[ -n $segment ]] || return 1
         if (( ${#segment} < 20 )); then
             (( keys == 0 )) || return 1
             padding+=${padding:+.}$segment
@@ -1749,23 +1771,51 @@ pkg_installed() {
 }
 
 pkg_snapshot() {
-    case $PKG in
-        apt) timeout -k 2 15 dpkg-query -W -f='${db:Status-Status} ${Package}\n' 2>/dev/null | awk '$1 == "installed" {print $2}' ;;
-        apk) timeout -k 2 15 apk info 2>/dev/null ;;
-        dnf|yum) timeout -k 2 15 rpm -qa --qf '%{NAME}\n' 2>/dev/null ;;
-        pacman) timeout -k 2 15 pacman -Qq 2>/dev/null ;;
-        *) return 1 ;;
-    esac | sort -u
+    local snapshot
+    snapshot=$(
+        case $PKG in
+            apt) timeout -k 2 15 dpkg-query -W -f='${db:Status-Status} ${Package}\n' 2>/dev/null | awk '$1 == "installed" {print $2}' ;;
+            apk) timeout -k 2 15 apk info 2>/dev/null ;;
+            dnf|yum) timeout -k 2 15 rpm -qa --qf '%{NAME}\n' 2>/dev/null ;;
+            pacman) timeout -k 2 15 pacman -Qq 2>/dev/null ;;
+            *) return 1 ;;
+        esac | LC_ALL=C sort -u
+    ) || return 1
+    [[ -n ${snapshot//[[:space:]]/} ]] || return 1
+    printf '%s\n' "$snapshot"
+}
+
+pkg_added_since() {
+    local before after package added LC_ALL=C
+    [[ -s $1 && -n $2 ]] || return 1
+    # Re-sort older baselines; recovery may run under a different SSH locale.
+    before=$(LC_ALL=C sort -u -- "$1") || return 1
+    after=$(LC_ALL=C sort -u <<< "$2") || return 1
+    [[ -n $before && -n $after ]] || return 1
+    while IFS= read -r package; do
+        [[ $package =~ ^[a-zA-Z0-9][a-zA-Z0-9.+_:-]*$ ]] || return 1
+    done <<< "$before"$'\n'"$after"
+    # Never expose comm's partial output if reading/comparing either side fails.
+    added=$(LC_ALL=C comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after")) || return 1
+    printf '%s' "$added"
 }
 
 pkg_install_tracked() {
-    local __pi_var=$1 __pi_before __pi_after __pi_rc=0 __pi_p __pi_new=''
+    local __pi_var=$1 __pi_before __pi_after __pi_rc=0 __pi_new=''
     shift
-    __pi_before=$(pkg_snapshot)
+    printf -v "$__pi_var" '%s' ''
+    [[ -f $TX/ready ]] || return 1
+    __pi_before=$(pkg_snapshot) || return 1
+    # Only publish a complete baseline; keep it for rollback until the delta is recorded.
+    printf '%s\n' "$__pi_before" | atomic_write "$TX/pkgs-before" 600 || return 1
     pkg_install "$@" || __pi_rc=$?
-    __pi_after=$(pkg_snapshot)
-    __pi_new=$(comm -13 <(printf '%s\n' "$__pi_before") <(printf '%s\n' "$__pi_after") | paste -sd ' ' -)
+    __pi_after=$(pkg_snapshot) || return 1
+    __pi_new=$(pkg_added_since "$TX/pkgs-before" "$__pi_after" | paste -sd ' ' -) || return 1
+    if [[ -n $__pi_new ]]; then
+        tr -s ' ' '\n' <<< "$__pi_new" >> "$TX/new-packages" || return 1
+    fi
     printf -v "$__pi_var" '%s' "$__pi_new"
+    rm -f -- "$TX/pkgs-before" || return 1
     return "$__pi_rc"
 }
 
@@ -1861,6 +1911,7 @@ ensure_deps() {
         die "依赖安装失败：${need[*]}" '请检查软件源和网络后重试。'
         return 1
     fi
+    hash -r
 }
 
 
@@ -1902,52 +1953,42 @@ svc_reload_units() {
 
 write_service() {
     local name=$1 cmd=$2 args=$3 desc=$4 user=$5 lowport=$6 env=${7:-} rw=${8:-} run=${9:-}
+    local file
+    local -a lines
     if [[ $INIT == systemd ]]; then
-        {
-            printf '%s\n' "$MANAGED_TAG"
-            printf '[Unit]\nDescription=%s\nAfter=network-online.target\nWants=network-online.target\n\n' "$desc"
-            printf '[Service]\nType=simple\n'
-            if [[ -n $run ]]; then printf 'RuntimeDirectory=%s\nRuntimeDirectoryMode=0755\nRuntimeDirectoryPreserve=no\n' "$run"; fi
-            if [[ $user != root ]]; then printf 'User=%s\nGroup=%s\n' "$user" "$user"; fi
-            if [[ -n $env ]]; then printf 'Environment=%s\n' "$env"; fi
-            printf 'ExecStart=%s %s\n' "$cmd" "$args"
-            printf 'Restart=on-failure\nRestartSec=3\nTimeoutStartSec=30\nTimeoutStopSec=15\nLimitNOFILE=1048576\n'
-            if [[ $user != root ]]; then
-                if (( lowport )); then
-                    printf 'AmbientCapabilities=CAP_NET_BIND_SERVICE\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE\n'
-                else
-                    printf 'CapabilityBoundingSet=\n'
-                fi
-                printf 'NoNewPrivileges=true\n'
-            elif [[ $name == zxray-nginx ]]; then
-                # Nginx master needs privileged bind and worker UID/GID transitions.
-                # CAP_KILL is needed for master to signal workers after UID switch.
-                printf 'NoNewPrivileges=true\nCapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_CHOWN\n'
-            fi
-            printf 'ProtectSystem=full\nProtectHome=true\nPrivateTmp=true\n'
-            if [[ -n $rw ]]; then printf 'ReadWritePaths=%s\n' "$rw"; fi
-            printf '\n'
-            printf '[Install]\nWantedBy=multi-user.target\n'
-        } > "$SYSTEMD_DIR/$name.service"
-        chmod 644 "$SYSTEMD_DIR/$name.service"
+        file=$STAGE/$name.service
+        lines=("$MANAGED_TAG" '[Unit]' "Description=$desc" 'After=network-online.target' 'Wants=network-online.target' ''
+            '[Service]' 'Type=simple')
+        if [[ -n $run ]]; then lines+=("RuntimeDirectory=$run" 'RuntimeDirectoryMode=0755' 'RuntimeDirectoryPreserve=no'); fi
+        if [[ $user != root ]]; then lines+=("User=$user" "Group=$user"); fi
+        if [[ -n $env ]]; then lines+=("Environment=$env"); fi
+        lines+=("ExecStart=$cmd $args" 'Restart=on-failure' 'RestartSec=3' 'TimeoutStartSec=30' 'TimeoutStopSec=15' 'LimitNOFILE=1048576')
+        if [[ $user != root ]]; then
+            if (( lowport )); then lines+=('AmbientCapabilities=CAP_NET_BIND_SERVICE' 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE')
+            else lines+=('CapabilityBoundingSet='); fi
+            lines+=('NoNewPrivileges=true')
+        elif [[ $name == zxray-nginx ]]; then
+            # Nginx binds the public port and signals workers after their UID/GID switch.
+            lines+=('NoNewPrivileges=true' 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_KILL CAP_CHOWN')
+        fi
+        lines+=('ProtectSystem=full' 'ProtectHome=true' 'PrivateTmp=true')
+        if [[ -n $rw ]]; then lines+=("ReadWritePaths=$rw"); fi
+        lines+=('' '[Install]' 'WantedBy=multi-user.target')
+        printf '%s\n' "${lines[@]}" > "$file" || return 1
+        atomic_install "$file" "$SYSTEMD_DIR/$name.service" 644
     else
-        {
-            printf '#!/sbin/openrc-run\n%s\n' "$MANAGED_TAG"
-            printf 'name="%s"\n' "$desc"
-            printf 'supervisor="supervise-daemon"\n'
-            printf 'command="%s"\n' "$cmd"
-            printf 'command_args="%s"\n' "$args"
-            if [[ $user != root ]]; then printf 'command_user="%s:%s"\n' "$user" "$user"; fi
-            if [[ -n $env ]]; then printf 'supervise_daemon_args="--env %s"\n' "$env"; fi
-            printf 'pidfile="/run/%s.pid"\n' "$name"
-            printf 'rc_ulimit="-n 1048576"\n'
-            printf 'respawn_delay=3\nrespawn_max=5\nrespawn_period=60\n'
-            printf 'output_log="%s/log/%s.log"\nerror_log="%s/log/%s.log"\n' "$DATA_DIR" "$name" "$DATA_DIR" "$name"
-            printf '\ndepend() {\n    need net\n    after firewall\n}\n'
-            if [[ -n $run ]]; then printf '\nstart_pre() {\n    checkpath --directory --mode 0755 /run/%s\n}\n' "$run"; fi
-        } > "$OPENRC_DIR/$name"
-        chmod 755 "$OPENRC_DIR/$name"
-        sh -n "$OPENRC_DIR/$name"
+        file=$STAGE/$name.openrc
+        lines=('#!/sbin/openrc-run' "$MANAGED_TAG" "name=\"$desc\"" 'supervisor="supervise-daemon"'
+            "command=\"$cmd\"" "command_args=\"$args\"")
+        if [[ $user != root ]]; then lines+=("command_user=\"$user:$user\""); fi
+        if [[ -n $env ]]; then lines+=("supervise_daemon_args=\"--env $env\""); fi
+        lines+=("pidfile=\"/run/$name.pid\"" 'rc_ulimit="-n 1048576"' 'respawn_delay=3' 'respawn_max=5' 'respawn_period=60'
+            "output_log=\"$DATA_DIR/log/$name.log\"" "error_log=\"$DATA_DIR/log/$name.log\"" ''
+            'depend() {' '    need net' '    after firewall' '}')
+        if [[ -n $run ]]; then lines+=('' 'start_pre() {' "    checkpath --directory --mode 0755 /run/$run" '}'); fi
+        printf '%s\n' "${lines[@]}" > "$file" || return 1
+        sh -n "$file" || return 1
+        atomic_install "$file" "$OPENRC_DIR/$name" 755
     fi
 }
 
@@ -1957,10 +1998,11 @@ grant_lowport() {
     if (( want )); then
         if ! have setcap; then
             local added=''
-            pkg_install_tracked added libcap-setcap >/dev/null 2>&1 || true
+            pkg_install_tracked added libcap-setcap >>"${STEP_LOG:-/dev/null}" 2>&1 || {
+                die '安装或记录 setcap 软件包失败，已停止修改。'; return 1;
+            }
             if [[ -n $added ]]; then
-                [[ ! -d $TX ]] || tr -s ' ' '\n' <<< "$added" >> "$TX/new-packages"
-                st_filter --argjson add "$(json_words "$added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)'
+                st_filter --argjson add "$(json_words "$added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)' || return 1
             fi
         fi
         have setcap || { die '缺少 setcap，服务没法以普通用户监听 1024 以下的端口。'; return 1; }
@@ -2653,10 +2695,14 @@ tx_rollback() {
         else failed=1; fi
     fi
     if [[ -f $TX/pkgs-before ]]; then
-        local package_state
+        local package_state package_added
         if package_state=$(pkg_snapshot); then
-            comm -13 "$TX/pkgs-before" <(printf '%s\n' "$package_state") >> "$TX/new-packages" 2>/dev/null \
-                || ui_warn '无法核对新增软件包，未确认的依赖将保留。'
+            if package_added=$(pkg_added_since "$TX/pkgs-before" "$package_state" 2>/dev/null); then
+                if [[ -n $package_added ]]; then
+                    printf '%s\n' "$package_added" >> "$TX/new-packages" \
+                        || ui_warn '无法记录新增软件包，未确认的依赖将保留。'
+                fi
+            else ui_warn '无法核对新增软件包，未确认的依赖将保留。'; fi
         else ui_warn '无法读取软件包状态，未确认的依赖将保留。'; fi
     fi
     if [[ -s $TX/new-packages ]]; then
@@ -2723,7 +2769,8 @@ tx_recover_if_needed() {
 clean_stale_stages() {
     local d
     for d in "$STAGE_BASE".*; do
-        [[ -d $d ]] && rm -rf -- "$d"
+        [[ -d $d && $d != "$STAGE" ]] || continue
+        rm -rf -- "$d" || { die "无法清理历史临时目录：$d"; return 1; }
     done
     return 0
 }
@@ -2752,7 +2799,9 @@ on_action_error() {
     esac
     kill_jobs
     if (( TX_ACTIVE )); then tx_rollback; fi
-    [[ -z $STAGE ]] || rm -rf -- "$STAGE"
+    if [[ -n $STAGE ]] && ! rm -rf -- "$STAGE"; then
+        ui_warn "临时目录未能清理，日志和 JSON 可能仍在：$STAGE"
+    fi
     exit "$code"
 }
 
@@ -2766,7 +2815,10 @@ on_action_exit() {
     if (( rc != 0 )); then ui_step_fail; fi
     kill_jobs
     if (( TX_ACTIVE && ! KEEP_TX )); then tx_rollback; fi
-    [[ -z $STAGE ]] || rm -rf -- "$STAGE"
+    if [[ -n $STAGE ]] && ! rm -rf -- "$STAGE"; then
+        ui_warn "临时目录未能清理，日志和 JSON 可能仍在：$STAGE"
+        if (( rc == 0 || rc == 20 || rc == RC_QUIET )); then rc=1; fi
+    fi
     exit "$rc"
 }
 
@@ -3110,7 +3162,7 @@ detect_public_ips() {
     if has_ipv6_stack; then
         for u in https://api64.ipify.org https://ipv6.icanhazip.com https://v6.ident.me; do
             NET_V6=$(curl -6 -fsS --connect-timeout 3 --max-time 6 "$u" 2>/dev/null | tr -d '[:space:]' || true)
-            if [[ $NET_V6 == *:* ]] && valid_ipv6 "$NET_V6"; then break; fi
+            if valid_ipv6 "$NET_V6"; then NET_V6=${NET_V6,,}; break; fi
             NET_V6=''
         done
     fi
@@ -3127,6 +3179,11 @@ listeners() {
     [[ $1 == udp ]] && flag=-lunp
     rows=$(timeout -k 2 5 ss -H "$flag" 2>>"${STEP_LOG:-/dev/null}") || return 2
     awk -v p="$2" '{n = split($4, a, ":"); if (a[n] == p) print}' <<< "$rows"
+}
+
+listener_has_pid() {
+    local field="(^|[,([:space:]])pid=$2([,)[:space:]]|$)"
+    [[ $2 =~ ^[1-9][0-9]*$ && $1 =~ $field ]]
 }
 
 nginx_worker_owned() {
@@ -3255,7 +3312,7 @@ sni_pool() {
     local -a pool=()
     f=$(sni_pool_file)
     if [[ -f $f ]]; then
-        while IFS= read -r d; do
+        while IFS= read -r d || [[ -n $d ]]; do
             d=${d%%#*}
             d=${d//[[:space:]]/}
             [[ -n $d ]] || continue
@@ -3413,20 +3470,33 @@ uri_decode() {
     printf '%s' "$out"
 }
 
-query_get() {
-    local query=$1 key=$2 pair k
+parse_link_query() {
+    local protocol=$1 query=$2 pair key raw_value value
+    local -n result=$3
     local -a pairs=()
+    [[ $query != *[[:cntrl:]]* ]] || { PARSE_ERR='查询参数含控制字符'; return 1; }
     IFS='&' read -r -a pairs <<< "$query"
     for pair in "${pairs[@]}"; do
-        k=$(uri_decode "${pair%%=*}") || return 2
-        if [[ $k == "$key" ]]; then
-            local v=${pair#*=}
-            [[ $pair == *=* ]] || v=''
-            uri_decode "${v//+/ }"
-            return $?
+        [[ -n $pair ]] || continue
+        key=$(uri_decode "${pair%%=*}") || { PARSE_ERR='参数名称编码不正确'; return 1; }
+        raw_value=''
+        [[ $pair != *=* ]] || raw_value=${pair#*=}
+        value=$(uri_decode "$raw_value") || { PARSE_ERR='参数值编码不正确'; return 1; }
+        if [[ $protocol == ss ]]; then
+            # SIP002 exporters may include optional metadata.
+            case $key in plugin|type) ;; *) continue ;; esac
+        else
+            case $key in
+                serverName) key=sni ;; publicKey) key=pbk ;; shortId) key=sid ;;
+                fingerprint) key=fp ;; spiderX) key=spx ;;
+                security|encryption|flow|type|sni|pbk|sid|fp|spx|headerType) ;;
+                *) PARSE_ERR="暂不支持的参数：$key"; return 1 ;;
+            esac
         fi
+        [[ -z ${result[$key]+x} ]] || { PARSE_ERR="参数重复：$key"; return 1; }
+        result[$key]=$value
     done
-    return 1
+    return 0
 }
 
 b64_decode_relaxed() {
@@ -3482,22 +3552,10 @@ parse_ss_link() {
     if [[ $main == *\?* ]]; then
         query=${main#*\?}
         main=${main%%\?*}
-        uri_decode "$query" >/dev/null || { PARSE_ERR='查询参数编码不正确'; return 1; }
-        local qv pair key seen='|'
-        local -a pairs=()
-        IFS='&' read -r -a pairs <<< "$query"
-        for pair in "${pairs[@]}"; do
-            key=$(uri_decode "${pair%%=*}") || { PARSE_ERR='查询参数编码不正确'; return 1; }
-            case $key in
-                plugin|type)
-                    [[ $seen != *"|$key|"* ]] || { PARSE_ERR="参数重复：$key"; return 1; }
-                    seen+="$key|" ;;
-            esac
-        done
-        qv=$(query_get "$query" plugin || true)
-        [[ -z $qv ]] || { PARSE_ERR='不支持带插件（plugin）的 SS 链接'; return 1; }
-        qv=$(query_get "$query" type || true)
-        case $qv in ''|tcp|raw) ;; *) PARSE_ERR="只支持 TCP 类型的 SS 落地（当前 $qv）"; return 1 ;; esac
+        local -A params=()
+        parse_link_query ss "$query" params || return 1
+        [[ -z ${params[plugin]:-} ]] || { PARSE_ERR='不支持带插件（plugin）的 SS 链接'; return 1; }
+        case ${params[type]:-} in ''|tcp|raw) ;; *) PARSE_ERR="只支持 TCP 类型的 SS 落地（当前 ${params[type]}）"; return 1 ;; esac
     fi
     main=${main%/}
     if [[ $main == *@* ]]; then
@@ -3546,7 +3604,8 @@ parse_ss_link() {
 }
 
 parse_vless_link() {
-    local link=$1 body main frag id rest hostport query key pair canonical seen='|'
+    local link=$1 body main frag id rest hostport query
+    local -A params=()
     local security encryption flow net sni pbk sid fp spx header
     body=${link#vless://}
     main=${body%%#*}
@@ -3561,33 +3620,11 @@ parse_vless_link() {
     valid_vless_id "$id" || { PARSE_ERR='用户 ID 应为 UUID 或 1-30 字节的有效文本'; return 1; }
     hostport=$(uri_decode "$hostport") || { PARSE_ERR='百分号编码不正确'; return 1; }
     parse_hostport "$hostport" || return 1
-    local -a pairs=()
-    [[ -z $query ]] || IFS='&' read -r -a pairs <<< "$query"
-    for pair in "${pairs[@]}"; do
-        key=${pair%%=*}
-        case $key in
-            serverName) canonical=sni ;; publicKey) canonical=pbk ;; shortId) canonical=sid ;;
-            fingerprint) canonical=fp ;; spiderX) canonical=spx ;; *) canonical=$key ;;
-        esac
-        if [[ $seen == *"|$canonical|"* ]]; then PARSE_ERR="参数重复：$key"; return 1; fi
-        seen+="$canonical|"
-        case $key in
-            security|encryption|flow|type|sni|serverName|pbk|publicKey|sid|shortId|fp|fingerprint|spx|spiderX|headerType) ;;
-            *) PARSE_ERR="暂不支持的参数：$key"; return 1 ;;
-        esac
-        local v=${pair#*=}
-        uri_decode "$v" >/dev/null || { PARSE_ERR='百分号编码不正确'; return 1; }
-    done
-    security=$(query_get "$query" security || true)
-    encryption=$(query_get "$query" encryption || true)
-    flow=$(query_get "$query" flow || true)
-    net=$(query_get "$query" type || true)
-    sni=$(query_get "$query" sni || query_get "$query" serverName || true)
-    pbk=$(query_get "$query" pbk || query_get "$query" publicKey || true)
-    sid=$(query_get "$query" sid || query_get "$query" shortId || true)
-    fp=$(query_get "$query" fp || query_get "$query" fingerprint || true)
-    spx=$(query_get "$query" spx || query_get "$query" spiderX || true)
-    header=$(query_get "$query" headerType || true)
+    parse_link_query vless "$query" params || return 1
+    security=${params[security]:-} encryption=${params[encryption]:-}
+    flow=${params[flow]:-} net=${params[type]:-}
+    sni=${params[sni]:-} pbk=${params[pbk]:-} sid=${params[sid]:-}
+    fp=${params[fp]:-} spx=${params[spx]:-} header=${params[headerType]:-}
     [[ -n $net && $net != raw ]] || net=tcp
     [[ $net == tcp ]] || { PARSE_ERR="只支持 TCP 类型的 VLESS 落地（当前 $net）"; return 1; }
     case $security in ''|none|reality) ;; *) PARSE_ERR="只支持 none 或 reality（当前 $security）"; return 1 ;; esac
@@ -3616,7 +3653,7 @@ parse_vless_link() {
         [[ -n $sni && -n $pbk ]] || { PARSE_ERR='REALITY 落地缺少 sni 或 pbk'; return 1; }
         valid_domain "$sni" || { PARSE_ERR="sni 不是合法的域名：$sni"; return 1; }
         [[ $pbk =~ ^[A-Za-z0-9_-]{43}$ ]] || { PARSE_ERR='pbk 格式不对'; return 1; }
-        [[ -z $sid || ( $sid =~ ^[0-9a-fA-F]{2,16}$ && $(( ${#sid} % 2 )) == 0 ) ]] || { PARSE_ERR='sid 应是 2-16 位十六进制'; return 1; }
+        [[ -z $sid ]] || valid_short_id "$sid" || { PARSE_ERR='sid 须为 2–16 位十六进制字符，位数须为偶数'; return 1; }
         [[ -n $fp ]] || fp=chrome
         case $fp in
             chrome|firefox|safari|ios|android|edge|360|qq|random|randomized|randomizednoalpn) ;;
@@ -3700,14 +3737,19 @@ st_sets() { st_filter --arg v "$2" "$1 = \$v"; }
 
 load_state_draft() {
     DRAFT=$STAGE/draft.json
-    cp -f -- "$STATE" "$DRAFT"
-    # Existing installations must not re-emit a former Firefox fingerprint.
-    if [[ $(st .reality.fp) != chrome ]]; then st_sets .reality.fp chrome; fi
-    if [[ $(st .core.xray) == compat ]]; then st_sets .core.xray latest; fi
-    # STATE_SCHEMA stays 5: read old state.json without losing existing installation.
-    # Only these additive settings are changed. All user identities are preserved.
-    st_filter '.egress = {cn: (.egress.cn // 0), bt: (.egress.bt // 0)}'
+    cp -f -- "$STATE" "$DRAFT" || return 1
+    normalize_draft_for_apply
+}
+
+normalize_draft_layout() {
+    if [[ $(st .core.xray) == compat ]]; then st_sets .core.xray latest || return 1; fi
+    st_filter '.egress = {cn: (.egress.cn // 0), bt: (.egress.bt // 0)}' || return 1
     normalize_landing_outbounds
+}
+
+normalize_draft_for_apply() {
+    normalize_draft_layout || return 1
+    if scheme_has_reality "$(scheme)" && [[ $(st .reality.fp) != chrome ]]; then st_sets .reality.fp chrome; fi
 }
 
 scheme() { st .scheme; }
@@ -4093,7 +4135,7 @@ cs_build() {
     local -a note=('推荐，各种客户端都能用' '可选 XMUX' '需要双栈'
         '客户端支持最广' '抗量子握手' '两个入口，各给一条链接' '三个入口，各给一条链接'
         '需要双栈')
-    local -a group=([0]='REALITY：借用伪装站点的 TLS 握手' [3]='不需要伪装站点' [5]='多入口组合' [7]='实验')
+    local -a group=([0]='REALITY' [3]='落地或专线' [5]='多协议混合' [7]='实验性方案')
     ui_page '选择方案'
     for i in "${!SCHEMES[@]}"; do
         if [[ -n ${group[$i]:-} ]]; then
@@ -4268,28 +4310,35 @@ first_value() {
 }
 
 pv_snapshot() {
-    local src=${1:-$DRAFT} saved=$DRAFT key
+    local src=${1:-$DRAFT} key
+    local DRAFT=$STAGE/pv-base.json
+    cp -f -- "$src" "$DRAFT" || return 1
+    # Compare equivalent state layouts. Keep the installed fingerprint and IPs
+    # in this baseline so actual changes to client links remain visible.
+    normalize_draft_layout || return 1
     PV_ORIG=() PV_FP=()
-    DRAFT=$src
     # Hidden fields can become visible after a guard/scheme change.
     for key in port sni addr name landings xhttp split ssm encp guard conn limit egress system; do
         PV_ORIG[$key]=$(item_value "$key")
         PV_FP[$key]=$(item_fp "$key")
     done
-    DRAFT=$saved
-    cp -f -- "$src" "$STAGE/pv-base.json"
-}
-
-link_fields() {
-    jq -S -c '{scheme, name, net: (.net | {host, v4, v6}),
-        reality: (.reality | {port, sni, fp, public_key, short_id}), xhttp, enc: (.enc | del(.ticket, .server_key)), ss,
-        v6_link: (if .net.host == .net.v4 and (.net.v6 // "") != "" then (.net.v6_link // 1) else null end),
-        users: [.users[] | {name, id, port}], landings: [.landings[] | .tag]}' "$1"
 }
 
 links_will_change() {
-    [[ -f $STAGE/pv-base.json ]] || return 0
-    [[ $(link_fields "$STAGE/pv-base.json") != "$(link_fields "$DRAFT")" ]]
+    local old=$STAGE/nodes-before.json preview=$STAGE/pv-nodes.ndjson err=$STAGE/pv-nodes.err rc=0 NODES_TMP
+    [[ -r $old ]] || old=$NODES_JSON
+    [[ -r $old ]] || return 2
+    render_nodes "$preview" 2>"$err" || return 2
+    [[ ! -s $err ]] || return 2
+    # Compare the subscriptions actually published and rendered, including legacy fingerprints.
+    jq -ne --slurpfile before "$old" --slurpfile after "$preview" '
+        def links:
+            select(type == "array" and length > 0 and all(.[];
+                (.label | type == "string") and (.link | type == "string" and length > 0)))
+            | map([.label, .link]) | sort;
+        select(($before | length) == 1) | ($before[0] | links) != ($after | links)
+    ' >/dev/null 2>>"$err" || rc=$?
+    case $rc in 0|1) return "$rc" ;; *) return 2 ;; esac
 }
 
 item_fp() {
@@ -4308,7 +4357,8 @@ item_fp() {
         conn) f='[.reality.conn_ip, .reality.conn_total]' ;;
         limit) f='[.reality.limit, .reality.limit_custom, .reality.limit_jitter]' ;;
         egress) f='[.egress.cn // 0, .egress.bt // 0]' ;;
-        system) f='[.outbound, .bbr, .firewall, .core, .reality.public_key, .enc.client_key,
+        system) f='[.outbound, .bbr, .firewall, .core, (.reality.fp | if . == null or . == "" then "chrome" else . end),
+                    .reality.public_key, .reality.short_id, .enc.client_key,
                     [.users[] | select(.out == "direct") | .id]]' ;;
         *) f='null' ;;
     esac
@@ -4410,7 +4460,7 @@ preview_ready() {
 PC_TITLE='应用修改'
 
 pc_build() {
-    local key cur o v n=0 lab m i shown
+    local key cur o v n=0 lab m i shown links_rc=0
     local -a ol=() nl=()
     ui_page "$PC_TITLE" "$(scheme_label "$(scheme)")"
     if [[ $(jq -r .scheme "$STAGE/pv-base.json") != "$(scheme)" ]]; then
@@ -4445,8 +4495,12 @@ pc_build() {
     fi
     if (( n == 0 )); then ui_line '没有修改，会按当前设置重新生成配置并重启服务。'; fi
     ui_blank
-    if links_will_change; then ui_warn '应用后请从订阅导入新增或变更的节点。'
-    else ui_ok '节点链接不变，客户端不用改动。'; fi
+    links_will_change || links_rc=$?
+    case $links_rc in
+        0) ui_warn '应用后请从订阅导入新增或变更的节点。' ;;
+        1) ui_ok '节点链接不变，客户端不用改动。' ;;
+        *) ui_warn '无法确认节点链接是否变化，应用后请核对节点列表。' ;;
+    esac
     ui_rule
     tui_item 1 "$PC_TITLE" '' '写入配置并重启服务'
     tui_item 2 '再看看' '' '回到上一页'
@@ -4521,13 +4575,19 @@ confirm_identity_change() {
 }
 
 input_page() {
-    local title=$1 sub=$2 hint=$3
+    local title=$1 sub=$2 hint=$3 width
     shift 3
     ui_page "$title" "$sub"
     [[ -z $hint ]] || ui_hint "$hint"
     ui_blank
     while (( $# >= 2 )); do
-        ui_kv "$1" "$2"
+        str_width "$2" width
+        if (( width <= UI_W - 2 - LABEL_W )); then
+            ui_kv "$1" "$2"
+        else
+            ui_line "$1"
+            ui_line "$2"
+        fi
         shift 2
     done
     ui_footer '回车 确认   q/Esc 取消'
@@ -4653,7 +4713,10 @@ edit_addr() {
         while :; do
             read_line 'IPv6：' v "$v6" numeric || return 0
             [[ -n $v && $v != "$v6" ]] || break
-            if valid_ipv6 "$v" && ! unusable_endpoint_ip "$v"; then v6=$v; break; fi
+            if valid_ipv6 "$v" && ! unusable_endpoint_ip "$v"; then
+                [[ $(ip_key "$v") == "$(ip_key "$v6")" ]] || v6=${v,,}
+                break
+            fi
             ui_warn '请填写可访问的 IPv6，不能使用环回或未指定地址。'
         done
         if [[ $v4 != "$(st .net.v4)" || $v6 != "$(st .net.v6)" ]]; then
@@ -5153,8 +5216,10 @@ edit_egress() {
 SYS_KEYS=()
 
 sy_build() {
-    local v fw s count
+    local v fw s count reality=0 enc=0
     s=$(scheme)
+    if scheme_has_reality "$s"; then reality=1; fi
+    if needs_enc_keys; then enc=1; fi
     ui_page '高级设置'
     SYS_KEYS=(outbound bbr)
     tui_item 1 '出站 IP' "$(outbound_label "$(st .outbound)")" '访问网站时用哪种 IP' '服务器访问目标网站时先用哪种 IP。'
@@ -5165,14 +5230,22 @@ sy_build() {
         count=$(jq '[.users[] | select(.out == "direct")] | length' "$DRAFT")
         tui_item "${#SYS_KEYS[@]}" 'UUID' "$count 个直出身份" '' '可以新增 UUID，也可以修改主节点的 UUID。'
     fi
-    if scheme_has_reality "$s"; then
+    if (( reality )); then
         SYS_KEYS+=(reality_pair)
-        tui_item "${#SYS_KEYS[@]}" 'REALITY 密钥' 'X25519' '' '导入私钥和公钥，应用到使用 REALITY 的节点。'
+        v='X25519'
+        if (( enc )); then v="REALITY / $v"; fi
+        tui_item "${#SYS_KEYS[@]}" '密钥对' "$v" '' '导入 REALITY 的私钥和公钥。'
     fi
-    if needs_enc_keys; then
+    if (( enc )); then
         SYS_KEYS+=(enc_pair)
-        if [[ $(st .enc.auth) == mlkem768 ]]; then v='ML-KEM-768'; else v='X25519'; fi
-        tui_item "${#SYS_KEYS[@]}" 'VLESS 密钥' "$v" '' '导入与当前 VLESS-ENC 认证方式匹配的密钥对。'
+        v=$(auth_label "$(st .enc.auth)")
+        if (( reality )); then v="VLESS-ENC / $v"; fi
+        tui_item "${#SYS_KEYS[@]}" '密钥对' "$v" '' '导入 VLESS-ENC 当前认证方式的私钥和公钥。'
+    fi
+    if (( reality )); then
+        SYS_KEYS+=(short_id)
+        v=$(st .reality.short_id)
+        tui_item "${#SYS_KEYS[@]}" 'shortId' "${v:-自动生成}" '' 'REALITY 客户端使用的短标识。'
     fi
     fw=$(fw_kind)
     if [[ -n $fw ]]; then
@@ -5234,13 +5307,48 @@ edit_bbr() {
     if [[ $c == 1 ]]; then st_set .bbr 1; else st_set .bbr 0; fi
 }
 
+edit_short_id() {
+    local current value hint='填 2–16 位十六进制字符，位数须为偶数。留空保留当前设置。'
+    current=$(st .reality.short_id)
+    if [[ $MODE == modify ]]; then hint+=$'\n应用后，使用 REALITY 的客户端需同步 shortId。'; fi
+    input_page 'shortId' 'REALITY' "$hint" '当前' "${current:-安装时自动生成}"
+    while :; do
+        read_line '新 shortId：' value '' numeric || return 0
+        [[ -n $value ]] || return 0
+        if ! valid_short_id "$value"; then
+            ui_warn '需为 2–16 位，长度为偶数，只能使用 0–9 和 A–F（不区分大小写）。'
+            continue
+        fi
+        [[ ${value,,} != "${current,,}" ]] || return 0
+        st_sets .reality.short_id "${value,,}"
+        TUI_MSG='shortId 已写入草稿。'
+        return 0
+    done
+}
+
 
 edit_uuid() {
-    local choice value title primary
-    option_page choice 0 'UUID' '' '新增 UUID|为本机直出添加一个节点，原节点继续可用' '修改主 UUID|指定主节点使用的 UUID'
+    local choice value title primary row name
+    local -a extra=() opts=('新增 UUID|为本机直出添加一个节点，原节点继续可用' '修改主 UUID|指定主节点使用的 UUID')
+    mapfile -t extra < <(jq -r '.users[] | select(.out == "direct" and (.name | test("^uuid[0-9]+$")))
+        | "\(.name)|\(.id)"' "$DRAFT")
+    if (( ${#extra[@]} )); then opts+=('管理附加 UUID|查看或删除已添加的身份'); fi
+    option_page choice 0 'UUID' '' "${opts[@]}"
     case $choice in
         1) title='新增 UUID' ;;
         2) title='修改主 UUID' ;;
+        3)
+            option_page choice 0 '附加 UUID' '选择身份可查看完整 UUID 或删除。' "${extra[@]}"
+            [[ -n $choice ]] || return 0
+            row=${extra[$(( choice - 1 ))]}
+            name=${row%%|*} value=${row#*|}
+            ui_page '附加 UUID' "$name"
+            ui_line "$value"
+            ask_no '删除此身份？应用修改后，对应节点将失效' || return 0
+            st_filter --arg name "$name" --arg id "$value" 'del(.users[] | select(
+                .out == "direct" and (.name | test("^uuid[0-9]+$")) and .name == $name and .id == $id))' || return 1
+            TUI_MSG="$name 已从草稿移除。"
+            return 0 ;;
         *) return 0 ;;
     esac
     primary=$(st '.users[] | select(.name == "direct") | .id')
@@ -5342,6 +5450,7 @@ edit_core() {
             if [[ $c == 1 ]]; then st_sets .core.ss latest; continue; fi
             input_page 'SS-Rust 版本' '指定版本' '填写 shadowsocks-rust 的版本号，例如 v1.24.0。'
             iv=$(installed_version ss)
+            [[ $(st .core.ss) == latest ]] || iv=$(st .core.ss)
             ask_core_version "${iv:-v1.24.0}" v || continue
             st_sets .core.ss "$v"
         fi
@@ -5350,6 +5459,8 @@ edit_core() {
 
 
 
+# On Linux, Xray's Go wildcard listener and SS-Rust's ipv6_only:false
+# request a dual-stack socket even when net.ipv6.bindv6only defaults to 1.
 listen_any() { if has_ipv6_stack; then printf '::'; else printf '0.0.0.0'; fi; }
 
 base_final_rules_json() {
@@ -5676,6 +5787,7 @@ events {
 }
 
 stream {
+    map_hash_bucket_size 512;
     map \$ssl_preread_server_name \$zxray_backend {
         $sni   127.0.0.1:$(st .reality.internal);
         default   unix:$NGINX_RUN/reject.sock;
@@ -5928,14 +6040,15 @@ full_geo_fresh() {
 download_full_geodata() {
     # Same official XTLS/Xray-rules-dat Full / Expanded assets used by Xray-install.
     # Download before touching installed files; verify both compressed archives.
-    local name gz digest got base
+    local name gz digest got base tag
     FULL_GEO_DIR=$STAGE/core/full-geodata
-    mkdir -p -- "$FULL_GEO_DIR"
-    base=https://github.com/XTLS/Xray-rules-dat/releases/latest/download
+    mkdir -p -- "$FULL_GEO_DIR" || return 1
+    tag=$(latest_tag XTLS/Xray-rules-dat) || return 1
+    base="https://github.com/XTLS/Xray-rules-dat/releases/download/$tag"
     for name in geoip-full geosite-expand; do
         gz=$name.dat.gz
-        fetch "$base/$gz" "$FULL_GEO_DIR/$gz"
-        fetch "$base/$gz.sha256sum" "$FULL_GEO_DIR/$gz.sha256sum"
+        fetch "$base/$gz" "$FULL_GEO_DIR/$gz" || return 1
+        fetch "$base/$gz.sha256sum" "$FULL_GEO_DIR/$gz.sha256sum" || return 1
         digest=$(awk 'NR==1 {print $1}' "$FULL_GEO_DIR/$gz.sha256sum")
         [[ $digest =~ ^[0-9a-fA-F]{64}$ ]] || {
             die "$gz 的 SHA-256 文件格式不正确。"; return 1;
@@ -6012,17 +6125,28 @@ validate_xray_config() {
 }
 
 validate_ss_rust() {
-    local cfg=$1 acl=$2 p child ok=0 k rc=1
+    local cfg=$1 acl=$2 p child ok=0 k rc=0 mode proto rows
+    local -a protocols
     p=$(random_free_port) || return 1
-    jq --argjson p "$p" '.server = "127.0.0.1" | .server_port = $p' "$cfg" > "$STAGE/ss-check.json"
+    jq -e --argjson p "$p" '.server = "127.0.0.1" | .server_port = $p' "$cfg" > "$STAGE/ss-check.json" || return 1
+    mode=$(jq -r '.mode // "tcp_only"' "$STAGE/ss-check.json") || return 1
+    case $mode in
+        tcp_and_udp) protocols=(tcp udp) ;;
+        tcp_only) protocols=(tcp) ;;
+        udp_only) protocols=(udp) ;;
+        *) die 'SS-Rust 配置中的监听模式无效。'; return 1 ;;
+    esac
     "$USE_SS" -c "$STAGE/ss-check.json" --acl "$acl" >> "$STEP_LOG" 2>&1 3>&- 4>&- 9>&- &
     child=$!
     for k in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.3
         if ! kill -0 "$child" 2>/dev/null; then break; fi
-        rc=0; port_listening tcp "$p" || rc=$?
-        (( rc <= 1 )) || break
-        if (( rc == 0 )); then ok=1; break; fi
+        for proto in "${protocols[@]}"; do
+            rows=$(listeners "$proto" "$p") || { rc=2; break 2; }
+            listener_has_pid "$rows" "$child" || continue 2
+        done
+        ok=1
+        break
     done
     kill "$child" 2>/dev/null || true
     for k in {1..20}; do
@@ -6046,13 +6170,190 @@ nginx_packages() {
 }
 
 nginx_system_hash() {
-    [[ -d $ROOT/etc/nginx ]] || return 0
-    (cd "$ROOT/etc/nginx" && find . -type f -print0 | sort -z | xargs -0 -r sha256sum) | sha256sum | awk '{print $1}'
+    local format=${1:-v2} sum path
+    [[ -d $ROOT/etc/nginx && ! -L $ROOT/etc/nginx ]] || return 1
+    sum=$(cd "$ROOT/etc/nginx" && {
+        # New v2 hashes always use byte order. old-v2 and legacy reproduce
+        # the original regular-file order in the caller's locale.
+        if [[ $format == v2 ]]; then export LC_ALL=C; fi
+        find . -type f -print0 | sort -z | xargs -0 -r sha256sum || exit 1
+        if [[ $format != legacy ]]; then
+            find . -type l -print0 | LC_ALL=C sort -z | while IFS= read -r -d '' path; do
+                printf '\0%s\0' "$path" && readlink -- "$path" || exit 1
+            done
+        fi
+    } | sha256sum) || return 1
+    [[ $format == legacy ]] || printf 'v2:'
+    printf '%s' "${sum%% *}"
+}
+
+# Read static module links from the package postinst, never execute it.
+nginx_deb_module_link() {
+    local file=$1 owner base=${1##*/} name
+    [[ $base =~ ^[a-zA-Z0-9_.+-]+[.]conf$ ]] || return 1
+    owner=$(timeout -k 2 15 dpkg-query -S "$file") || return 1
+    [[ $owner == *": $file" ]] || return 1
+    owner=${owner%": $file"}
+    [[ $owner =~ ^[a-z0-9][a-z0-9.+-]*(:[a-z0-9-]+)?$ ]] || return 1
+    name=$(timeout -k 2 15 dpkg-query --control-show "$owner" postinst |
+        awk -v base="$base" '
+        function remember(value) {
+            if (found && name != value) bad=1
+            name=value; found=1
+        }
+        function pairs(s, n, a, i, p) {
+            gsub(/^[ \t]+|[ \t]+$/, "", s)
+            n=split(s, a, /[ \t]+/)
+            for (i=1; i<=n; i++) {
+                if (a[i] !~ /^[a-zA-Z0-9_.+-]+[.]conf:[0-9][0-9]-[a-zA-Z0-9_.+-]+[.]conf$/) bad=1
+                else if (split(a[i], p, ":") == 2 && p[1] == base) remember(p[2])
+            }
+        }
+        function literal(s, q) {
+            q=substr(s, 1, 1)
+            if (q == "\"" || q == sprintf("%c", 39)) {
+                if (substr(s, length(s), 1) != q) return ""
+                s=substr(s, 2, length(s)-2)
+            }
+            return s
+        }
+        {
+            line=continued $0; continued=""
+            if (sub(/\\$/, "", line)) {continued=line; next}
+            sub(/[ \t]+#.*/, "", line)
+            gsub(/^[ \t]+|[ \t]+$/, "", line)
+            if (line == "" || line ~ /^#/) next
+            if (!pending && sub(/^for[ \t]+confpair[ \t]+in([ \t]+|$)/, "", line)) pending=1
+            if (pending) {
+                if (line == "do" || sub(/;[ \t]*do$/, "", line)) {
+                    if (line == "do") {line=""; sub(/;[ \t]*$/, "", header)}
+                    pairs(header " " line); header=""; pending=0
+                } else header=header " " line
+                next
+            }
+            if (line !~ /^ln[ \t]+/) next
+            sub(/[ \t]*;$/, "", line)
+            n=split(line, a, /[ \t]+/); i=2; flags=""
+            while (a[i] ~ /^-[sfnT]+$/) {flags=flags a[i]; i++}
+            if (a[i] == "--") i++
+            if (!index(flags, "s") || n != i+1) next
+            from=literal(a[i]); to=literal(a[i+1])
+            if (from != "/usr/share/nginx/modules-available/" base) next
+            if (!sub(/^\/etc\/nginx\/modules-enabled\//, "", to)) bad=1
+            else remember(to)
+        }
+        END {if (bad || pending || continued != "" || !found) exit 1; print name}') || return 1
+    [[ $name == [0-9][0-9]-"$base" ]] || return 1
+    printf '%s' "$name"
+}
+
+# Only adopt a changed baseline when the installed packages account for the
+# configuration. In particular dpkg does not record the targets of symlinks.
+nginx_stock_config() {
+    local paths changes dir=$ROOT/etc/nginx file target name
+    local -A module_links=()
+    (( $# )) && [[ -d $dir && ! -L $dir ]] || return 1
+    case $PKG in
+        apt)
+            paths=$(timeout -k 2 15 dpkg-query -L "$@") && changes=$(timeout -k 2 30 dpkg --verify "$@" 2>&1) || return 1
+            while IFS= read -r file; do
+                case $file in
+                    /etc/nginx/modules) [[ -L $dir/modules ]] || return 1 ;;
+                    /etc/nginx/sites-available/default) [[ -L $dir/sites-enabled/default ]] || return 1 ;;
+                    /usr/share/nginx/modules-available/*.conf)
+                        name=$(nginx_deb_module_link "$file") || return 1
+                        module_links["$name"]=$file
+                        [[ -L $dir/modules-enabled/$name ]] || return 1 ;;
+                esac
+            done <<< "$paths" ;;
+        dnf|yum)
+            paths=$(timeout -k 2 15 rpm -ql "$@") && changes=$(timeout -k 2 30 rpm -V --noscripts --nodeps "$@" 2>&1) || return 1 ;;
+        apk)
+            # Full audits normally skip protected /etc files. Override that
+            # filter for this read-only check of the Nginx configuration.
+            changes=$(timeout -k 2 30 apk audit --full --protected-paths /dev/null --recursive "$dir" 2>&1) && [[ -z $changes ]]
+            return ;;
+        *) return 1 ;;
+    esac
+    [[ -z $changes ]] || return 1
+    find "$dir" ! -type d -print0 | while IFS= read -r -d '' file; do
+        if [[ $PKG == apt && -L $file ]]; then
+            target=$(readlink -- "$file") || exit 1
+            case $file in
+                "$dir/modules")
+                    [[ $target == /usr/lib/nginx/modules || $target == ../../usr/lib/nginx/modules ]] || exit 1
+                    [[ -d $ROOT/usr/lib/nginx/modules && ! -L $ROOT/usr/lib/nginx/modules ]] || exit 1
+                    grep -Fx -- /etc/nginx/modules <<< "$paths" >/dev/null || exit 1
+                    grep -Fx -- /usr/lib/nginx/modules <<< "$paths" >/dev/null || exit 1
+                    continue ;;
+                "$dir/sites-enabled/default")
+                    [[ $target == ../sites-available/default || $target == /etc/nginx/sites-available/default ]] || exit 1
+                    file=$dir/sites-available/default ;;
+                "$dir/modules-enabled/"[0-9][0-9]-*.conf)
+                    name=${file##*/}
+                    [[ $name =~ ^[0-9][0-9]-[a-zA-Z0-9_.+-]+[.]conf$ && -n $target ]] || exit 1
+                    [[ ${module_links["$name"]:-} == "$target" ]] || exit 1
+                    file=$ROOT$target ;;
+                *) exit 1 ;;
+            esac
+            [[ -f $file && ! -L $file ]] || exit 1
+        fi
+        grep -Fx -- "${file#"$ROOT"}" <<< "$paths" >/dev/null || exit 1
+    done
+}
+
+nginx_hash_matches() {
+    local baseline=$1 current format loc key first_utf8=''
+    local effective=${LC_ALL:-${LC_COLLATE:-${LANG:-C}}}
+    local -a candidates=()
+    local -A installed=([c]=C) tried=()
+    shift
+    if [[ $baseline =~ ^v2:[0-9a-f]{64}$ ]]; then
+        current=$(nginx_system_hash) || return 1
+        [[ $current != "$baseline" ]] || return 0
+        (( $# )) || return 1
+        format=old-v2
+    elif [[ $baseline =~ ^[0-9a-f]{64}$ ]]; then
+        # This old hash did not cover symlinks. Verify package defaults too.
+        nginx_stock_config "$@" || return 1
+        format=legacy
+    else
+        return 1
+    fi
+    current=$(nginx_system_hash "$format") || return 1
+    [[ $current != "$baseline" ]] || return 0
+    # Older installs used the UI/SSH locale. Only retry stock files, and
+    # always require the original digest; package defaults alone are not proof.
+    if [[ $format == old-v2 ]]; then nginx_stock_config "$@" || return 1; fi
+    key=${effective,,}; key=${key//-/}; [[ $key != posix ]] || key=c
+    tried[$key]=1
+    # v2 already checked this exact hash with LC_ALL=C.
+    if [[ $format == old-v2 ]]; then tried[c]=1; fi
+    while IFS= read -r loc; do
+        [[ -n $loc ]] || continue
+        key=${loc,,}; key=${key//-/}; [[ $key != posix ]] || key=c
+        [[ -n ${installed[$key]:-} ]] || installed[$key]=$loc
+        case $key in *utf8*) [[ -n $first_utf8 ]] || first_utf8=$loc ;; esac
+    done < <(locale -a 2>/dev/null || true)
+    # At most six candidates, regardless of locales-all size. Match aliases
+    # to installed names so unsupported locales never cause retry warnings.
+    candidates=(C C.UTF-8 en_US.UTF-8 "$first_utf8" "${LANG:-}" "${LC_CTYPE:-}")
+    for loc in "${candidates[@]}"; do
+        [[ -n $loc ]] || continue
+        key=${loc,,}; key=${key//-/}; [[ $key != posix ]] || key=c
+        [[ -n ${installed[$key]:-} && -z ${tried[$key]:-} ]] || continue
+        tried[$key]=1
+        loc=${installed[$key]}
+        current=$(LC_ALL="$loc" nginx_system_hash "$format") || return 1
+        [[ $current != "$baseline" ]] || return 0
+    done
+    return 1
 }
 
 nginx_install_batch() {
-    local __nb_var=$1 __nb_shared=$2 __nb_plan __nb_op __nb_pkg __nb_rest __nb_after __nb_added='' __nb_rc=0 __nb_mask='' __nb_mrc=0
+    local __nb_var=$1 __nb_shared=$2 __nb_plan __nb_op __nb_pkg __nb_rest __nb_before __nb_after __nb_added='' __nb_rc=0 __nb_mask='' __nb_mrc=0
     shift 2
+    printf -v "$__nb_var" '%s' ''
     local -a __nb_args=("$@")
     [[ -f $TX/ready ]] || { die '缺少 Nginx 安装恢复记录，已停止。'; return 1; }
     if [[ $PKG == apt ]]; then
@@ -6073,7 +6374,8 @@ nginx_install_batch() {
             esac
         done <<< "$__nb_plan"
     fi
-    pkg_snapshot > "$TX/pkgs-before" || { die '无法记录安装前的软件包状态。'; return 1; }
+    __nb_before=$(pkg_snapshot) || { die '无法记录安装前的软件包状态。'; return 1; }
+    printf '%s\n' "$__nb_before" | atomic_write "$TX/pkgs-before" 600 || return 1
     if (( ! __nb_shared )) && [[ $INIT == systemd ]]; then
         __nb_mask=$(timeout -k 2 5 systemctl is-enabled nginx 2>/dev/null) || __nb_mrc=$?
         if [[ $__nb_mask != masked && $__nb_mask != masked-runtime ]]; then
@@ -6085,7 +6387,7 @@ nginx_install_batch() {
     pkg_install "${__nb_args[@]}" >> "$STEP_LOG" 2>&1 || __nb_rc=$?
     # Keep the baseline if querying or writing the delta fails, for tx_rollback.
     __nb_after=$(pkg_snapshot) || { die '无法核实安装后的软件包状态，已保留恢复记录。'; return 1; }
-    __nb_added=$(comm -13 "$TX/pkgs-before" <(printf '%s\n' "$__nb_after") | paste -sd ' ' -) || return 1
+    __nb_added=$(pkg_added_since "$TX/pkgs-before" "$__nb_after" | paste -sd ' ' -) || return 1
     if [[ -n $__nb_added ]]; then
         tr -s ' ' '\n' <<< "$__nb_added" >> "$TX/new-packages" || return 1
     fi
@@ -6099,8 +6401,9 @@ nginx_install_batch() {
 }
 
 prepare_nginx() {
-    local p had_nginx=0 rc=0 added='' all_added=''
+    local p had_nginx=0 rc=0 added='' all_added='' own_config=0 hash
     local -a modules=() want=()
+    [[ -e $ROOT/etc/nginx || -L $ROOT/etc/nginx ]] || own_config=1
     if have nginx; then
         had_nginx=1
         nginx_probe || rc=$?
@@ -6128,7 +6431,12 @@ prepare_nginx() {
     if (( ! had_nginx )); then
         svc_stop_disable nginx
         st_filter --argjson add "$(json_words "$all_added")" '.meta.nginx_packages = ((.meta.nginx_packages + $add) | unique)'
-        if [[ -z $(st .meta.nginx_hash) ]]; then st_sets .meta.nginx_hash "$(nginx_system_hash)"; fi
+        if (( own_config )); then
+            hash=$(nginx_system_hash) || return 1
+            st_sets .meta.nginx_hash "$hash"
+        else
+            st_sets .meta.nginx_hash ''
+        fi
     elif [[ -n $all_added ]]; then
         st_filter --argjson add "$(json_words "$all_added")" '.meta.extra_packages = (((.meta.extra_packages // []) + $add) | unique)'
     fi
@@ -6175,11 +6483,14 @@ configure_bbr() {
         return 0
     fi
     if [[ ! -f $DATA_DIR/bbr-original.json ]]; then
-        jq -n --arg cc "$cc" --arg q "$q" '{cc: $cc, qdisc: $q}' > "$DATA_DIR/bbr-original.json"
+        jq -n --arg cc "$cc" --arg q "$q" '{cc: $cc, qdisc: $q}' > "$STAGE/bbr-original.json" || return 1
+        atomic_install "$STAGE/bbr-original.json" "$DATA_DIR/bbr-original.json" 600 || return 1
     fi
-    make_dir "$(dirname -- "$SYSCTL_FILE")"
-    printf '%s\nnet.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n' "$MANAGED_TAG" > "$SYSCTL_FILE"
-    chmod 644 "$SYSCTL_FILE"
+    atomic_write "$SYSCTL_FILE" 644 <<EOF || return 1
+$MANAGED_TAG
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+EOF
     if ! timeout -k 2 5 sysctl -p "$SYSCTL_FILE" >/dev/null 2>>"${STEP_LOG:-/dev/null}"; then
         ui_warn 'BBR 设置未能完全应用，已保留原始值供关闭或卸载时恢复。'
     fi
@@ -6221,7 +6532,7 @@ restore_bbr_original() {
 
 install_logrotate() {
     [[ -d $ROOT/etc/logrotate.d ]] || return 0
-    cat > "$ROOT/etc/logrotate.d/zxray" <<EOF
+    atomic_write "$ROOT/etc/logrotate.d/zxray" 644 <<EOF
 $MANAGED_TAG
 $DATA_DIR/log/*.log $NGINX_DIR/error.log {
     # OpenRC supervise-daemon may create these logs as root.
@@ -6234,7 +6545,6 @@ $DATA_DIR/log/*.log $NGINX_DIR/error.log {
     compress
 }
 EOF
-    chmod 644 "$ROOT/etc/logrotate.d/zxray"
 }
 
 
@@ -6337,11 +6647,11 @@ xray_needs_lowport() {
 write_nginx_launcher() {
     # supervise-daemon respawns the command without calling start_pre again.
     # Clean only our known stale files, and never unlink a live listener.
-    local out=$1 cmd=$2 args=$3
+    local out=$1 cmd=$2 args=$3 launcher=$STAGE/nginx-start.sh
     {
-        printf '#!%s\n%s\nset -eu\n' "$(command -v bash)" "$MANAGED_TAG"
-        printf 'socket=%q\npidfile=%q\n' "$NGINX_RUN/reject.sock" "$NGINX_RUN/nginx.pid"
-        cat <<'SH'
+        printf '#!%s\n%s\nset -eu\n' "$(command -v bash)" "$MANAGED_TAG" || return 1
+        printf 'socket=%q\npidfile=%q\n' "$NGINX_RUN/reject.sock" "$NGINX_RUN/nginx.pid" || return 1
+        cat <<'SH' || return 1
 listeners=$(timeout -k 2s 5s ss -H -xl)
 if printf '%s\n' "$listeners" | awk -v socket="$socket" '{for (i=1; i<=NF; i++) if ($i == socket) found=1} END {exit !found}'; then
     printf '%s\n' 'Nginx reject listener is still active; refusing to remove it.' >&2
@@ -6350,9 +6660,9 @@ fi
 rm -f -- "$socket" "$pidfile"
 SH
         printf 'exec %q %s\n' "$cmd" "$args"
-    } > "$out"
-    chmod 755 "$out"
-    bash -n "$out"
+    } > "$launcher" || return 1
+    bash -n "$launcher" || return 1
+    atomic_install "$launcher" "$out" 755
 }
 
 prepare_service_logs() {
@@ -6450,11 +6760,16 @@ start_services() {
 }
 
 service_log_to_step() {
-    local s=$1
+    local s=$1 n=15
+    # Keep both sources visible in show_step_log's 15-line window.
+    if [[ $s == zxray-nginx && -s $NGINX_DIR/error.log ]]; then n=8; fi
     if [[ $INIT == systemd ]]; then
-        timeout -k 2 5 journalctl -u "$s" -n 15 --no-pager -o cat >> "$STEP_LOG" 2>&1 || true
+        timeout -k 2 5 journalctl -u "$s" -n "$n" --no-pager -o cat >> "$STEP_LOG" 2>&1 || true
     elif [[ -f $DATA_DIR/log/$s.log ]]; then
-        tail -n 15 "$DATA_DIR/log/$s.log" >> "$STEP_LOG" 2>&1 || true
+        tail -n "$n" "$DATA_DIR/log/$s.log" >> "$STEP_LOG" 2>&1 || true
+    fi
+    if [[ $s == zxray-nginx && -s $NGINX_DIR/error.log ]]; then
+        tail -n 7 "$NGINX_DIR/error.log" >> "$STEP_LOG" 2>&1 || true
     fi
 }
 
@@ -6502,7 +6817,7 @@ health_check() {
             return 1
         fi
     done <<< "$(public_ports)"
-    if scheme_has_reality "$(scheme)"; then reality_check; fi
+    if scheme_has_reality "$(scheme)"; then reality_check || return 1; fi
     return 0
 }
 
@@ -6704,16 +7019,16 @@ nginx_may_be_running() {
 
 release_nginx_packages() {
     local pk hash
+    local -a pkgs=()
     pk=$(jq -c '.meta.nginx_packages // []' "$STATE" 2>/dev/null || echo '[]')
     [[ $pk != '[]' ]] || return 0
     hash=$(jq -r '.meta.nginx_hash // empty' "$STATE")
+    mapfile -t pkgs < <(jq -r '.[]' <<< "$pk")
     if [[ -z $hash ]] || svc_active nginx || nginx_may_be_running \
-        || [[ $(nginx_system_hash) != "$hash" ]]; then
+        || ! nginx_hash_matches "$hash" "${pkgs[@]}"; then
         ui_note '保留 Nginx 软件包：仍在使用、状态不明或配置已改动。'
         return 0
     fi
-    local -a pkgs=()
-    mapfile -t pkgs < <(jq -r '.[]' <<< "$pk")
     pkg_remove_safe "${pkgs[@]}" >/dev/null 2>&1 || { ui_warn 'Nginx 软件包没能卸载，下次操作时会再试。'; return 1; }
     jq '.meta.nginx_packages = [] | .meta.nginx_hash = ""' "$STATE" > "$STAGE/state-clean.json"
     atomic_install "$STAGE/state-clean.json" "$STATE" 600
@@ -6912,7 +7227,7 @@ prepare_new_draft() {
 }
 
 refresh_net_in_draft() {
-    local old4 old6 host
+    local old4 old6 old6_key host
     old4=$(st .net.v4)
     old6=$(st .net.v6)
     host=$(st .net.host)
@@ -6924,9 +7239,11 @@ refresh_net_in_draft() {
             note_add "公网 IPv4 已变化，节点地址改为 $NET_V4。"
         fi
     fi
-    if [[ -n $NET_V6 && $NET_V6 != "$old6" ]]; then
+    [[ -n $NET_V6 && $NET_V6 != "$old6" ]] || return 0
+    old6_key=$(ip_key "$old6") || old6_key=''
+    if [[ $(ip_key "$NET_V6") != "$old6_key" ]]; then
         st_sets .net.v6 "$NET_V6"
-        if [[ -n $old6 && $host == "$old6" ]]; then
+        if [[ -n $old6_key && $(ip_key "$host") == "$old6_key" ]]; then
             st_sets .net.host "$NET_V6"
             note_add '公网 IPv6 已变化，节点地址已更新。'
         fi
@@ -6951,17 +7268,22 @@ action_install() {
     ui_line '正在检测本机公网地址...'
     detect_public_ips
     DRAFT=$STAGE/draft.json
-    local def=1 curidx=0 cli_first=1 had_old=0 s
-    if state_ok; then had_old=1; fi
+    local def=1 curidx=0 cli_first=1 had_old=0 s installed=''
+    if state_ok; then
+        had_old=1
+        installed=$(jq -r .scheme "$STATE")
+        curidx=$(scheme_index "$installed")
+        cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
+    fi
     sni_stage_begin
-    if (( had_old )); then
-        curidx=$(scheme_index "$(jq -r .scheme "$STATE")")
+    if (( had_old )) && [[ -z $CLI_SCHEME || $CLI_SCHEME == "$installed" ]]; then
+        cli_first=0
         MODE=modify
         load_state_draft
         PREVIEW_NOTES=()
         refresh_net_in_draft
         def=$(scheme_index "$(scheme)")
-        cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
+        [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
         preview_loop
         case $PREVIEW_RESULT in
             0) apply_draft; show_modify_result; return 0 ;;
@@ -6983,6 +7305,7 @@ action_install() {
                 load_state_draft
                 PREVIEW_NOTES=()
                 refresh_net_in_draft
+                [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
                 preview_loop
                 case $PREVIEW_RESULT in
                     0) apply_draft; show_modify_result; return 0 ;;
@@ -6994,6 +7317,7 @@ action_install() {
         fi
         sni_stage_begin
         draft_new "$s"
+        if (( had_old )); then note_add '确认安装后，将替换现有方案并生成新节点。'; fi
         if scheme_is_split "$s" && [[ -z $NET_V4 || -z $NET_V6 ]]; then
             note_add "公网地址自动检测不完整：IPv4 ${NET_V4:-未检测到}，IPv6 ${NET_V6:-未检测到}。请在「节点地址」中手动补全，安装前会校验。"
         fi
@@ -7214,10 +7538,8 @@ action_rollback() {
     MODE=modify
     DRAFT=$STAGE/draft.json
     jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
-        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema | .reality.fp = "chrome"
-        | if .core.xray == "compat" then .core.xray = "latest" else . end' "$prev" > "$DRAFT"
-    st_filter '.egress = {cn: (.egress.cn // 0), bt: (.egress.bt // 0)}'
-    normalize_landing_outbounds
+        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema' "$prev" > "$DRAFT" || return 1
+    normalize_draft_for_apply
     pv_snapshot "$STATE"
     mapfile -t PV_KEYS < <(preview_items | grep -v '^@')
     cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
@@ -7304,12 +7626,12 @@ action_geo_update() {
 nginx_binary_package() {
     local bin=$1 owner
     case $PKG in
-        apt) owner=$(dpkg-query -S "$bin") || return 1; owner=${owner%%:*} ;;
+        apt) owner=$(timeout -k 2 15 dpkg-query -S "$bin") || return 1; owner=${owner%%:*} ;;
         apk)
-            apk info -L nginx | sed 's#^/*#/#' | grep -Fx -- "$bin" >/dev/null || return 1
+            timeout -k 2 15 apk info -L nginx | sed 's#^/*#/#' | grep -Fx -- "$bin" >/dev/null || return 1
             owner=nginx ;;
-        dnf|yum) owner=$(rpm -qf --qf '%{NAME}' "$bin") || return 1 ;;
-        pacman) owner=$(pacman -Qqo "$bin") || return 1 ;;
+        dnf|yum) owner=$(timeout -k 2 15 rpm -qf --qf '%{NAME}' "$bin") || return 1 ;;
+        pacman) owner=$(timeout -k 2 15 pacman -Qqo "$bin") || return 1 ;;
     esac
     case $owner in nginx|nginx-core|nginx-full|nginx-light|nginx-extras|nginx-mainline|nginx-stable) printf '%s' "$owner" ;; *) return 1 ;; esac
 }
@@ -7324,43 +7646,98 @@ nginx_running_current() {
 
 nginx_package_version() {
     case $PKG in
-        apt) dpkg-query -W -f='${Version}' "$1" ;;
-        apk) apk list --installed "$1" | awk -v prefix="$1-" 'index($1,prefix)==1 {print substr($1,length(prefix)+1); seen++} END {exit seen!=1}' ;;
-        dnf|yum) rpm -q --qf '%{VERSION}-%{RELEASE}' "$1" ;;
+        apt) timeout -k 2 15 dpkg-query -W -f='${Version}' "$1" ;;
+        apk) timeout -k 2 15 apk list --installed "$1" | awk -v prefix="$1-" 'index($1,prefix)==1 {print substr($1,length(prefix)+1); seen++} END {exit seen!=1}' ;;
+        dnf|yum) timeout -k 2 15 rpm -q --qf '%{VERSION}-%{RELEASE}' "$1" ;;
     esac
 }
 
+check_running_nginx() {
+    local bin=$1 refresh=${2:-1} i master port rows row pid cmd ppid pending reason
+    local pid_field='(^|[,([:space:]])pid=([1-9][0-9]*)([,)[:space:]]|$)'
+    if (( refresh )) && ! nginx_running_current "$bin"; then
+        svc_do restart zxray-nginx && wait_active zxray-nginx 10 || {
+            service_log_to_step zxray-nginx; die '更新后 Nginx 前置服务没有启动成功。'; return 1
+        }
+        for (( i=0; i<20; i++ )); do nginx_running_current "$bin" && break; sleep 0.25; done
+        (( i < 20 )) || { service_log_to_step zxray-nginx; die '无法确认 Nginx 前置服务已加载更新后的程序和模块。'; return 1; }
+        port=$(st .reality.port) || return 1
+        for (( i=0; i<10; i++ )); do
+            reason='无法确认托管 Nginx 的主进程。'
+            if read -r master 2>/dev/null < "$NGINX_RUN/nginx.pid" &&
+                [[ $master =~ ^[1-9][0-9]*$ && /proc/$master/exe -ef $bin ]] &&
+                cmd=$(tr '\0' ' ' 2>/dev/null < "/proc/$master/cmdline") && [[ " $cmd " == *" -c $NGINX_DIR/nginx.conf "* ]]; then
+                rows=$(listeners tcp "$port") || { port_query_failed; return 1; }
+                reason="Nginx 前置服务未监听 TCP $port。"
+                if [[ -n $rows ]]; then
+                    reason=''
+                    while IFS= read -r row; do
+                        listener_has_pid "$row" "$master" && continue
+                        # ss may report only a worker; verify its parent and executable.
+                        pending=$row
+                        while [[ $pending =~ $pid_field ]]; do
+                            pid=${BASH_REMATCH[2]}
+                            pending=${pending#*"${BASH_REMATCH[0]}"}
+                            [[ /proc/$pid/exe -ef /proc/$master/exe ]] || continue
+                            ppid=$(awk '/^PPid:/ { print $2; exit }' "/proc/$pid/status" 2>/dev/null) || continue
+                            [[ $ppid == "$master" ]] && continue 2
+                        done
+                        reason="无法确认 TCP $port 的监听进程属于托管 Nginx。"
+                        break
+                    done <<< "$rows"
+                    [[ -z $reason ]] && break
+                fi
+            fi
+            (( i < 9 )) && sleep 0.3
+        done
+        [[ -z $reason ]] || { service_log_to_step zxray-nginx; die "$reason"; return 1; }
+    fi
+    if ! svc_active xray; then
+        ui_note '当前未确认 Xray 正在运行，已跳过本轮 REALITY 端到端检查，将继续检查核心更新。'
+        return 0
+    fi
+    reality_check
+}
+
 update_nginx() {
-    local bin owner installed p before after active=0 i
+    local bin owner installed p before after active=0 baseline='' new_hash
     local -a packages=() service_env=()
     ui_step '更新 Nginx 和模块'
     check_service_ownership || return 1
     bin=$(type -P nginx) && bin=$(readlink -f -- "$bin") || { die '找不到当前方案使用的 Nginx。'; return 1; }
+    if svc_active zxray-nginx; then active=1; fi
     if ! owner=$(nginx_binary_package "$bin" 2>>"$STEP_LOG"); then
+        if (( active )); then check_running_nginx "$bin" 0 || return 1; fi
         ui_step_skip '未自动更新'
         ui_warn "无法确认 $bin 的软件包来源，请通过原安装方式更新 Nginx。"
         return 0
     fi
     if [[ $PKG == pacman ]]; then
+        if (( active )); then
+            nginx_detect && test_nginx_config && check_running_nginx "$bin" || return 1
+        fi
         ui_step_skip '未自动更新'
-        ui_warn 'Arch 系请运行 pacman -Syu 随系统更新 Nginx，再在维护菜单重启服务。'
+        ui_warn 'Arch 系请运行 pacman -Syu 随系统更新 Nginx，之后可在此检查前置服务。'
         return 0
     fi
     installed=$(pkg_snapshot) || { die '无法核实已安装的 Nginx 软件包。'; return 1; }
     while IFS= read -r p; do
         case $p in
-            "$owner"|nginx|nginx-common|nginx-core|nginx-full|nginx-light|nginx-extras|nginx-mod-*|nginx-module-*|libnginx-mod-*) packages+=("$p") ;;
+            "$owner"|nginx|nginx-common|nginx-core|nginx-full|nginx-light|nginx-extras|nginx-filesystem|nginx-mod-*|nginx-module-*|libnginx-mod-*) packages+=("$p") ;;
         esac
     done <<< "$installed"
     in_list "$owner" "${packages[@]}" || { die 'Nginx 软件包状态异常，已停止更新。'; return 1; }
     before=$(nginx_package_version "$owner") || { die '无法读取已安装的 Nginx 软件包版本。'; return 1; }
-    if svc_active zxray-nginx; then active=1; fi
     if [[ $INIT == systemd ]] && ! svc_active nginx; then
         # The distro's default web server is separate from the managed SNI gate.
         service_env=(SYSTEMD_OFFLINE=1)
     fi
     [[ -d $NGINX_RUN ]] || install -d -m 755 "$NGINX_RUN" || return 1
     nginx_detect && test_nginx_config || return 1
+    if jq -e '(.meta.nginx_packages // []) | length > 0' "$DRAFT" >/dev/null; then
+        baseline=$(st .meta.nginx_hash)
+        nginx_hash_matches "$baseline" "${packages[@]}" || baseline=''
+    fi
     case $PKG in
         apt)
             pkg_refresh && pkg_run env "${service_env[@]}" DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 \
@@ -7369,14 +7746,17 @@ update_nginx() {
         apk) pkg_run apk --no-cache upgrade "${packages[@]}" ;;
         dnf|yum) pkg_run env "${service_env[@]}" "$PKG" -y --setopt=metadata_expire=0 upgrade "${packages[@]}" ;;
     esac >> "$STEP_LOG" 2>&1 || { die 'Nginx 软件包更新失败，请检查软件源、版本锁定和日志。'; return 1; }
-    nginx_detect && test_nginx_config || return 1
-    if (( active )) && ! nginx_running_current "$bin"; then
-        svc_do restart zxray-nginx && wait_active zxray-nginx 10 || {
-            service_log_to_step zxray-nginx; die '更新后 Nginx 前置服务没有启动成功。'; return 1
-        }
-        for (( i=0; i<20; i++ )); do nginx_running_current "$bin" && break; sleep 0.25; done
-        (( i < 20 )) || { die '无法确认 Nginx 前置服务已加载更新后的程序和模块。'; return 1; }
+    if [[ -n $baseline ]]; then
+        new_hash=$(nginx_system_hash) || return 1
+        if [[ $new_hash != "$baseline" ]] && nginx_stock_config "${packages[@]}" &&
+            nginx_hash_matches "$new_hash"; then
+            # This package transaction survives a subsequent core download or
+            # rollback. Commit its metadata while the draft is still the live state.
+            st_sets .meta.nginx_hash "$new_hash" && atomic_install "$DRAFT" "$STATE" 600 || return 1
+        fi
     fi
+    nginx_detect && test_nginx_config || return 1
+    if (( active )); then check_running_nginx "$bin" || return 1; fi
     after=$(nginx_package_version "$owner") || { die '无法核实更新后的 Nginx 软件包版本。'; return 1; }
     ui_step_done
     if [[ $before == "$after" ]]; then ui_line "  Nginx $after（已按当前软件源检查）"
@@ -7465,10 +7845,11 @@ replace_cores() {
     if [[ $USE_XRAY == "$XRAY_BIN" && -z $USE_SS ]] && (( GEO_REFRESH )); then geo_only=1; fi
     STEP_NO=0 STEP_TOTAL=1
     ui_blank
-    if [[ -n $USE_XRAY ]]; then
+    if [[ -n $USE_XRAY || -n $USE_SS ]]; then
         STEP_TOTAL=2
         if (( geo_only )); then ui_step '校验配置'; else ui_step '用新核心校验配置'; fi
-        validate_xray_config "$CONFIG_FILE"
+        if [[ -n $USE_XRAY ]]; then validate_xray_config "$CONFIG_FILE" || return 1; fi
+        if [[ -n $USE_SS ]]; then validate_ss_rust "$SS_CONFIG" "$SS_ACL" || return 1; fi
         ui_step_done
     fi
     if (( geo_only )); then ui_step '替换规则并重启'; else ui_step '替换核心并重启'; fi
@@ -7549,7 +7930,7 @@ status_build() {
         ui_kv "${proto^^} $port" "$v" "$label"
     done <<< "$(public_ports)"
     ui_blank
-    tui_item 1 '查看最近日志' '' '按服务查看，最近 50 条并自动刷新'
+    tui_item 1 '最近日志' '' '按服务查看，最近 50 条并自动刷新'
     TUI_FOOT='回车 查看日志   Esc 返回'
     TUI_FOOT_PLAIN='1 查看日志   回车 返回'
 }
@@ -7841,11 +8222,11 @@ release_uninstall_packages() {
     pk=$(jq -c '.meta.nginx_packages // []' "$old" 2>/dev/null || printf '[]')
     if [[ $pk != '[]' ]]; then
         hash=$(jq -r '.meta.nginx_hash // empty' "$old" 2>/dev/null || true)
+        mapfile -t pkgs < <(jq -r '.[]' <<< "$pk")
         if [[ -z $hash ]] || svc_active nginx || nginx_may_be_running \
-            || [[ $(nginx_system_hash) != "$hash" ]]; then
+            || ! nginx_hash_matches "$hash" "${pkgs[@]}"; then
             ui_note '保留 Nginx 软件包：仍在使用、状态不明或配置已改动。'
         else
-            mapfile -t pkgs < <(jq -r '.[]' <<< "$pk")
             pkg_remove_safe "${pkgs[@]}" >/dev/null 2>&1 || ui_warn 'Nginx 软件包未能移除，可手动检查。'
         fi
     fi
@@ -7861,12 +8242,53 @@ remove_service_links() {
     done
 }
 
+uninstall_has_untracked_files() {
+    local service
+    [[ -e $STATE || -e $CONFIG_FILE || -e $XRAY_BIN || -e $SS_BIN || -e $SS_CONFIG || -e $SS_ACL ||
+       -e $DATA_DIR/state.prev.json || -e $OLD_DATA_DIR/state.json || -e $NGINX_DIR ]] && return 0
+    for service in "${MANAGED_SERVICES[@]}"; do
+        [[ -e $SYSTEMD_DIR/$service.service || -e $OPENRC_DIR/$service ]] && return 0
+    done
+    return 1
+}
+
+uninstall_preflight() {
+    local d
+    [[ ! -e $STATE && ! -e $TX ]] || return 0
+    if uninstall_has_untracked_files; then
+        TUI_MSG='缺少安装记录，请先核查残留文件。'
+        TOP_RC=1
+    elif [[ -f $SELF_SCRIPT_PATH ]] || is_managed_file "$QUICK_BIN"; then
+        return 0
+    elif [[ -e $DATA_DIR || -L $DATA_DIR || -e $SELF_DIR || -L $SELF_DIR ||
+            -e $CONFIG_DIR || -L $CONFIG_DIR || -e $XRAY_ASSET_DIR || -L $XRAY_ASSET_DIR ]]; then
+        TUI_MSG='缺少安装记录，请先核查残留文件。'
+        TOP_RC=1
+    else
+        # Enter the normal locked cleanup path for interrupted pre-install work.
+        for d in "$STAGE_BASE".*; do [[ ! -d $d ]] || return 0; done
+        TUI_MSG='尚未安装，无需卸载。下载的脚本可直接删除。'
+        TOP_RC=0
+    fi
+    if [[ $ACTION == uninstall ]]; then
+        if (( TOP_RC )); then
+            ui_warn "$TUI_MSG"
+            ui_note '请用原安装方式卸载，或先恢复状态文件。'
+            ui_code "  $STATE"
+        else
+            ui_line "$TUI_MSG"
+        fi
+    fi
+    return 1
+}
+
 action_uninstall() {
     local own_user=0 p source_count
     local -a progs=()
     ui_page '卸载'
+    clean_stale_stages || return 1
     if ! state_ok; then
-        if [[ -e $STATE || -e $CONFIG_FILE || -e $XRAY_BIN || -e $SS_BIN ]]; then
+        if uninstall_has_untracked_files; then
             ui_warn '找到了部署留下的文件，但状态记录无法识别（损坏，或是别的版本的脚本写的）。'
             ui_note '为避免只删一半，这里不做卸载。请用安装时那个版本的脚本卸载，或先恢复状态文件：'
             ui_code "  $STATE"
@@ -7875,7 +8297,7 @@ action_uninstall() {
         ui_line '没有检测到本脚本部署的服务。'
         prepare_source_cleanup '' || return 1
         source_count=$(jq 'length' "$STAGE/source-cleanup.json")
-        if [[ -f $SELF_SCRIPT_PATH || -f $QUICK_BIN ]] || (( source_count > 0 )); then
+        if [[ -f $SELF_SCRIPT_PATH ]] || is_managed_file "$QUICK_BIN" || (( source_count > 0 )); then
             ui_rule
             if ask_no '删除管理脚本、zxray 命令及已确认的原始脚本'; then
                 remove_self_files
@@ -8315,17 +8737,10 @@ after_action() {
     return 0
 }
 
-main() {
-    parse_args "$@"
-    (( EUID == 0 )) || fatal '请用 root 运行（例如 sudo sh xray-manager.sh）。'
-    input_setup
-    ui_setup
-    detect_system || exit 1
+prepare_runtime() {
+    (( ! runtime_ready )) || return 0
     ensure_deps || exit 1
     acquire_lock
-    trap 'on_main_int' INT
-    trap 'exit 143' TERM HUP
-    trap 'on_main_exit' EXIT
     SOURCE_PATH=${BASH_SOURCE[0]}
     SOURCE_RECORD=$(source_script_record "$SOURCE_PATH" 2>/dev/null) || SOURCE_RECORD=''
     if [[ -f $SOURCE_PATH ]]; then SOURCE_PATH=$(readlink -f -- "$SOURCE_PATH"); fi
@@ -8333,7 +8748,21 @@ main() {
     migrate_state
     check_state_file
     clean_stale_stages
+    runtime_ready=1
+}
 
+main() {
+    local runtime_ready=0 sel=0 key
+    parse_args "$@"
+    (( EUID == 0 )) || fatal '请用 root 运行（例如 sudo sh xray-manager.sh）。'
+    input_setup
+    ui_setup
+    detect_system || exit 1
+    trap 'on_main_int' INT
+    trap 'exit 143' TERM HUP
+    trap 'on_main_exit' EXIT
+    if [[ $ACTION == uninstall ]] && ! uninstall_preflight; then return "$TOP_RC"; fi
+    if [[ $ACTION != menu || -e $STATE || -e $TX ]]; then prepare_runtime; fi
     case $ACTION in
         install)
             if (( ASSUME_YES )); then run_top action_install_cli; else run_top action_install; fi
@@ -8346,9 +8775,9 @@ main() {
         nodes) run_top action_nodes; exit "$TOP_RC" ;;
     esac
 
-    local sel=0
     trap 'TUI_RESIZED=1' WINCH
     update_check_bg
+    ui_flush
     while :; do
         tui_menu home_build "$sel" q
         sel=$TUI_CUR
@@ -8357,12 +8786,19 @@ main() {
             ENTER) ;;
             *) continue ;;
         esac
-        case ${TUI_IKEYS[$TUI_CUR]} in
+        key=${TUI_IKEYS[$TUI_CUR]}
+        if [[ $key == 0 ]]; then ui_clear; exit 0; fi
+        if [[ ( $key == 2 || $key == 3 ) && ! -e $STATE && ! -e $TX ]]; then
+            TUI_MSG='请先安装节点。'
+            continue
+        fi
+        if [[ $key == 4 ]] && ! uninstall_preflight; then continue; fi
+        prepare_runtime
+        case $key in
             1) run_top action_install ;;
             2) run_top action_nodes; after_action "$TOP_RC"; continue ;;
             3) run_top action_maintain; after_action "$TOP_RC"; continue ;;
             4) run_top action_uninstall ;;
-            0) ui_clear; exit 0 ;;
         esac
         after_action "$TOP_RC"
         if (( TOP_RC != 130 && ! TOP_QUIET )); then ui_pause; fi
