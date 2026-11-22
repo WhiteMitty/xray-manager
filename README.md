@@ -30,8 +30,8 @@ zxray
 ### 局限说明
 - xhttp 只做了 v4 v6 分离，刚需双栈机器，此脚本不支持 CDN 分离方案
 - sni 依旧选取大厂，虽避免了苹果微软等域名，但建议自筛更合适的 sni 或采用偷自己方案
-- 若 xray 内核过新，sing-box 等客户端将无法使用订阅，此脚本仅考虑 xray 客户端兼容性
-- 倡导代理 vps 仅做代理，如果采用 nginx 前置过滤 sni 的方案搭建 reality，可能会影响其他服务
+- 如果 xray 内核过新，sing-box 等客户端将无法使用订阅，此脚本仅考虑 xray 客户端兼容性
+- 推荐代理 vps 仅做代理，如果采用 nginx 前置过滤 sni 的方案搭建 reality，可能会影响其他服务
 - 计划更新方向：融合 reality 偷自己（预设模板）；xhttp 分离加入 CDN (不打算做双路 CDN); 增加 HY2 方案
 
 ### License
