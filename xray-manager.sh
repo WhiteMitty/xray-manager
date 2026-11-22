@@ -6957,8 +6957,15 @@ check_service_ownership() {
     done
 }
 
+pid_has_exited() {
+    local state
+    state=$(awk '/^State:/ {print $2; exit}' "/proc/$1/status" 2>/dev/null) || state=''
+    # An unreadable status alone does not mean the process exited.
+    [[ $state == Z || ! -d /proc/$1 ]]
+}
+
 stop_owned_services() {
-    local s pid n state pids rc=0
+    local s pid n pids rc=0
     check_service_ownership || return 1
     for s in "${MANAGED_SERVICES[@]}"; do svc_stop_disable "$s"; done
     pids=$(timeout -k 2 5 pgrep -x 'xray|ssserver|nginx(-light|-extras|-core|-full|[.]dpkg-new)?' 2>/dev/null) || rc=$?
@@ -6968,21 +6975,17 @@ stop_owned_services() {
         pid_is_owned "$pid" || continue
         kill -TERM "$pid" 2>/dev/null || true
         for n in 1 2 3 4 5 6 7 8 9 10; do
-            if [[ ! -d /proc/$pid ]] || [[ $(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true) == Z ]]; then break; fi
+            pid_has_exited "$pid" && break
             pid_is_owned "$pid" || break
             sleep 0.2
         done
-        if [[ -d /proc/$pid ]] && pid_is_owned "$pid" \
-            && [[ $(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true) != Z ]]; then
+        if pid_is_owned "$pid" && ! pid_has_exited "$pid"; then
             kill -KILL "$pid" 2>/dev/null || true
             for n in 1 2 3 4 5; do
-                [[ -d /proc/$pid ]] || break
-                state=$(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)
-                [[ $state != Z ]] || break
+                pid_has_exited "$pid" && break
                 sleep 0.2
             done
-            if [[ -d /proc/$pid ]] && pid_is_owned "$pid" \
-                && [[ $(awk '/^State:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true) != Z ]]; then
+            if pid_is_owned "$pid" && ! pid_has_exited "$pid"; then
                 die "托管进程 $pid 未能停止。"; return 1
             fi
         fi
@@ -7180,7 +7183,7 @@ health_check() {
 }
 
 # Inspect every owner in the same ss snapshot used to check the bind address.
-# Return 2 if a PID vanished before inspection so startup can be polled again.
+# Return 2 if an owner exited during inspection so startup can be polled again.
 check_xray_listener_owners() {
     local port=$1 rows=$2 row pid exe name reason='' pid_field='",pid=([1-9][0-9]*),fd='
     local -a argv=()
@@ -7193,20 +7196,20 @@ check_xray_listener_owners() {
             pid=${BASH_REMATCH[1]}
             row=${row#*"${BASH_REMATCH[0]}"}
             if ! exe=$(readlink "/proc/$pid/exe" 2>/dev/null); then
-                [[ -d /proc/$pid ]] || return 2
+                pid_has_exited "$pid" && return 2
                 reason="无法核实 TCP $port（REALITY 内部端口）的监听进程 PID $pid。"
                 break 2
             fi
             if [[ /proc/$pid/exe -ef $XRAY_BIN ]]; then
                 if ! mapfile -d '' -t argv 2>/dev/null < "/proc/$pid/cmdline"; then
-                    [[ -d /proc/$pid ]] || return 2
+                    pid_has_exited "$pid" && return 2
                     reason="无法读取 TCP $port（REALITY 内部端口）监听进程 PID $pid 的启动参数。"
                     break 2
                 fi
                 # Both service templates start Xray with these exact arguments.
                 if [[ ${#argv[@]} == 4 && ${argv[1]} == run && ${argv[2]} == -config && ${argv[3]} == "$CONFIG_FILE" ]]; then continue; fi
             fi
-            [[ -d /proc/$pid ]] || return 2
+            pid_has_exited "$pid" && return 2
             name=${exe##*/}
             [[ $name =~ ^[a-zA-Z0-9_.+-]+$ ]] || name='其他程序'
             reason="TCP $port（REALITY 内部端口）被 $name（PID $pid）占用。"
