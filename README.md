@@ -31,7 +31,7 @@ zxray
 - xhttp 只做了 v4 v6 分离，刚需双栈机器，此脚本不支持 CDN 分离方案
 - sni 依旧选取大厂，虽避免了苹果微软等域名，但建议自筛更合适的 sni 或采用偷自己方案
 - 因为 xray 更新策略，sing-box 等客户端将无法使用订阅，此脚本仅考虑 xray 客户端兼容性
-- 推荐代理 vps 仅做代理，如果采用 nginx 前置过滤 sni 的方案搭建 reality，可能会影响其他服务，若不前置配大厂 SNI 则可能被偷流量（即使未用 CF CDN SNI）
+- 推荐代理 vps 仅做代理，如果采用 nginx 前置过滤 sni 的方案搭建 reality，可能会影响其他服务
 
 ### License
 MIT
