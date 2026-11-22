@@ -7180,17 +7180,26 @@ health_check() {
 }
 
 reality_check() {
-    local rp sni rows probe=$STAGE/reality-probe.log ok=0 t
+    local rp sni internal deadline rows probe=$STAGE/reality-probe.log ok=0 t
     rp=$(st .reality.port)
     sni=$(st .reality.sni)
     if [[ $(st .reality.guard) == nginx ]]; then
-        rows=$(listeners tcp "$(st .reality.internal)") || { port_query_failed; return 1; }
-        if [[ -z $rows || $rows != *127.0.0.1:* ]]; then
-            service_log_to_step xray
-            die "Xray 的内部端口 127.0.0.1:$(st .reality.internal) 没有在监听。"
+        internal=$(st .reality.internal)
+        deadline=$(( SECONDS + 10 ))
+        while :; do
+            rows=$(listeners tcp "$internal") || { port_query_failed; return 1; }
+            [[ -n $rows ]] && break
+            if (( SECONDS >= deadline )); then
+                service_log_to_step xray
+                die "等待 Xray 启动超时，内部端口 127.0.0.1:$internal 仍未监听。"
+                return 1
+            fi
+            sleep 0.5
+        done
+        if ! awk -v expected="127.0.0.1:$internal" '$4 != expected {exit 1}' <<< "$rows"; then
+            die "Xray 的内部端口监听了非预期地址，仅允许 127.0.0.1:$internal。"
             return 1
         fi
-        if grep -vq '127.0.0.1:' <<< "$rows"; then die 'Xray 的内部端口意外暴露到了公网，已停止。'; return 1; fi
     fi
     if timeout -k 1 6 openssl s_client -connect "127.0.0.1:$rp" -servername invalid.example -tls1_3 -brief </dev/null > "$probe" 2>&1; then
         die '防护没有生效：访问其他域名的连接没有被拒绝。'
