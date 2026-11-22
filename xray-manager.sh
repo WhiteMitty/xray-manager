@@ -7179,8 +7179,48 @@ health_check() {
     return 0
 }
 
+# Inspect every owner in the same ss snapshot used to check the bind address.
+# Return 2 if a PID vanished before inspection so startup can be polled again.
+check_xray_listener_owners() {
+    local port=$1 rows=$2 row pid exe name reason='' pid_field='",pid=([1-9][0-9]*),fd='
+    local -a argv=()
+    while IFS= read -r row; do
+        if [[ ! $row =~ $pid_field ]]; then
+            reason="无法确认 TCP $port（REALITY 内部端口）的归属，监听记录中没有可识别的 PID。"
+            break
+        fi
+        while [[ $row =~ $pid_field ]]; do
+            pid=${BASH_REMATCH[1]}
+            row=${row#*"${BASH_REMATCH[0]}"}
+            if ! exe=$(readlink "/proc/$pid/exe" 2>/dev/null); then
+                [[ -d /proc/$pid ]] || return 2
+                reason="无法核实 TCP $port（REALITY 内部端口）的监听进程 PID $pid。"
+                break 2
+            fi
+            if [[ /proc/$pid/exe -ef $XRAY_BIN ]]; then
+                if ! mapfile -d '' -t argv 2>/dev/null < "/proc/$pid/cmdline"; then
+                    [[ -d /proc/$pid ]] || return 2
+                    reason="无法读取 TCP $port（REALITY 内部端口）监听进程 PID $pid 的启动参数。"
+                    break 2
+                fi
+                # Both service templates start Xray with these exact arguments.
+                if [[ ${#argv[@]} == 4 && ${argv[1]} == run && ${argv[2]} == -config && ${argv[3]} == "$CONFIG_FILE" ]]; then continue; fi
+            fi
+            [[ -d /proc/$pid ]] || return 2
+            name=${exe##*/}
+            [[ $name =~ ^[a-zA-Z0-9_.+-]+$ ]] || name='其他程序'
+            reason="TCP $port（REALITY 内部端口）被 $name（PID $pid）占用。"
+            break 2
+        done
+    done <<< "$rows"
+    [[ -z $reason ]] && return 0
+    service_log_to_step xray
+    die "$reason"
+    return 1
+}
+
 reality_check() {
-    local rp sni internal deadline rows probe=$STAGE/reality-probe.log ok=0 t
+    local rp sni internal deadline rows rc probe=$STAGE/reality-probe.log ok=0 t
     rp=$(st .reality.port)
     sni=$(st .reality.sni)
     if [[ $(st .reality.guard) == nginx ]]; then
@@ -7188,15 +7228,20 @@ reality_check() {
         deadline=$(( SECONDS + 10 ))
         while :; do
             rows=$(listeners tcp "$internal") || { port_query_failed; return 1; }
-            [[ -n $rows ]] && break
+            if [[ -n $rows ]]; then
+                rc=0; check_xray_listener_owners "$internal" "$rows" || rc=$?
+                (( rc == 0 )) && break
+                (( rc == 2 )) || return 1
+            fi
             if (( SECONDS >= deadline )); then
                 service_log_to_step xray
-                die "等待 Xray 启动超时，内部端口 127.0.0.1:$internal 仍未监听。"
+                die "等待 Xray 启动超时，未检测到稳定的内部端口监听 127.0.0.1:$internal。"
                 return 1
             fi
             sleep 0.5
         done
         if ! awk -v expected="127.0.0.1:$internal" '$4 != expected {exit 1}' <<< "$rows"; then
+            service_log_to_step xray
             die "Xray 的内部端口监听了非预期地址，仅允许 127.0.0.1:$internal。"
             return 1
         fi
