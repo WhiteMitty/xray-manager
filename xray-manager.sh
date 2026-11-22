@@ -1,11 +1,43 @@
 #!/bin/sh
 # shellcheck shell=bash
 
+readonly SCRIPT_VERSION="0.2.8"
+
+usage() {
+    cat <<EOF
+Xray Manager v$SCRIPT_VERSION
+
+用法：sh xray-manager.sh [选项]
+      zxray [选项]
+
+不带选项时打开交互主页。
+
+选项：
+  --install            安装（加 --yes 时全部使用默认设置）
+  --scheme 方案        指定方案，可选：
+                       reality-raw  reality-xhttp  reality-split  ss
+                       enc  dual  triple  enc-split
+  --core-version 版本  安装时的 Xray 版本：latest（最新正式版，默认）
+                       或指定版本号，例如 v26.10.31
+  --update             更新当前方案的 Xray / SS-Rust / Nginx，保留配置
+  --nodes              输出节点链接
+  --uninstall          完整卸载
+  --yes                跳过所有确认
+  --force              同 --yes，并允许覆盖已有安装
+  --version            显示脚本版本
+  --help               显示本帮助
+EOF
+}
+
 if [ -z "${BASH_VERSION:-}" ]; then
     if [ ! -f "$0" ]; then
         echo "请先把脚本下载为文件，再运行：sh xray-manager.sh" >&2
         exit 1
     fi
+    case ${1:-} in
+        -h|--help) usage; exit 0 ;;
+        -V|--version) printf 'Xray Manager v%s\n' "$SCRIPT_VERSION"; exit 0 ;;
+    esac
     if ! command -v bash >/dev/null 2>&1; then
         if [ "$(id -u)" = 0 ] && command -v apk >/dev/null 2>&1; then
             if [ "$#" -eq 0 ]; then
@@ -48,7 +80,6 @@ set -Eeuo pipefail
 umask 077
 exec 4>&1 5>&2
 
-readonly SCRIPT_VERSION="0.2.8"
 readonly SCRIPT_MARKER="ZXRAY_MANAGER"
 readonly XRAY_MIN_VERSION="26.10.31"
 readonly STATE_SCHEMA=5
@@ -66,10 +97,13 @@ init_paths() {
     SELF_DIR=$ROOT/usr/local/lib/zxray
     SELF_SCRIPT_PATH=$SELF_DIR/zxray.sh
     QUICK_BIN=$ROOT/usr/local/bin/zxray
+    PUBLIC_XRAY=$ROOT/usr/local/bin/xray
     STATE=$DATA_DIR/state.json
     CONFIG_DIR=$ROOT/usr/local/etc/xray
     CONFIG_FILE=$CONFIG_DIR/config.json
-    XRAY_BIN=$ROOT/usr/local/bin/xray
+    CORE_BIN=$SELF_DIR/xray
+    XRAY_BIN=$CORE_BIN
+    LEGACY_CORE_OWNED=0
     XRAY_ASSET_DIR=$ROOT/usr/local/share/xray
     SS_BIN=$SELF_DIR/ssserver
     SS_CONFIG=$DATA_DIR/ssserver.json
@@ -89,8 +123,10 @@ init_paths() {
     OPENRC_DIR=$ROOT/etc/init.d
     OLD_DATA_DIR=$ROOT/usr/local/share/doudou-xray
     OLD_SELF_SCRIPT=$ROOT/usr/local/lib/doudou/xray_manager.sh
+    # Keep the physical paths/order compatible with existing recovery snapshots.
+    # CORE_BIN is already included through SELF_DIR.
     MANAGED_PATHS=(
-        "$DATA_DIR" "$SELF_DIR" "$CONFIG_DIR" "$XRAY_BIN" "$XRAY_ASSET_DIR"
+        "$DATA_DIR" "$SELF_DIR" "$CONFIG_DIR" "$PUBLIC_XRAY" "$XRAY_ASSET_DIR"
         "$SYSTEMD_DIR/xray.service" "$SYSTEMD_DIR/zxray-ss.service" "$SYSTEMD_DIR/zxray-nginx.service"
         "$OPENRC_DIR/xray" "$OPENRC_DIR/zxray-ss" "$OPENRC_DIR/zxray-nginx"
         "$ROOT/etc/logrotate.d/zxray" "$QUICK_BIN" "$SYSCTL_FILE"
@@ -114,7 +150,7 @@ NET_V4='' NET_V6=''
 SNI_BEST_MS=0
 PARSE_ERR=''
 SERVICE_USER_CREATED=0
-NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0 NGINX_PROBE_ERR=''
+NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0 NGINX_SUPPORTS_KEEPALIVE=0 NGINX_PROBE_ERR=''
 USE_XRAY='' USE_XRAY_ASSET='' USE_SS=''
 NEW_XRAY=0 NEW_SS=0 GEO_REFRESH=0 FULL_GEO_DIR=''
 UI_W=60 UI_H=24 LABEL_W=12 KEY_W=1 UI_UTF8=1
@@ -1317,8 +1353,37 @@ ui_pause() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 ver_ge() {
-    local a=${1#v} b=${2#v}
-    [[ $(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n 1) == "$b" ]]
+    local a=${1#v} b=${2#v} LC_ALL=C
+    local numeric='^[0-9]+([.][0-9]+)*$'
+    local section left right i x y
+    local -a av bv
+    a=${a%%+*} b=${b%%+*}
+    left=${a%%-*} right=${b%%-*}
+    [[ $left =~ $numeric && $right =~ $numeric ]] || return 1
+    for section in core prerelease; do
+        if [[ $section == prerelease ]]; then
+            # At equal core versions a release outranks every prerelease.
+            [[ $a == *-* ]] || return 0
+            [[ $b == *-* ]] || return 1
+            left=${a#*-} right=${b#*-}
+        fi
+        IFS=. read -r -a av <<< "$left"
+        IFS=. read -r -a bv <<< "$right"
+        for ((i=0; i<${#av[@]} && i<${#bv[@]}; i++)); do
+            x=${av[i]} y=${bv[i]}
+            [[ $x != "$y" ]] || continue
+            if [[ $x != *[!0-9]* ]]; then
+                [[ $y != *[!0-9]* ]] || return 1
+                x=${x#"${x%%[!0]*}"} y=${y#"${y%%[!0]*}"}
+                if (( ${#x} != ${#y} )); then (( ${#x} > ${#y} )); return; fi
+            elif [[ $y != *[!0-9]* ]]; then
+                return 0
+            fi
+            if [[ $x != "$y" ]]; then [[ $x > $y ]]; return; fi
+        done
+        if (( ${#av[@]} != ${#bv[@]} )); then (( ${#av[@]} > ${#bv[@]} )); return; fi
+    done
+    return 0
 }
 
 rand_hex() { openssl rand -hex "$1"; }
@@ -1681,7 +1746,9 @@ repair_std_dirs() {
 
 atomic_install() {
     local src=$1 dest=$2 mode=${3:-600} tmp
-    [[ ! -d $dest ]] || { die "写入目标是目录：$dest"; return 1; }
+    if [[ ${4:-} != replace-link || ! -L $dest ]] && [[ -d $dest ]]; then
+        die "写入目标是目录：$dest"; return 1
+    fi
     make_dir "$(dirname -- "$dest")" || return 1
     tmp=$(mktemp "$dest.new.XXXXXX") || { die "无法创建临时文件：$dest"; return 1; }
     if ! cp -- "$src" "$tmp" || ! chmod "$mode" "$tmp" || ! mv -fT -- "$tmp" "$dest"; then
@@ -1701,7 +1768,9 @@ atomic_write() {
     fi
 }
 
-is_managed_file() { [[ -f $1 ]] && grep -q "^$MANAGED_TAG" "$1" 2>/dev/null; }
+is_regular_executable() { [[ ! -L $1 && -f $1 && -x $1 ]]; }
+
+is_managed_file() { [[ ! -L $1 && -f $1 ]] && grep -Fxq -- "$MANAGED_TAG" "$1" 2>/dev/null; }
 
 human_bytes() {
     awk -v b="$1" 'BEGIN {
@@ -1895,6 +1964,7 @@ ensure_deps() {
                 [date]=coreutils [bash]=bash) ;;
     esac
     pkg_of[gzip]=gzip
+    pkg_of[cmp]=diffutils
     case $PKG in
         apk) pkg_of[getent]=musl-utils; pkg_of[ip]=iproute2 ;;
         apt) pkg_of[getent]=libc-bin; pkg_of[ip]=iproute2 ;;
@@ -2135,14 +2205,14 @@ selinux_enforcing() {
 }
 
 install_bin() {
-    atomic_install "$1" "$2" 755
+    atomic_install "$1" "$2" 755 replace-link || return 1
     if have getenforce && [[ $(getenforce 2>/dev/null || true) != Disabled ]] && have chcon; then
         chcon -t bin_t -- "$2" 2>/dev/null || true
     fi
 }
 
-check_service_access() {
-    local bad setpriv_help='' check='for f do test -r "$f" || { printf "%s\n" "$f"; exit 1; }; done'
+service_readable_files() {
+    local setpriv_help='' check='for f do test -r "$f" || { printf "%s\n" "$f"; exit 1; }; done'
     local -a cmd=()
     # BusyBox setpriv exists on Alpine but cannot change UID/GID.
     if have setpriv && setpriv_help=$(LC_ALL=C LANGUAGE=C timeout -k 2 5 setpriv --help 2>/dev/null) \
@@ -2153,14 +2223,19 @@ check_service_access() {
     elif have su; then
         cmd=(su -s /bin/sh -c "$check" -- "$SERVICE_USER" _)
     else
-        die '没有可用的用户权限检查工具。' '需要支持切换用户的 setpriv、runuser 或 su。'
-        return 1
+        return 127
     fi
-    if ! bad=$(timeout -k 2s 10s "${cmd[@]}" "$@" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 9>&-); then
-        if [[ -n $bad ]]; then die "运行用户 $SERVICE_USER 读不到 $bad。" '请检查文件及父目录权限。'
-        else die '运行用户权限检查失败或超时。'; fi
-        return 1
-    fi
+    timeout -k 2s 10s "${cmd[@]}" "$@" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 9>&-
+}
+
+check_service_access() {
+    local bad rc=0
+    bad=$(service_readable_files "$@") || rc=$?
+    (( rc != 0 )) || return 0
+    if [[ -n $bad ]]; then die "运行用户 $SERVICE_USER 读不到 $bad。" '请检查文件及父目录权限。'
+    elif (( rc == 127 )); then die '没有可用的用户权限检查工具。' '需要支持切换用户的 setpriv、runuser 或 su。'
+    else die '运行用户权限检查失败或超时。'; fi
+    return 1
 }
 
 
@@ -2607,6 +2682,16 @@ svc_state_line() {
     printf '%s %s %s\n' "$s" "$a" "$e"
 }
 
+# Both command slots have fixed indices in snapshots from older releases.
+foreign_command_at() {
+    [[ -e $1 || -L $1 ]] || return 1
+    case $1 in
+        "$QUICK_BIN") ! is_manager_launcher "$1" ;;
+        "$PUBLIC_XRAY") (( ! LEGACY_CORE_OWNED )) && ! is_core_link && ! is_manager_launcher "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
 tx_begin() {
     check_service_ownership || return 1
     if [[ -e $TX ]]; then
@@ -2623,7 +2708,7 @@ tx_begin() {
     done
     if [[ $INIT == openrc ]]; then
         for p in "$XRAY_BIN" "$SS_BIN"; do
-            [[ -f $p ]] || continue
+            [[ ! -L $p && -f $p ]] || continue
             have getcap || { die '缺少 getcap，无法备份核心的端口权限。'; return 1; }
             c=$(timeout -k 2 5 getcap "$p" 2>>"${STEP_LOG:-/dev/null}") || {
                 die '读取核心的端口权限失败或超时，已停止。'; return 1;
@@ -2640,7 +2725,14 @@ tx_begin() {
     printf '%s\n' "${MANAGED_PATHS[@]}" > "$TX/paths"
     for i in "${!MANAGED_PATHS[@]}"; do
         p=${MANAGED_PATHS[$i]}
-        if [[ -e $p || -L $p ]]; then cp -a -- "$p" "$TX/backup/$i"; fi
+        # A separate installer may also populate an empty command slot mid-update.
+        if [[ $p == "$QUICK_BIN" || ( $p == "$PUBLIC_XRAY" && $LEGACY_CORE_OWNED == 0 ) ]]; then
+            : > "$TX/check-command-$i" || return 1
+            foreign_command_at "$p" && continue
+        fi
+        if [[ -e $p || -L $p ]]; then
+            cp -a -- "$p" "$TX/backup/$i" || return 1
+        fi
     done
     : > "$TX/caps"
     for c in "${cap_records[@]}"; do printf '%s\n' "$c" >> "$TX/caps"; done
@@ -2657,7 +2749,7 @@ tx_begin() {
 tx_rollback() {
     [[ -f $TX/ready ]] || { rm -rf -- "$TX"; TX_ACTIVE=0; return 0; }
     ui_warn '正在恢复到操作前的状态...'
-    local i p s active enabled failed=0
+    local i p s active enabled current_state failed=0
     local -a paths=()
     [[ -s $TX/paths && -f $TX/services ]] || { KEEP_TX=1; ui_err '快照记录不完整，已停止恢复。'; return 1; }
     mapfile -t paths < "$TX/paths"
@@ -2680,19 +2772,37 @@ tx_rollback() {
     for i in "${!paths[@]}"; do
         p=${paths[$i]}
         [[ -n $p ]] || continue
+        if [[ -f $TX/check-command-$i ]] && foreign_command_at "$p"; then
+            if [[ -e $TX/backup/$i || -L $TX/backup/$i ]]; then
+                ui_warn "$p 已被其他程序占用。请移走冲突文件后重试恢复。"
+                failed=1
+            fi
+            continue
+        fi
         rm -rf -- "$p" || failed=1
         if [[ -e $TX/backup/$i || -L $TX/backup/$i ]]; then
             (umask 022 && mkdir -p -- "$(dirname -- "$p")")
             cp -a -- "$TX/backup/$i" "$p" || failed=1
         fi
     done
+    select_core_path
     if [[ -s $TX/caps ]]; then
-        if have setcap; then
-            while IFS=$'\t' read -r p s; do
-                if ! in_list "$p" "$XRAY_BIN" "$SS_BIN" || [[ ! -f $p || -z $s ]]; then failed=1; continue; fi
-                timeout -k 2 5 setcap "$s" "$p" 2>/dev/null || failed=1
-            done < "$TX/caps"
-        else failed=1; fi
+        local saved_self_dir=''
+        for i in "${!paths[@]}"; do
+            if [[ ${paths[$i]} == "$SELF_DIR" && ! -L $TX/backup/$i && -d $TX/backup/$i ]]; then
+                saved_self_dir=$TX/backup/$i; break
+            fi
+        done
+        while IFS=$'\t' read -r p s; do
+            if ! in_list "$p" "$XRAY_BIN" "$SS_BIN" || [[ -z $s ]]; then failed=1; continue; fi
+            # Older snapshots could record the target's capabilities for a private core symlink.
+            if [[ $p == "$SELF_DIR/"* && -n $saved_self_dir && -L $saved_self_dir/${p##*/} ]]; then
+                [[ -L $p ]] || failed=1
+                continue
+            fi
+            if [[ -L $p || ! -f $p ]] || ! have setcap; then failed=1; continue; fi
+            timeout -k 2 5 setcap "$s" "$p" 2>/dev/null || failed=1
+        done < "$TX/caps"
     fi
     if [[ -f $TX/nginx-masked && $INIT == systemd ]]; then
         if timeout -k 2 15 systemctl unmask nginx >/dev/null 2>&1; then rm -f -- "$TX/nginx-masked"
@@ -2732,6 +2842,11 @@ tx_rollback() {
         if ! in_list "$s" "${MANAGED_SERVICES[@]}" || [[ $active != [01] || $enabled != [01] ]]; then failed=1; continue; fi
         if [[ $enabled == 1 ]]; then svc_do enable "$s" >/dev/null 2>&1 || failed=1; fi
         if [[ $active == 1 ]]; then svc_do start "$s" >/dev/null 2>&1 || failed=1; fi
+        if [[ $enabled == 0 ]]; then
+            if current_state=$(svc_state_line "$s"); then
+                [[ $current_state == "$s "[01]' 0' ]] || failed=1
+            else failed=1; fi
+        fi
     done < "$TX/services"
     if [[ -s $TX/cc ]]; then restore_sysctl_value net.ipv4.tcp_congestion_control "$(cat "$TX/cc")" || failed=1; fi
     if [[ -s $TX/qdisc ]]; then restore_sysctl_value net.core.default_qdisc "$(cat "$TX/qdisc")" || failed=1; fi
@@ -2756,6 +2871,7 @@ tx_commit() {
 }
 
 tx_recover_if_needed() {
+    local running_digest=''
     [[ -d $TX ]] || return 0
     if [[ ! -f $TX/ready ]]; then
         rm -rf -- "$TX"
@@ -2766,8 +2882,15 @@ tx_recover_if_needed() {
     if ! ask_yes '现在恢复到那次操作之前的状态'; then
         fatal '需要先完成恢复，才能进行其他操作。'
     fi
+    if [[ $SOURCE_PATH == "$SELF_SCRIPT_PATH" ]]; then
+        running_digest=$(sha256sum < "$SOURCE_PATH") || fatal '无法核对当前管理脚本。'
+    fi
     TX_ACTIVE=1
     tx_rollback || fatal '恢复失败。'
+    if [[ -n $running_digest ]] && { [[ ! -f $SELF_SCRIPT_PATH ]] || [[ $(sha256sum < "$SELF_SCRIPT_PATH") != "$running_digest" ]]; }; then
+        ui_warn '恢复已完成。托管脚本版本发生变化，请重新运行下载的脚本继续操作。'
+        exit 1
+    fi
 }
 
 clean_stale_stages() {
@@ -2960,6 +3083,7 @@ run_child() {
         [[ -z $__rc_saved ]] || eval "$__rc_saved"
     done
     set -e
+    select_core_path
     if (( __rc_cancel == 143 )) && [[ -z $ACTION_PID ]]; then
         after_action "$CHILD_RC"
         exit 143
@@ -2986,17 +3110,21 @@ fetch() {
 }
 
 latest_tag_try() {
-    local repo=$1 url tag
+    local repo=$1 url tag prefix="https://github.com/$1/releases/tag/" LC_ALL=C
     url=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 10 --max-time 30 \
         "https://github.com/$repo/releases/latest" 2>>"$STEP_LOG" || true)
-    tag=${url##*/releases/tag/}
-    tag=${tag//%2F//}
-    tag=${tag//%2f//}
-    if [[ -z $url || $tag == "$url" || -z $tag ]]; then
+    if [[ $url == "$prefix"?* ]]; then
+        tag=${url#"$prefix"}
+        tag=${tag//%2[Bb]/+}
+    else
         tag=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 30 \
             "https://api.github.com/repos/$repo/releases/latest" 2>>"$STEP_LOG" | jq -r '.tag_name // empty' || true)
     fi
-    [[ $tag =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+    if [[ $repo == shadowsocks/shadowsocks-rust ]]; then
+        valid_ss_version "${tag#v}" || return 1
+    else
+        [[ $tag =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $tag != *..* ]] || return 1
+    fi
     printf '%s' "$tag"
 }
 
@@ -3005,7 +3133,7 @@ xray_newest_tag() {
     # Do not silently mix in prereleases, wait for a grace period, or pin an obsolete version.
     local tag
     tag=$(latest_tag_try XTLS/Xray-core) || return 1
-    [[ $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    [[ $tag == v* ]] && valid_xray_version "${tag#v}" || return 1
     printf '%s' "$tag"
 }
 
@@ -3043,11 +3171,16 @@ arch_of() {
 }
 
 
+valid_xray_version() {
+    local LC_ALL=C
+    [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
 xray_version_of() {
     local out v
     out=$(timeout -k 2 5 "$1" version 2>>"${STEP_LOG:-/dev/null}") || return 1
     v=$(awk 'NR==1{print $2}' <<< "$out")
-    [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    valid_xray_version "$v" || return 1
     printf '%s' "$v"
 }
 
@@ -3064,6 +3197,7 @@ download_xray() {
         *) die "Xray 暂不支持此架构：$(uname -m)"; return 1 ;;
     esac
     if [[ $tag == latest || $tag == compat ]]; then tag=$(xray_resolve_tag "$tag") || return 1; fi
+    valid_xray_version "${tag#v}" || { die 'Xray 版本号格式不正确。'; return 1; }
     base=https://github.com/XTLS/Xray-core/releases/download/$tag
     mkdir -p "$out" || return 1
     fetch "$base/$asset" "$out/$asset" || return 1
@@ -3076,11 +3210,11 @@ download_xray() {
         && unzip -p "$out/$asset" geosite.dat > "$out/geosite.dat" || {
         die '提取 Xray 安装包失败。'; return 1;
     }
+    geodata_files_ok "$out" || { die 'Xray 安装包中的地理规则缺失或为空。'; return 1; }
     chmod 755 "$out/xray" || return 1
     rm -f -- "$out/$asset" "$out/$asset.dgst"
     local v
     v=$(xray_version_of "$out/xray") || { die 'Xray 版本检查失败或超时，请检查核心兼容性。'; return 1; }
-    [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { die '无法识别下载的 Xray 版本。'; return 1; }
     ver_ge "$v" "$XRAY_MIN_VERSION" || { die "需要 Xray $XRAY_MIN_VERSION 或更新版本，当前为 $v。"; return 1; }
     [[ $v == "${tag#v}" ]] || { die "Xray 安装包版本与目标 $tag 不符，已停止安装。"; return 1; }
     printf 'v%s' "$v" > "$out/xray.version"
@@ -3100,11 +3234,16 @@ ss_triple() {
 }
 ss_arch_supported() { ss_triple >/dev/null 2>&1; }
 
+valid_ss_version() {
+    local LC_ALL=C identifiers='[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*'
+    [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+(-$identifiers)?([+]$identifiers)?$ ]]
+}
+
 ss_version_of() {
     local out v
     out=$(timeout -k 2 5 "$1" --version 2>>"${STEP_LOG:-/dev/null}") || return 1
     v=$(awk 'NR==1{print $2}' <<< "$out")
-    [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]] || return 1
+    valid_ss_version "$v" || return 1
     printf '%s' "$v"
 }
 
@@ -3112,6 +3251,7 @@ download_ss() {
     local tag=$1 out=$2 triple asset base digest member v
     triple=$(ss_triple) || { die "shadowsocks-rust 暂不支持此架构：$(uname -m)"; return 1; }
     if [[ $tag == latest ]]; then tag=$(latest_tag shadowsocks/shadowsocks-rust) || return 1; fi
+    valid_ss_version "${tag#v}" || { die 'SS-Rust 版本号格式不正确。'; return 1; }
     asset="shadowsocks-${tag}.${triple}.tar.xz"
     base=https://github.com/shadowsocks/shadowsocks-rust/releases/download/$tag
     mkdir -p "$out" || return 1
@@ -3160,13 +3300,13 @@ detect_public_ips() {
     NET_V4='' NET_V6=''
     for u in https://api.ipify.org https://ipv4.icanhazip.com https://v4.ident.me; do
         NET_V4=$(curl -4 -fsS --connect-timeout 3 --max-time 6 "$u" 2>/dev/null | tr -d '[:space:]' || true)
-        if valid_ipv4 "$NET_V4"; then break; fi
+        if valid_ipv4 "$NET_V4" && ! unusable_endpoint_ip "$NET_V4"; then break; fi
         NET_V4=''
     done
     if has_ipv6_stack; then
         for u in https://api64.ipify.org https://ipv6.icanhazip.com https://v6.ident.me; do
             NET_V6=$(curl -6 -fsS --connect-timeout 3 --max-time 6 "$u" 2>/dev/null | tr -d '[:space:]' || true)
-            if valid_ipv6 "$NET_V6"; then NET_V6=${NET_V6,,}; break; fi
+            if valid_ipv6 "$NET_V6" && ! unusable_endpoint_ip "$NET_V6"; then NET_V6=${NET_V6,,}; break; fi
             NET_V6=''
         done
     fi
@@ -3214,13 +3354,14 @@ pid_is_owned() {
     [[ -r /proc/$pid/cmdline ]] || return 1
     exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
     cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
-    case $exe in
-        "$XRAY_BIN"|"$SS_BIN"|"$XRAY_BIN (deleted)"|"$SS_BIN (deleted)") return 0 ;;
-    esac
+    local -a bins=("$CORE_BIN" "$SS_BIN")
+    if (( LEGACY_CORE_OWNED )); then bins+=("$PUBLIC_XRAY"); fi
     # /proc resolves symlinked parent directories; retain exact-path matching.
-    for bin in "$XRAY_BIN" "$SS_BIN"; do
-        resolved=$(readlink -f -- "$bin" 2>/dev/null) || continue
-        [[ -n $resolved ]] && [[ $exe == "$resolved" || $exe == "$resolved (deleted)" ]] && return 0
+    for bin in "${bins[@]}"; do
+        [[ $exe == "$bin" || $exe == "$bin (deleted)" ]] && return 0
+        resolved=$(readlink -f -- "${bin%/*}" 2>/dev/null) || continue
+        resolved=${resolved%/}/${bin##*/}
+        [[ $exe == "$resolved" || $exe == "$resolved (deleted)" ]] && return 0
     done
     # Process titles are mutable: a path mentioned in argv is not evidence
     # that an unrelated executable belongs to this installation.
@@ -3745,6 +3886,10 @@ reality_short_ids() {
 
 reality_short_id() { reality_short_ids | jq -r '.[0] // empty'; }
 
+set_reality_short_ids() {
+    st_filter --argjson ids "$1" '.reality.short_ids = $ids | .reality.short_id = $ids[0]'
+}
+
 reality_short_id_note() {
     local DRAFT=${1:-$DRAFT} ids
     [[ -f $DRAFT ]] || return 0
@@ -3768,6 +3913,7 @@ normalize_draft_layout() {
 
 normalize_draft_for_apply() {
     normalize_draft_layout || return 1
+    normalize_node_name || return 1
     if scheme_has_reality "$(scheme)" && [[ $(st .reality.fp) != chrome ]]; then st_sets .reality.fp chrome; fi
 }
 
@@ -3817,7 +3963,7 @@ draft_new() {
     PREVIEW_NOTES=()
     jq -n --arg s "$s" --arg v4 "$NET_V4" --arg v6 "$NET_V6" --argjson schema "$STATE_SCHEMA" \
         --arg name "$(default_node_name)" --argjson jitter "$(limit_jitter_new)" '{
-        schema: $schema, scheme: $s, name: $name, script: "", installed_at: "",
+        schema: $schema, scheme: $s, name: $name, name_initialized: 1, script: "", installed_at: "",
         net: {host: (if $v4 != "" then $v4 elif $v6 != "" then $v6 else "" end), v4: $v4, v6: $v6, manual: 0, v6_link: 1},
         outbound: (if $v4 == "" and $v6 != "" then "v6first" else "v4first" end),
         bbr: 1, firewall: "auto",
@@ -3901,7 +4047,7 @@ finalize_identity() {
             [[ $secret =~ ^[0-9a-f]{16}$ ]] || { die '生成 REALITY shortId 失败。'; return 1; }
             ids=$(jq -cn --arg sid "$secret" '[$sid]') || return 1
         fi
-        st_filter --argjson ids "$ids" '.reality.short_ids = $ids | .reality.short_id = $ids[0]' || return 1
+        set_reality_short_ids "$ids" || return 1
         if [[ $(st .reality.guard) == nginx ]]; then field=.reality.internal; else field=.reality.gate; fi
         p=$(st "$field")
         rc=0
@@ -4102,14 +4248,33 @@ core_label() {
     esac
 }
 
-node_name() { st '.name // "zxray"'; }
+node_name() {
+    local name
+    name=$(st .name) || return 1
+    if [[ -n $name ]]; then printf '%s' "$name"; else default_node_name; fi
+}
 
 default_node_name() {
     local h
     h=$(hostname -s 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || true)
     h=${h%%.*}
-    [[ $h =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$ && $h != localhost* ]] || h=zxray
-    printf '%s' "$h"
+    [[ $h =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ && $h != localhost* ]] || h=xray
+    printf '%s' "${h:0:24}"
+}
+
+set_node_name() {
+    st_filter --arg name "$1" '.name = $name | .name_initialized = 1'
+}
+
+normalize_node_name() {
+    # Older records do not distinguish the built-in names from a manual choice.
+    [[ $(st .name_initialized) != 1 ]] || return 0
+    local name
+    name=$(st .name) || return 1
+    case ${name,,} in
+        ''|zdd|zdd-xray|doudou|doudou-xray|zxray) name=$(default_node_name) || return 1 ;;
+    esac
+    set_node_name "$name"
 }
 
 valid_node_name() {
@@ -4138,8 +4303,14 @@ name_example() {
     printf '%s' "$e"
 }
 
+can_attach_v6_link() {
+    local v4
+    v4=$(st .net.v4) || return 1
+    [[ -n $v4 && -n $(st .net.v6) && $(st .net.host) == "$v4" ]]
+}
+
 v6_links_on() {
-    [[ -n $(st .net.v6) && $(st '.net.v6_link // 1') == 1 && $(st .net.host) == "$(st .net.v4)" ]]
+    can_attach_v6_link && [[ $(st '.net.v6_link // 1') == 1 ]]
 }
 
 note_add() { PREVIEW_NOTES+=("$1"); }
@@ -4153,7 +4324,7 @@ cs_build() {
     local i
     local -a name=('RAW + Vision' 'XHTTP 单路' 'XHTTP 上下行分离' 'SS2022' 'VLESS-ENC'
         'SS2022 + VLESS-ENC' 'REALITY + SS + ENC' 'XHTTP + ENC 分离')
-    local -a note=('推荐，各种客户端都能用' '可选 XMUX' '需要双栈'
+    local -a note=('常规安装' '可选 XMUX' '需要双栈'
         '客户端支持最广' '抗量子握手' '两个入口，各给一条链接' '三个入口，各给一条链接'
         '需要双栈')
     local -a group=([0]='REALITY' [3]='落地或专线' [5]='多协议混合' [7]='实验性方案')
@@ -4367,7 +4538,7 @@ item_fp() {
     case $1 in
         port) f='[.reality.port, .ss.port, .enc.port, [.users[] | .port // 0 | select(. > 0)]]' ;;
         sni) f='[.reality.sni]' ;;
-        addr) f='[.net.host, .net.v4, .net.v6]' ;;
+        addr) f='[.net.host, .net.v4, .net.v6, (.net.v6_link // 1)]' ;;
         name) f='[.name]' ;;
         landings) f='[.landings, [.users[] | select(.out != "direct") | {name, out}]]' ;;
         xhttp) f='[.xhttp, (if .xhttp.enc == 1 then (.enc | del(.port, .server_key, .client_key)) else null end)]' ;;
@@ -4719,7 +4890,7 @@ edit_sni() {
 }
 
 edit_addr() {
-    local c v cur=0 host i v4 v6
+    local c v cur=0 host i v4 v6 next_v6=''
     local -a opts=() vals=()
     if scheme_is_split "$(scheme)"; then
         input_page '节点地址' '上下行分离' '上传和下载分别连本机的 IPv4 和 IPv6 地址。' \
@@ -4752,8 +4923,16 @@ edit_addr() {
     for i in "${!vals[@]}"; do [[ ${vals[$i]} != "$host" ]] || cur=$(( i + 1 )); done
     if (( cur == 0 )) && [[ -n $host ]]; then opts+=("自定义|$host"); vals+=("$host"); cur=${#vals[@]}; fi
     opts+=('输入新地址|域名或 IP')
+    if can_attach_v6_link; then
+        if [[ $(st '.net.v6_link // 1') == 1 ]]; then
+            opts+=('另附 IPv6 链接|已开启，选择关闭'); next_v6=0
+        else
+            opts+=('另附 IPv6 链接|已关闭，选择开启'); next_v6=1
+        fi
+    fi
     option_page c "$cur" '节点地址' '写进节点链接的服务器地址：本机 IP，或解析到本机的域名。' "${opts[@]}"
     [[ -n $c && $c != "$cur" ]] || return 0
+    if [[ -n $next_v6 && $c == "${#opts[@]}" ]]; then st_set .net.v6_link "$next_v6"; return; fi
     if (( c <= ${#vals[@]} )); then st_sets .net.host "${vals[$((c - 1))]}"; return 0; fi
     input_page '节点地址' '输入新地址' '填写域名、IPv4 或 IPv6 地址。域名要已经解析到本机。' '当前' "${host:-未填写}"
     while :; do
@@ -4772,7 +4951,7 @@ edit_name() {
     while :; do
         read_line '新名称：' v "$cur" || return 0
         [[ -n $v && $v != "$cur" ]] || return 0
-        if valid_node_name "$v"; then st_sets .name "$v"; return 0; fi
+        if valid_node_name "$v"; then set_node_name "$v"; return; fi
         ui_warn '最多 24 列（汉字占 2 列），不能含空格、引号或 # ? & / \ %。'
     done
 }
@@ -5331,28 +5510,41 @@ edit_bbr() {
 
 edit_short_id() {
     local ids current='' value choice selected index=0 i title hint existing=''
-    local -a values=() opts=('新增 shortID|追加到末尾，订阅仍使用第一个') replacements=()
+    local -a values=() opts=('新增 shortID|追加到末尾，订阅仍使用第一个') entries=()
     ids=$(reality_short_ids) || return 1
     mapfile -t values < <(jq -r '.[]' <<< "$ids")
     for i in "${!values[@]}"; do
         existing+="${existing:+$'\n'}$(( i + 1 )). ${values[$i]}"
         if (( i == 0 )); then
             existing+='（订阅默认）'
-            replacements+=("订阅默认|${values[$i]}")
+            entries+=("订阅默认|${values[$i]}")
         else
-            replacements+=("可用|${values[$i]}")
+            entries+=("可用|${values[$i]}")
         fi
     done
     if (( ${#values[@]} )); then opts+=('替换已有 shortID|选择一个条目替换，其他条目继续保留'); fi
+    if (( ${#values[@]} > 1 )); then opts+=('删除一个 shortID|保留其余条目'); fi
     option_page choice 0 'REALITY shortID' "已有 shortID：${existing:+$'\n'}${existing:-安装时自动生成}" "${opts[@]}"
     case $choice in
         1) title='新增 shortID' ;;
-        2)
-            option_page selected 0 '替换 shortID' '选择要替换的条目。第一个用于默认订阅。' "${replacements[@]}"
+        2|3)
+            if [[ $choice == 3 ]]; then
+                (( ${#values[@]} > 1 )) || return 0
+                title='删除 shortID'; hint='删除第一个时，订阅改用下一个 shortID。'
+            else
+                title='替换 shortID'; hint='选择要替换的条目。第一个用于默认订阅。'
+            fi
+            option_page selected 0 "$title" "$hint" "${entries[@]}"
             [[ -n $selected ]] || return 0
             index=$(( selected - 1 ))
             current=${values[$index]}
-            title='替换 shortID' ;;
+            if [[ $choice == 3 ]]; then
+                ask_no "删除 $current？应用后，使用它的客户端需要更新 shortID" || return 0
+                ids=$(jq -c --argjson i "$index" 'del(.[$i])' <<< "$ids") || return 1
+                set_reality_short_ids "$ids" || return 1
+                TUI_MSG='所选 shortID 已从草稿移除。'
+                return 0
+            fi ;;
         *) return 0 ;;
     esac
     hint='填 2–16 位十六进制字符，位数须为偶数。留空保留当前设置。'
@@ -5376,7 +5568,7 @@ edit_short_id() {
         else
             ids=$(jq -c --arg value "$value" --argjson i "$index" '.[$i] = $value' <<< "$ids") || return 1
         fi
-        st_filter --argjson ids "$ids" '.reality.short_ids = $ids | .reality.short_id = $ids[0]' || return 1
+        set_reality_short_ids "$ids" || return 1
         TUI_MSG='shortID 列表已写入草稿。'
         return 0
     done
@@ -5469,12 +5661,13 @@ co_build() {
 }
 
 ask_core_version() {
-    local __av_cur=$1 __av_v
+    local __av_cur=$1 __av_v __av_mode=numeric __av_check=valid_xray_version
+    if [[ $3 == ss ]]; then __av_mode=text; __av_check=valid_ss_version; fi
     while :; do
-        read_line '版本号：' __av_v "$__av_cur" numeric || return 1
+        read_line '版本号：' __av_v "$__av_cur" "$__av_mode" || return 1
         [[ -n $__av_v ]] || return 1
-        if [[ $__av_v =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]]; then printf -v "$2" '%s' "$(normalize_tag "$__av_v")"; return 0; fi
-        ui_warn '版本号格式不正确，例如 v26.7.28。'
+        if "$__av_check" "${__av_v#v}"; then printf -v "$2" '%s' "$(normalize_tag "$__av_v")"; return 0; fi
+        ui_warn '版本号格式不正确，请按上方示例填写三段版本号。'
     done
 }
 
@@ -5495,7 +5688,7 @@ edit_core() {
                     iv=$(installed_version xray)
                     [[ $(st .core.xray) == latest || $(st .core.xray) == compat ]] || iv=$(st .core.xray)
                     input_page 'Xray 版本' '指定版本' "填写 Xray 的版本号，例如 v26.10.31。最低 v$XRAY_MIN_VERSION。"
-                    ask_core_version "${iv:-v26.10.31}" v || continue
+                    ask_core_version "${iv:-v26.10.31}" v xray || continue
                     if ! ver_ge "${v#v}" "$XRAY_MIN_VERSION"; then ui_warn "最低需要 v$XRAY_MIN_VERSION。"; ui_pause; continue; fi
                     st_sets .core.xray "$v" ;;
             esac
@@ -5507,7 +5700,7 @@ edit_core() {
             input_page 'SS-Rust 版本' '指定版本' '填写 shadowsocks-rust 的版本号，例如 v1.24.0。'
             iv=$(installed_version ss)
             [[ $(st .core.ss) == latest ]] || iv=$(st .core.ss)
-            ask_core_version "${iv:-v1.24.0}" v || continue
+            ask_core_version "${iv:-v1.24.0}" v ss || continue
             st_sets .core.ss "$v"
         fi
     done
@@ -5570,6 +5763,7 @@ render_xray_config() {
     local inb=$STAGE/xr-in.ndjson rules=$STAGE/xr-rules.ndjson
     : > "$inb"
     : > "$rules"
+    : > "$STAGE/xr-gate.ndjson"
     local -a direct_tags=() vless_tags=()
     sniff='null'
     if [[ $cn == 1 || $bt == 1 ]]; then
@@ -5772,7 +5966,7 @@ ACL
 nginx_probe() {
     local build v m module_dir=''
     local -a modules=()
-    NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0 NGINX_PROBE_ERR=''
+    NGINX_MODULE_LINE='' NGINX_SUPPORTS_E=0 NGINX_SUPPORTS_KEEPALIVE=0 NGINX_PROBE_ERR=''
     if ! build=$(LC_ALL=C LANGUAGE=C timeout -k 2 5 nginx -V 2>&1); then
         printf '%s\n' "$build" >> "${STEP_LOG:-/dev/null}"
         NGINX_PROBE_ERR='读取 Nginx 编译信息失败或超时。'; return 2
@@ -5805,6 +5999,7 @@ nginx_probe() {
         [[ -n $NGINX_MODULE_LINE ]] || { NGINX_PROBE_ERR='找不到 Nginx Stream 动态模块。'; return 1; }
     fi
     v=$(sed -n 's#.*nginx/\([0-9.]*\).*#\1#p' <<< "$build" | head -n 1)
+    if [[ -n $v ]] && ver_ge "$v" 1.15.6; then NGINX_SUPPORTS_KEEPALIVE=1; fi
     # -e overrides the compiled-in error log before nginx parses our config (since 1.19.5).
     if [[ -n $v ]] && ver_ge "$v" 1.19.5; then NGINX_SUPPORTS_E=1; else NGINX_SUPPORTS_E=0; fi
 }
@@ -5858,12 +6053,12 @@ stream {
         listen 0.0.0.0:$(st .reality.port);
 EOF
         if has_ipv6_stack; then printf '        listen [::]:%s ipv6only=on;\n' "$(st .reality.port)"; fi
+        if (( NGINX_SUPPORTS_KEEPALIVE )); then printf '        proxy_socket_keepalive on;\n'; fi
         cat <<EOF
         ssl_preread on;
         preread_timeout 5s;
         proxy_connect_timeout 5s;
         proxy_timeout 24h;
-        proxy_socket_keepalive on;
         limit_conn zxray_ip $(st .reality.conn_ip);
         limit_conn zxray_total $(st .reality.conn_total);
         limit_conn_log_level notice;
@@ -6064,13 +6259,110 @@ render_info() {
 
 installed_version() { jq -r ".installed.$1 // empty" "$STATE" 2>/dev/null || true; }
 
+manager_launcher_text() {
+    printf '#!/bin/sh\n%s\nexec bash "%s" "$@"\n' "$MANAGED_TAG" "$SELF_SCRIPT_PATH"
+}
+
+is_manager_launcher() {
+    local LC_ALL=C expected actual='' rc=0
+    [[ ! -L $1 && -f $1 && -r $1 ]] || return 1
+    expected=$(manager_launcher_text)$'\n'
+    # Preflight runs before cmp is installed. A NUL or an extra byte disqualifies the file.
+    IFS= read -r -d '' -n "$(( ${#expected} + 1 ))" actual < "$1" || rc=$?
+    [[ $rc == 1 && $actual == "$expected" ]]
+}
+
+is_core_link() {
+    local target
+    [[ -L $PUBLIC_XRAY ]] || return 1
+    target=$(readlink -- "$PUBLIC_XRAY" && printf x) || return 1
+    [[ $target == "$CORE_BIN"$'\nx' ]]
+}
+
+other_xray_on_path() {
+    local p
+    while IFS= read -r p; do
+        [[ -f $p && -x $p && ! $p -ef $PUBLIC_XRAY && ! $p -ef $QUICK_BIN &&
+            ! $p -ef $SELF_SCRIPT_PATH ]] || continue
+        is_manager_launcher "$p" || return 0
+    done < <(type -aP xray 2>/dev/null)
+    return 1
+}
+
+check_launcher_slot() {
+    [[ ! -e $QUICK_BIN && ! -L $QUICK_BIN ]] || is_manager_launcher "$QUICK_BIN" || {
+        die "$QUICK_BIN 已被其他程序占用，无法创建 zxray 管理命令。"; return 1;
+    }
+}
+
+# Only an existing state and our exact service command authorize the old core path.
+legacy_core_owned() {
+    local file schema
+    [[ -f $STATE && ! -L $PUBLIC_XRAY ]] || return 1
+    [[ ! -e $PUBLIC_XRAY || -f $PUBLIC_XRAY ]] || return 1
+    schema=$(jq -r '.schema // 0' "$STATE" 2>/dev/null) || return 1
+    [[ $schema == 4 || $schema == "$STATE_SCHEMA" ]] || return 1
+    if [[ $INIT == systemd ]]; then
+        file=$SYSTEMD_DIR/xray.service
+        is_managed_file "$file" && grep -Fxq "ExecStart=$PUBLIC_XRAY run -config $CONFIG_FILE" "$file" || return 1
+    else
+        file=$OPENRC_DIR/xray
+        is_managed_file "$file" && grep -Fxq "command=\"$PUBLIC_XRAY\"" "$file" || return 1
+    fi
+    ! is_managed_file "$PUBLIC_XRAY"
+}
+
+select_core_path() {
+    XRAY_BIN=$CORE_BIN
+    LEGACY_CORE_OWNED=0
+    if legacy_core_owned; then
+        LEGACY_CORE_OWNED=1
+        XRAY_BIN=$PUBLIC_XRAY
+    fi
+    return 0
+}
+
+# Keep older services on their native executable; expose private cores with a link.
+sync_native_command() {
+    local tmp
+    if ! needs_xray; then
+        if is_core_link || is_manager_launcher "$PUBLIC_XRAY"; then rm -f -- "$PUBLIC_XRAY" || return 1; fi
+        return 0
+    fi
+    is_regular_executable "$XRAY_BIN" || {
+        die "找不到可执行的 Xray 核心：$XRAY_BIN"; return 1;
+    }
+    [[ $XRAY_BIN != "$PUBLIC_XRAY" ]] || return 0
+    if [[ -e $PUBLIC_XRAY || -L $PUBLIC_XRAY ]] && ! is_core_link && ! is_manager_launcher "$PUBLIC_XRAY"; then
+        ui_note "保留已有的 $PUBLIC_XRAY，本工具使用的核心位于 $CORE_BIN。"
+        return 0
+    fi
+    if other_xray_on_path; then
+        # The public slot is empty or belongs to us. Expose the existing command again.
+        rm -f -- "$PUBLIC_XRAY" || return 1
+        return 0
+    fi
+    is_core_link && return 0
+    tmp=$(mktemp "$PUBLIC_XRAY.new.XXXXXX") || return 1
+    if ! ln -sf -- "$CORE_BIN" "$tmp" || ! mv -fT -- "$tmp" "$PUBLIC_XRAY"; then
+        rm -f -- "$tmp"
+        die "无法创建 Xray 核心命令：$PUBLIC_XRAY"; return 1
+    fi
+    return 0
+}
+
 core_satisfied() {
     local which=$1 want cur old
     state_ok || return 1
     want=$(st ".core.$which")
     case $which in
-        xray) [[ -x $XRAY_BIN ]] && cur=$(xray_version_of "$XRAY_BIN") || return 1 ;;
-        ss) [[ -x $SS_BIN ]] && cur=$(ss_version_of "$SS_BIN") || return 1 ;;
+        xray)
+            is_regular_executable "$XRAY_BIN" || return 1
+            needs_full_geo || installed_geodata_usable || return 1
+            cur=$(xray_version_of "$XRAY_BIN") && ver_ge "$cur" "$XRAY_MIN_VERSION" || return 1 ;;
+        ss)
+            is_regular_executable "$SS_BIN" || return 1
+            cur=$(ss_version_of "$SS_BIN") || return 1 ;;
         *) return 1 ;;
     esac
     old=$(jq -r ".core.$which // empty" "$STATE" 2>/dev/null || true)
@@ -6086,12 +6378,24 @@ needs_full_geo() {
     needs_xray && [[ $(st '.egress.cn // 0') == 1 ]]
 }
 
+geodata_files_ok() {
+    local file
+    [[ -d $1 ]] || return 1
+    for file in "$1/geoip.dat" "$1/geosite.dat"; do
+        [[ ! -L $file && -f $file && -s $file ]] || return 1
+    done
+}
+
+installed_geodata_usable() {
+    geodata_files_ok "$XRAY_ASSET_DIR" && service_readable_files "$XRAY_ASSET_DIR/geoip.dat" "$XRAY_ASSET_DIR/geosite.dat" >/dev/null
+}
+
 full_geo_fresh() {
     local m=$XRAY_ASSET_DIR/.zxray-full-geo t now
-    [[ -s $XRAY_ASSET_DIR/geoip.dat && -s $XRAY_ASSET_DIR/geosite.dat && -f $m ]] || return 1
+    [[ ! -L $m && -f $m ]] || return 1
     t=$(stat -c %Y -- "$m" 2>/dev/null || echo 0)
     now=$(date +%s)
-    [[ $t =~ ^[0-9]+$ ]] && (( t > 0 && now >= t && now - t <= 604800 ))
+    [[ $t =~ ^[0-9]+$ ]] && (( t > 0 && now >= t && now - t <= 604800 )) && installed_geodata_usable
 }
 
 download_full_geodata() {
@@ -6125,7 +6429,7 @@ download_full_geodata() {
         fi
         rm -f -- "$FULL_GEO_DIR/$gz" "$FULL_GEO_DIR/$gz.sha256sum"
     done
-    [[ -s $FULL_GEO_DIR/geoip.dat && -s $FULL_GEO_DIR/geosite.dat ]] || {
+    geodata_files_ok "$FULL_GEO_DIR" || {
         die '完整地理规则下载后的文件为空。'; return 1;
     }
     printf '%s\n' 'XTLS/Xray-rules-dat: GeoIP Full, GeoSite Expanded' > "$FULL_GEO_DIR/.zxray-full-geo"
@@ -6133,26 +6437,32 @@ download_full_geodata() {
     GEO_REFRESH=1
 }
 
-install_full_geodata() {
-    (( GEO_REFRESH )) || return 0
-    [[ -s $FULL_GEO_DIR/geoip.dat && -s $FULL_GEO_DIR/geosite.dat ]] || {
-        die '待安装的 Geo Full 数据不存在。'; return 1;
-    }
-    atomic_install "$FULL_GEO_DIR/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
-    atomic_install "$FULL_GEO_DIR/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
-    atomic_install "$FULL_GEO_DIR/.zxray-full-geo" "$XRAY_ASSET_DIR/.zxray-full-geo" 644
+install_xray_geodata() {
+    local src=$USE_XRAY_ASSET file
+    [[ $src != "$XRAY_ASSET_DIR" ]] || return 0
+    geodata_files_ok "$src" || { die '待安装的地理规则缺失或为空。'; return 1; }
+    [[ ! -L $XRAY_ASSET_DIR ]] || { die "地理规则目录是符号链接，请先移走该链接再重试：$XRAY_ASSET_DIR"; return 1; }
+    make_dir "$XRAY_ASSET_DIR" && chmod 755 -- "$XRAY_ASSET_DIR" || return 1
+    for file in geoip.dat geosite.dat; do
+        atomic_install "$src/$file" "$XRAY_ASSET_DIR/$file" 644 replace-link || return 1
+    done
+    if (( GEO_REFRESH )); then
+        atomic_install "$src/.zxray-full-geo" "$XRAY_ASSET_DIR/.zxray-full-geo" 644 replace-link
+    else
+        rm -f -- "$XRAY_ASSET_DIR/.zxray-full-geo"
+    fi
 }
 
 plan_cores() {
     USE_XRAY='' USE_SS='' NEW_XRAY=0 NEW_SS=0 GEO_REFRESH=0 FULL_GEO_DIR=''
     if needs_full_geo && ! full_geo_fresh; then GEO_REFRESH=1; fi
     if needs_xray; then
-        if [[ -x $XRAY_BIN ]] && core_satisfied xray             && ver_ge "$(xray_version_of "$XRAY_BIN")" "$XRAY_MIN_VERSION"; then
+        if core_satisfied xray; then
             USE_XRAY=$XRAY_BIN USE_XRAY_ASSET=$XRAY_ASSET_DIR
         else NEW_XRAY=1; fi
     fi
     if needs_ss_rust; then
-        if [[ -x $SS_BIN ]] && core_satisfied ss; then USE_SS=$SS_BIN
+        if core_satisfied ss; then USE_SS=$SS_BIN
         else NEW_SS=1; fi
     fi
 }
@@ -6528,7 +6838,7 @@ configure_bbr() {
     local cc q
     timeout -k 2 10 modprobe tcp_bbr >/dev/null 2>&1 || true
     if ! timeout -k 2 5 sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then return 0; fi
-    if [[ -f $SYSCTL_FILE ]] && ! is_managed_file "$SYSCTL_FILE"; then return 0; fi
+    if [[ -e $SYSCTL_FILE || -L $SYSCTL_FILE ]] && ! is_managed_file "$SYSCTL_FILE"; then return 0; fi
     if ! cc=$(timeout -k 2 5 sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null) \
         || ! q=$(timeout -k 2 5 sysctl -n net.core.default_qdisc 2>/dev/null) || [[ -z $cc || -z $q ]]; then
         ui_warn '无法读取原始网络参数，已跳过 BBR 设置。'
@@ -6751,17 +7061,8 @@ install_files_and_services() {
     chmod 755 "$DATA_DIR" "$SELF_DIR"
     prepare_service_logs
     if needs_xray; then
-        if [[ $USE_XRAY != "$XRAY_BIN" ]]; then
-            install_bin "$USE_XRAY" "$XRAY_BIN"
-            if (( ! GEO_REFRESH )) && [[ $USE_XRAY_ASSET != "$XRAY_ASSET_DIR" ]]; then
-                atomic_install "$USE_XRAY_ASSET/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
-                atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
-                rm -f -- "$XRAY_ASSET_DIR/.zxray-full-geo"
-            fi
-            make_dir "$XRAY_ASSET_DIR"
-            chmod 755 "$XRAY_ASSET_DIR"
-        fi
-        install_full_geodata
+        if [[ $USE_XRAY != "$XRAY_BIN" ]]; then install_bin "$USE_XRAY" "$XRAY_BIN"; fi
+        install_xray_geodata || return 1
         make_dir "$CONFIG_DIR"
         atomic_install "$STAGE/config.json" "$CONFIG_FILE" 640
         chown "root:$SERVICE_USER" "$CONFIG_FILE"
@@ -6771,7 +7072,7 @@ install_files_and_services() {
         if xray_needs_lowport; then low=1; fi
         grant_lowport "$XRAY_BIN" "$low"
         write_service xray "$XRAY_BIN" "run -config $CONFIG_FILE" 'Xray' "$SERVICE_USER" "$low" "XRAY_LOCATION_ASSET=$XRAY_ASSET_DIR"
-        check_service_access "$XRAY_BIN" "$CONFIG_FILE" "$XRAY_ASSET_DIR/geoip.dat"
+        check_service_access "$XRAY_BIN" "$CONFIG_FILE" "$XRAY_ASSET_DIR/geoip.dat" "$XRAY_ASSET_DIR/geosite.dat"
     fi
     if needs_ss_rust; then
         [[ $USE_SS == "$SS_BIN" ]] || install_bin "$USE_SS" "$SS_BIN"
@@ -6944,6 +7245,7 @@ validate_network_targets() {
 }
 
 apply_draft() {
+    check_launcher_slot || return 1
     check_service_ownership || return 1
     plan_cores
     STEP_NO=0
@@ -7132,7 +7434,9 @@ migrate_state() {
 
 foreign_install_present() {
     state_ok && return 1
-    [[ -e $CONFIG_FILE || -e $XRAY_BIN || -f $OLD_DATA_DIR/state.json ]] && return 0
+    # Install and uninstall can replace these directories in their entirety.
+    [[ -e $CONFIG_DIR || -L $CONFIG_DIR || -e $XRAY_ASSET_DIR || -L $XRAY_ASSET_DIR ||
+       -e $CORE_BIN || -L $CORE_BIN || -f $OLD_DATA_DIR/state.json ]] && return 0
     local s
     for s in "${MANAGED_SERVICES[@]}"; do svc_exists "$s" && return 0; done
     return 1
@@ -7145,15 +7449,15 @@ foreign_install_hint() {
         ui_err '发现旧版 Xray Manager 的安装，新版不能直接接管。'
         ui_line '请先卸载旧版，再重新运行本脚本：'
         if [[ -f $OLD_SELF_SCRIPT ]]; then ui_code "  bash $OLD_SELF_SCRIPT --uninstall"
-        else ui_line '  zxray --uninstall'; fi
+        else ui_note '请运行原版本的管理脚本，并选择完整卸载。'; fi
         return 1
     fi
-    ui_err '发现不是由本脚本安装的 Xray，为避免破坏它，已停止。'
-    for p in "$CONFIG_FILE" "$XRAY_BIN" "$STATE"; do
-        [[ ! -e $p ]] || ui_code "  $p"
+    ui_err '发现已有的 Xray 文件、目录或同名服务，已停止安装。'
+    for p in "$CONFIG_DIR" "$XRAY_ASSET_DIR" "$CORE_BIN"; do
+        if [[ -e $p || -L $p ]]; then ui_code "  $p"; fi
     done
     for p in "${MANAGED_SERVICES[@]}"; do svc_exists "$p" && ui_line "同名服务：$p"; done
-    ui_note '请先通过原安装方式卸载冲突程序，再运行本工具。'
+    ui_note '请先核查以上路径或服务的归属，再处理冲突。'
     return 1
 }
 
@@ -7246,22 +7550,20 @@ cleanup_source_scripts() {
 
 install_self() {
     local src=$SOURCE_PATH
-    make_dir "$SELF_DIR" "$(dirname -- "$QUICK_BIN")"
+    check_launcher_slot || return 1
+    make_dir "$SELF_DIR" "$(dirname -- "$QUICK_BIN")" || return 1
     if [[ -n $src && -f $src && $src != "$SELF_SCRIPT_PATH" ]] && grep -q "$SCRIPT_MARKER" "$src" 2>/dev/null; then
         local cur_v src_v
         src_v=$(script_version_of "$src")
         cur_v=$(script_version_of "$SELF_SCRIPT_PATH")
         if [[ -z $cur_v ]] || ver_ge "$src_v" "$cur_v"; then
-            atomic_install "$src" "$SELF_SCRIPT_PATH" 700
-            record_source_script
+            atomic_install "$src" "$SELF_SCRIPT_PATH" 700 || return 1
+            record_source_script || return 1
         fi
     fi
-    [[ -f $SELF_SCRIPT_PATH ]] || return 0
-    if [[ -e $QUICK_BIN || -L $QUICK_BIN ]] && ! is_managed_file "$QUICK_BIN"; then
-        ui_warn "$QUICK_BIN 已被其他程序占用，没有创建 zxray 快捷命令。"
-        return 0
-    fi
-    printf '#!/bin/sh\n%s\nexec bash "%s" "$@"\n' "$MANAGED_TAG" "$SELF_SCRIPT_PATH" | atomic_write "$QUICK_BIN" 755
+    [[ -f $SELF_SCRIPT_PATH ]] || { die "缺少管理脚本：$SELF_SCRIPT_PATH"; return 1; }
+    manager_launcher_text | atomic_write "$QUICK_BIN" 755 || return 1
+    sync_native_command
 }
 
 
@@ -7314,10 +7616,13 @@ carry_meta_from_state() {
             | {nginx_packages, nginx_hash, created_user, created_dirs, fw_rules, extra_packages, source_files}
             | with_entries(select(.value != null))))
         | .name = ($o[0].name // .name)
-        | .firewall = ($o[0].firewall // .firewall)'
+        | .name_initialized = ($o[0].name_initialized // 0)
+        | .firewall = ($o[0].firewall // .firewall)' || return 1
+    normalize_node_name
 }
 
 action_install() {
+    check_launcher_slot || return 1
     if foreign_install_present; then
         foreign_install_hint
         return 1
@@ -7602,7 +7907,8 @@ action_rollback() {
     MODE=modify
     DRAFT=$STAGE/draft.json
     jq --slurpfile cur "$STATE" '.meta = $cur[0].meta | .installed = $cur[0].installed
-        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema' "$prev" > "$DRAFT" || return 1
+        | .installed_at = $cur[0].installed_at | .schema = $cur[0].schema
+        | if (.name // "") != "" then .name_initialized = 1 else . end' "$prev" > "$DRAFT" || return 1
     normalize_draft_for_apply
     pv_snapshot "$STATE"
     mapfile -t PV_KEYS < <(preview_items | grep -v '^@')
@@ -7635,8 +7941,8 @@ prev_state_ok() {
 save_prev_state() {
     state_ok || return 0
     local a b
-    a=$(jq -S -c 'del(.installed, .installed_at, .updated_at, .script, .meta)' "$STATE")
-    b=$(jq -S -c 'del(.installed, .installed_at, .updated_at, .script, .meta)' "$DRAFT")
+    a=$(jq -S -c 'del(.installed, .installed_at, .updated_at, .script, .meta, .name_initialized)' "$STATE")
+    b=$(jq -S -c 'del(.installed, .installed_at, .updated_at, .script, .meta, .name_initialized)' "$DRAFT")
     [[ $a != "$b" ]] || return 0
     atomic_install "$STATE" "$DATA_DIR/state.prev.json" 600
 }
@@ -7667,6 +7973,17 @@ action_update() {
     update_cores
 }
 
+require_update_core() {
+    local bin=$1 name=$2
+    is_regular_executable "$bin" && return 0
+    if [[ ! -L $bin && -d $bin ]]; then
+        die "$name 核心路径是目录：$bin。请先移走该目录，再重新应用配置。"
+    else
+        die "$name 核心须为可执行的普通文件，请先重新应用配置以修复核心。"
+    fi
+    return 1
+}
+
 action_geo_update() {
     if ! state_ok; then ui_warn '还没有安装，请先在主页选择「安装」。'; return 0; fi
     # Read the installed state without normalizing or rewriting user configuration.
@@ -7676,6 +7993,8 @@ action_geo_update() {
         ui_warn '当前没有启用 Xray 的大陆域名/IP 拦截，不需要完整地理规则。'
         return 0
     fi
+    check_launcher_slot || return 1
+    require_update_core "$XRAY_BIN" Xray || return 1
     MODE=modify
     STEP_NO=0 STEP_TOTAL=1
     ui_step '下载并校验地理规则'
@@ -7683,7 +8002,7 @@ action_geo_update() {
     download_full_geodata
     USE_XRAY=$XRAY_BIN
     ui_step_done
-    replace_cores '地理规则已更新，节点不变。'
+    replace_cores '地理规则已更新，连接参数不变。'
 }
 
 
@@ -7829,14 +8148,18 @@ update_nginx() {
 
 update_cores() {
     local -a todo=() notes=()
-    local cur new tag t dir want
+    local cur new tag t dir want core_bin core_name
     STATE_READY=0
     if ! state_ok; then ui_warn '还没有安装，请先在主页选择「安装」。'; return 0; fi
+    check_launcher_slot || return 1
     # A core-only update never runs load_state_draft, which normalizes fingerprints
     # and landing JSON. Such changes require a full configuration regeneration.
     DRAFT=$STAGE/draft.json
     cp -f -- "$STATE" "$DRAFT"
     STATE_READY=1
+    if needs_ss_rust; then core_bin=$SS_BIN core_name=SS-Rust
+    else core_bin=$XRAY_BIN core_name=Xray; fi
+    require_update_core "$core_bin" "$core_name" || return 1
     MODE=modify
     STEP_NO=0; STEP_TOTAL=1
     : > "$STEP_LOG"
@@ -7845,8 +8168,8 @@ update_cores() {
     : > "$STEP_LOG"
     dir=$STAGE/core
     mkdir -p "$dir"
-    if needs_xray; then
-        [[ -x $XRAY_BIN ]] && cur=$(xray_version_of "$XRAY_BIN") || {
+    if [[ $core_name == Xray ]]; then
+        cur=$(xray_version_of "$core_bin") || {
             die '无法读取当前 Xray 版本，请重新应用配置以修复核心。'; return 1;
         }
         want=$(st .core.xray)
@@ -7862,9 +8185,8 @@ update_cores() {
             todo+=("Xray ${cur:-未知} -> $new")
             USE_XRAY=$dir/xray-pkg/xray USE_XRAY_ASSET=$dir/xray-pkg
         fi
-    fi
-    if needs_ss_rust; then
-        [[ -x $SS_BIN ]] && cur=$(ss_version_of "$SS_BIN") || {
+    else
+        cur=$(ss_version_of "$core_bin") || {
             die '无法读取当前 SS-Rust 版本，请重新应用配置以修复核心。'; return 1;
         }
         want=$(st .core.ss)
@@ -7873,7 +8195,7 @@ update_cores() {
             [[ ${cur#v} == "${want#v}" ]] || { die "当前 SS-Rust 与固定版本 $want 不符，请重新应用配置。"; return 1; }
             new=''; notes+=("SS-Rust 已固定为 $want")
         fi
-        if [[ -n $new && ${new#v} != "${cur#v}" ]] && ver_ge "$new" "${cur:-0}"; then
+        if [[ -n $new ]] && ! ver_ge "$cur" "$new"; then
             download_ss "$new" "$dir/ss-pkg"
             todo+=("SS-Rust ${cur:-未知} -> $new")
             USE_SS=$dir/ss-pkg/ssserver
@@ -7905,7 +8227,8 @@ update_cores() {
 }
 
 replace_cores() {
-    local result=${1:-核心已更新，节点不变。} geo_only=0
+    local result=${1:-核心已更新，连接参数不变。} geo_only=0
+    check_launcher_slot || return 1
     if [[ $USE_XRAY == "$XRAY_BIN" && -z $USE_SS ]] && (( GEO_REFRESH )); then geo_only=1; fi
     STEP_NO=0 STEP_TOTAL=1
     ui_blank
@@ -7922,12 +8245,7 @@ replace_cores() {
     stop_owned_services || return 1
     if [[ -n $USE_XRAY ]]; then
         if [[ $USE_XRAY != "$XRAY_BIN" ]]; then install_bin "$USE_XRAY" "$XRAY_BIN"; fi
-        if (( ! GEO_REFRESH )) && [[ $USE_XRAY_ASSET != "$XRAY_ASSET_DIR" ]]; then
-            atomic_install "$USE_XRAY_ASSET/geoip.dat" "$XRAY_ASSET_DIR/geoip.dat" 644
-            atomic_install "$USE_XRAY_ASSET/geosite.dat" "$XRAY_ASSET_DIR/geosite.dat" 644
-            rm -f -- "$XRAY_ASSET_DIR/.zxray-full-geo"
-        fi
-        install_full_geodata
+        install_xray_geodata || return 1
         if xray_needs_lowport; then grant_lowport "$XRAY_BIN" 1; fi
     fi
     if [[ -n $USE_SS ]]; then
@@ -8308,7 +8626,7 @@ remove_service_links() {
 
 uninstall_has_untracked_files() {
     local service
-    [[ -e $STATE || -e $CONFIG_FILE || -e $XRAY_BIN || -e $SS_BIN || -e $SS_CONFIG || -e $SS_ACL ||
+    [[ -e $STATE || -e $CONFIG_FILE || -e $CORE_BIN || -e $SS_BIN || -e $SS_CONFIG || -e $SS_ACL ||
        -e $DATA_DIR/state.prev.json || -e $OLD_DATA_DIR/state.json || -e $NGINX_DIR ]] && return 0
     for service in "${MANAGED_SERVICES[@]}"; do
         [[ -e $SYSTEMD_DIR/$service.service || -e $OPENRC_DIR/$service ]] && return 0
@@ -8322,7 +8640,7 @@ uninstall_preflight() {
     if uninstall_has_untracked_files; then
         TUI_MSG='缺少安装记录，请先核查残留文件。'
         TOP_RC=1
-    elif [[ -f $SELF_SCRIPT_PATH ]] || is_managed_file "$QUICK_BIN"; then
+    elif [[ -f $SELF_SCRIPT_PATH ]] || is_manager_launcher "$QUICK_BIN" || is_manager_launcher "$PUBLIC_XRAY" || is_core_link; then
         return 0
     elif [[ -e $DATA_DIR || -L $DATA_DIR || -e $SELF_DIR || -L $SELF_DIR ||
             -e $CONFIG_DIR || -L $CONFIG_DIR || -e $XRAY_ASSET_DIR || -L $XRAY_ASSET_DIR ]]; then
@@ -8361,7 +8679,7 @@ action_uninstall() {
         ui_line '没有检测到本脚本部署的服务。'
         prepare_source_cleanup '' || return 1
         source_count=$(jq 'length' "$STAGE/source-cleanup.json")
-        if [[ -f $SELF_SCRIPT_PATH ]] || is_managed_file "$QUICK_BIN" || (( source_count > 0 )); then
+        if [[ -f $SELF_SCRIPT_PATH ]] || is_manager_launcher "$QUICK_BIN" || is_manager_launcher "$PUBLIC_XRAY" || is_core_link || (( source_count > 0 )); then
             ui_rule
             if ask_no '删除管理脚本、zxray 命令及已确认的原始脚本'; then
                 remove_self_files
@@ -8410,7 +8728,7 @@ action_uninstall() {
     for p in "${MANAGED_PATHS[@]}"; do
         # Never delete a system file installed by someone else.
         if [[ $p == "$SYSCTL_FILE" ]] && ! is_managed_file "$p"; then continue; fi
-        if [[ $p == "$QUICK_BIN" ]] && ! is_managed_file "$p"; then continue; fi
+        if foreign_command_at "$p"; then continue; fi
         rm -rf -- "$p"
     done
     rm -rf -- "$NGINX_RUN"
@@ -8452,7 +8770,8 @@ uninstall_changes() {
 remove_self_files() {
     local d
     rm -rf -- "$SELF_DIR" "$DATA_DIR"
-    if is_managed_file "$QUICK_BIN"; then rm -f -- "$QUICK_BIN"; fi
+    if is_manager_launcher "$QUICK_BIN"; then rm -f -- "$QUICK_BIN"; fi
+    if is_core_link || is_manager_launcher "$PUBLIC_XRAY"; then rm -f -- "$PUBLIC_XRAY"; fi
     for d in "$STAGE_BASE".*; do
         [[ -d $d && $d != "$STAGE" ]] && rm -rf -- "$d"
     done
@@ -8460,32 +8779,6 @@ remove_self_files() {
     return 0
 }
 
-
-usage() {
-    cat <<EOF
-Xray Manager v$SCRIPT_VERSION
-
-用法：sh xray-manager.sh [选项]
-      zxray [选项]
-
-不带选项时打开交互主页。
-
-选项：
-  --install            安装（加 --yes 时全部使用默认设置）
-  --scheme 方案        指定方案，可选：
-                       reality-raw  reality-xhttp  reality-split  ss
-                       enc  dual  triple  enc-split
-  --core-version 版本  安装时的 Xray 版本：latest（最新正式版，默认）
-                       或指定版本号，例如 v26.10.31
-  --update             更新当前方案的 Xray / SS-Rust / Nginx，保留配置
-  --nodes              输出节点链接
-  --uninstall          完整卸载
-  --yes                跳过所有确认
-  --force              同 --yes，并允许覆盖已有安装
-  --version            显示脚本版本
-  --help               显示本帮助
-EOF
-}
 
 map_scheme_name() {
     local s
@@ -8514,7 +8807,7 @@ parse_args() {
                 (( $# >= 2 )) || fatal '--core-version 缺少参数。'
                 CLI_CORE_TAG=$2
                 if [[ $CLI_CORE_TAG != latest ]]; then
-                    [[ $CLI_CORE_TAG =~ ^v?[0-9]+(\.[0-9]+){1,3}$ ]] || fatal "--core-version 格式不对：$CLI_CORE_TAG"
+                    valid_xray_version "${CLI_CORE_TAG#v}" || fatal "--core-version 需要三段版本号，例如 v$XRAY_MIN_VERSION。"
                     ver_ge "${CLI_CORE_TAG#v}" "$XRAY_MIN_VERSION" || fatal "--core-version 最低 v$XRAY_MIN_VERSION。"
                     CLI_CORE_TAG=$(normalize_tag "$CLI_CORE_TAG")
                 fi
@@ -8529,6 +8822,7 @@ parse_args() {
 }
 
 action_install_cli() {
+    check_launcher_slot || return 1
     if foreign_install_present; then foreign_install_hint; return 1; fi
     if state_ok && (( ! FORCE )); then
         die '本机已经安装过，重新安装会让现有节点失效。' '确定要重新安装，请改用 --force。'
@@ -8565,7 +8859,7 @@ system_running() {
 }
 
 home_alerts() {
-    local proto port label kind f xv rc
+    local proto port label kind f xv cur rc
     local -a a=() ports=()
     if ! system_running; then
         a+=('服务没有在运行，可在「更新与维护」里重启')
@@ -8589,11 +8883,10 @@ home_alerts() {
         done
     fi
     f=$DATA_DIR/update-check.json
-    if [[ -f $f ]]; then
-        xv=$(jq -r '.xray // empty' "$f" 2>/dev/null || true)
-        if [[ -n $xv && $(st .core.xray) == latest && -n $(installed_version xray) ]] && ! ver_ge "$(installed_version xray)" "$xv"; then
-            a+=("Xray 有新版本 $xv，可在「更新与维护」里更新")
-        fi
+    if [[ -f $f && $(st .core.xray) == latest ]] \
+        && xv=$(jq -er '.xray | strings | select(test("[[:cntrl:]]") | not)' "$f" 2>/dev/null) && valid_xray_version "${xv#v}" \
+        && cur=$(installed_version xray) && valid_xray_version "${cur#v}" && ! ver_ge "$cur" "$xv"; then
+        a+=("Xray 有新版本 $xv，可在「更新与维护」里更新")
     fi
     for f in "${a[@]}"; do ui_kv '' "$C_YELLOW! $f$C_RESET"; done
 }
@@ -8808,8 +9101,10 @@ prepare_runtime() {
     SOURCE_PATH=${BASH_SOURCE[0]}
     SOURCE_RECORD=$(source_script_record "$SOURCE_PATH" 2>/dev/null) || SOURCE_RECORD=''
     if [[ -f $SOURCE_PATH ]]; then SOURCE_PATH=$(readlink -f -- "$SOURCE_PATH"); fi
+    select_core_path
     tx_recover_if_needed
     migrate_state
+    select_core_path
     check_state_file
     clean_stale_stages
     runtime_ready=1
