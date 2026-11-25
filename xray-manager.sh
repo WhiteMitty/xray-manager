@@ -181,7 +181,9 @@ init_paths() {
 init_paths ''
 
 STAGE='' TX_ACTIVE=0 IN_ROLLBACK=0 KEEP_TX=0 ACTION_PID='' CHILD_RUNNING=0
+LOCK_OWNER='' DRAFT_GENERATION='' SOURCE_DIGEST=''
 INPUT_FD=0 INPUT_TTY_STATE='' SOURCE_PATH='' DRAFT=''
+INPUT_SUPERVISORS=()
 SOURCE_RECORD='' SOURCE_CLEANUP_LEFT=0
 STEP_NO=0 STEP_TOTAL=0 STEP_OPEN=0 STEP_LOG='' STEP_LABEL='' DIE_SHOWN=0
 CHILD_RC=0 SUB_RC=0 TOP_RC=0 TOP_QUIET=0 STATE_READY=0
@@ -677,7 +679,7 @@ spin_start() {
             if (( e >= 2 && room >= 7 )); then printf '\e7%s %ds\e8' "${f[i % 4]}" "$e"
             else printf '\e7%s\e8' "${f[i % 4]}"; fi
         done
-    ) >&4 2>/dev/null 3>&- 4>&- 5>&- 9>&- &
+    ) >&4 2>/dev/null 3>&- 4>&- 5>&- 8>&- 9>&- &
     SPIN_PID=$!
 }
 
@@ -770,6 +772,7 @@ on_tstp() {
     tui_cursor on
     tty_echo "${INPUT_TTY_STATE:-echo}"
     if [[ ${LOG_VIEW_ACTIVE:-0} == 1 ]]; then printf '\e[0m\e[?1049l' >&4; fi
+    printf '\n  %s\n' 'zxray 将暂停。在本终端运行 jobs -l 查看作业，用 fg %作业号 恢复。' >&4
     trap - TSTP
     # Suspend the whole job only after the active view has restored the terminal.
     # SIGTSTP preserves the kernel's orphaned process-group protection.
@@ -782,8 +785,40 @@ on_tstp() {
     TUI_RESIZED=1
 }
 
+check_input_session() {
+    (( ${#INPUT_SUPERVISORS[@]} )) || return 0
+    # Each asynchronous action has a waiting parent. A plain kill -0 on the
+    # top manager would miss a missing intermediate parent or a recycled PID.
+    local pid=$BASHPID stat state ppid pgrp sid tty fg i
+    local -a chain=("${INPUT_SUPERVISORS[@]}" "$ACTION_PID")
+    [[ $pid == "$ACTION_PID" ]] || chain+=("$pid")  # log viewer subshell
+    for (( i=${#chain[@]}-1; i>0; i-- )); do
+        stat=$(< "/proc/${chain[i]}/stat") 2>/dev/null || stat=''
+        stat=${stat##*) }; stat=${stat#* }
+        [[ ${stat%% *} == "${chain[i-1]}" ]] && continue
+        # Exit through the action's cleanup trap. Restore a live terminal only
+        # while this process group still owns its foreground.
+        trap '' PIPE TTOU
+        stat=$(< "/proc/$pid/stat") || stat=''
+        read -r state ppid pgrp sid tty fg _ <<< "${stat##*) }"
+        if [[ ${LOG_VIEW_ACTIVE:-0} == 1 && $pid != "$ACTION_PID" ]]; then
+            # The viewer's EXIT handler restores a menu-local raw mode. Its
+            # caller may be gone; restore only the original foreground state.
+            trap - EXIT
+        fi
+        if [[ -n $INPUT_TTY_STATE && $pgrp == "$fg" && $fg =~ ^[1-9][0-9]*$ ]]; then
+            if [[ ${LOG_VIEW_ACTIVE:-0} == 1 ]]; then printf '\e[0m\e[?1049l' >&4 || :; fi
+            tty_echo "$INPUT_TTY_STATE"
+            tui_cursor on || :
+        fi
+        exit 143
+    done
+}
+
 input_eof() {
-    printf '\n' >&4
+    # A disconnected client can close output and input together.
+    trap '' PIPE
+    printf '\n' >&4 2>/dev/null || :
     if [[ -n $ACTION_PID ]]; then
         exit 130
     fi
@@ -877,6 +912,10 @@ tty_edit_line() {
 
 read_line() {
     local __rl_p=$1 __rl_v='' __rl_pre=${3:-} __rl_mode=${4:-text}
+    local __rl_part __rl_rc __rl_tty=''
+    local -a __rl_options=(-r -u "$INPUT_FD")
+    (( ! ${#INPUT_SUPERVISORS[@]} )) || __rl_options+=(-t 1)
+    [[ $__rl_mode != secret ]] || __rl_options+=(-s)
     ui_flush
     while :; do
         printf -v "$2" '%s' ''
@@ -888,13 +927,26 @@ read_line() {
             fi
             printf '  %s' "$__rl_p" >&4
             if [[ $__rl_mode == secret ]]; then
-                IFS= read -rs -u "$INPUT_FD" __rl_v || input_eof
-                printf '\n' >&4
+                if input_is_tty; then
+                    __rl_tty=$(stty -g <&"$INPUT_FD") || return 1
+                    stty -echo <&"$INPUT_FD" || return 1
+                fi
             else
                 tty_echo echo
-                IFS= read -r -u "$INPUT_FD" __rl_v || input_eof
-                [[ -n $__rl_v ]] || __rl_v=$__rl_pre
             fi
+            __rl_v=''
+            while :; do
+                check_input_session
+                __rl_part='' __rl_rc=0
+                IFS= read "${__rl_options[@]}" __rl_part || __rl_rc=$?
+                __rl_v+=$__rl_part
+                (( __rl_rc > 128 )) || break
+            done
+            [[ -z $__rl_tty ]] || tty_echo "$__rl_tty"
+            (( __rl_rc == 0 )) || input_eof
+            check_input_session
+            if [[ $__rl_mode == secret ]]; then printf '\n' >&4
+            elif [[ -z $__rl_v ]]; then __rl_v=$__rl_pre; fi
         fi
         __rl_v=${__rl_v#"${__rl_v%%[![:space:]]*}"}
         __rl_v=${__rl_v%"${__rl_v##*[![:space:]]}"}
@@ -921,8 +973,10 @@ tui_read_key() {
         [[ -z $__tty_state ]] || stty susp undef <&"$INPUT_FD" 2>/dev/null || true
     fi
     while :; do
+        check_input_session
         __rc=0
         IFS= read -rsn1 -t 1 -u "$INPUT_FD" __k || __rc=$?
+        check_input_session
         if (( __rc > 128 )); then
             if (( TUI_RESIZED )); then TUI_RESIZED=0; __k=RESIZE; break; fi
             if [[ ${2:-} == timed ]]; then __k=TICK; break; fi
@@ -1817,7 +1871,7 @@ verify_mlkem_pair() {
         routing:{rules:[
             {type:"field",inboundTag:["probe"],outboundTag:"link"},
             {type:"field",inboundTag:["verify"],outboundTag:"answer"}]}}') || return 1
-    "$xray" run -format json -config stdin: <<< "$cfg" >/dev/null 2>&1 3>&- 4>&- 5>&- 9>&- &
+    "$xray" run -format json -config stdin: <<< "$cfg" >/dev/null 2>&1 3>&- 4>&- 5>&- 8>&- 9>&- &
     child=$!
     for i in {1..12}; do
         kill -0 "$child" 2>/dev/null || break
@@ -2057,7 +2111,7 @@ detect_system() {
     fi
 }
 
-pkg_run() { (umask 022 && "$@") 3>&- 4>&- 5>&- 9>&-; }
+pkg_run() { (umask 022 && "$@") 3>&- 4>&- 5>&- 8>&- 9>&-; }
 
 pkg_install() {
     DEBIAN_FRONTEND=noninteractive pkg_run apt-get -o DPkg::Lock::Timeout=180 install -y -qq "$@"
@@ -2291,7 +2345,7 @@ svc_active() {
 }
 svc_command() (
     umask 022
-    timeout -k 5 45 systemctl "$@" >/dev/null 3>&- 4>&- 5>&- 9>&-
+    timeout -k 5 45 systemctl "$@" >/dev/null 3>&- 4>&- 5>&- 8>&- 9>&-
 )
 svc_do() { svc_command "$@" 2>>"${STEP_LOG:-/dev/null}"; }
 # Confirm the same managed unit is idle immediately before bypassing a failed stop
@@ -2568,7 +2622,7 @@ service_readable_files() {
         fi
         for f do test -r "$f" || { printf "%s\n" "$f"; exit 1; }; done'
     timeout -k 2 10 setpriv --reuid="$SERVICE_USER" --regid="$SERVICE_USER" --init-groups \
-        /bin/sh -c "$check" _ "$@" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 5>&- 9>&-
+        /bin/sh -c "$check" _ "$@" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 5>&- 8>&- 9>&-
 }
 
 check_service_access() {
@@ -2589,7 +2643,7 @@ fw_kind() {
     return 0
 }
 
-fw_cmd() { LC_ALL=C LANGUAGE=C timeout -k 2 15 "$@"; }
+fw_cmd() { LC_ALL=C LANGUAGE=C timeout -k 2 15 "$@" 8>&-; }
 
 fw_ufw_v6() {
     [[ -r $ROOT/etc/default/ufw ]] || return 2
@@ -3016,16 +3070,96 @@ fw_remove_recorded() {
     return 0
 }
 
+show_lock_holders() {
+    local fd pid info tty state count=0
+    for fd in /proc/[0-9]*/fd/9; do
+        [[ $fd -ef $LOCK_FILE ]] || continue
+        pid=${fd#/proc/}; pid=${pid%%/*}
+        [[ $pid != "$BASHPID" ]] || continue
+        # Another opener (including a waiter) need not own the flock.
+        { grep -Eq '^lock:[[:space:]]+[0-9]+:[[:space:]]+FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]' "/proc/$pid/fdinfo/9"; } 2>/dev/null || continue
+        info=$(LC_ALL=C ps -p "$pid" -o tty= -o stat= 2>/dev/null) || continue
+        read -r tty state <<< "$info"
+        [[ $tty =~ ^[a-zA-Z0-9_./?-]+$ && -n $state ]] || continue
+        case $state in T*) state='已暂停' ;; *) state='持锁' ;; esac
+        ui_note "PID $pid  终端 $tty  $state"
+        count=$((count + 1))
+        (( count < 3 )) || break
+    done
+    if (( ! count )); then
+        if have fuser; then ui_note "可用 fuser -v $LOCK_FILE 查看仍打开锁文件的进程。"
+        else ui_note '当前未取得进程详情。可在原终端运行 jobs -l 查看暂停的作业。'; fi
+    fi
+}
+
 acquire_lock() {
+    local rc=0
+    [[ $LOCK_OWNER != "$BASHPID" ]] || return 0
     if [[ -L $LOCK_FILE || ( -e $LOCK_FILE && ! -f $LOCK_FILE ) ]]; then
         fatal "锁文件路径异常：$LOCK_FILE"
     fi
     exec 9>> "$LOCK_FILE" || fatal "无法打开锁文件：$LOCK_FILE"
-    if ! flock -n 9; then
-        fatal '另一个 Xray Manager 正在运行，请等它结束后再试。'
-    fi
+    # Wait briefly for a previous instance to finish its exit or rollback.
+    flock -w 2 -E 42 9 || rc=$?
+    case $rc in
+        0)
+            [[ ! -L $LOCK_FILE && /proc/$BASHPID/fd/9 -ef $LOCK_FILE ]] || fatal '管理锁路径已变化，请重新打开。'
+            LOCK_OWNER=$BASHPID ;;
+        42)
+            ui_err '管理锁仍被占用。'
+            {
+                show_lock_holders
+                ui_note '若旧版菜单已暂停，请回原终端运行 jobs -l，再用 fg %作业号 恢复。'
+                ui_note '若正在安装、更新或回滚，请等操作结束后重试。'
+            } 4>&5
+            exit 42 ;;
+        *) fatal "无法取得管理锁（flock 退出码 $rc）：$LOCK_FILE" ;;
+    esac
 }
 
+
+release_lock() {
+    [[ $LOCK_OWNER == "$BASHPID" ]] || return 0
+    (( ! TX_ACTIVE )) || { die '事务尚未结束，无法释放管理锁。'; return 1; }
+    flock -u 9 || { die '释放管理锁失败。'; return 1; }
+    exec 9>&-
+    LOCK_OWNER=''
+}
+
+# Compare only deployment inputs. Updating the homepage cache must not stale an editor.
+draft_generation() {
+    local f LC_ALL=C TZ=UTC
+    export LC_ALL TZ
+    for f in "$STATE" "$DATA_DIR/state.prev.json" "$SNI_POOL_FILE" "$SELF_SCRIPT_PATH" "$CONFIG_FILE" "$SS_CONFIG" "$NGINX_DIR/nginx.conf" "$CORE_BIN" "$SS_BIN" "$PUBLIC_XRAY"; do
+        if [[ -e $f || -L $f ]]; then
+            [[ -f $f || -L $f ]] || return 1
+            stat -c '%d:%i:%s:%z' -- "$f" || return 1
+        else
+            printf '%s\n' missing
+        fi
+    done
+}
+
+pause_draft_lock() {
+    [[ -z $DRAFT_GENERATION ]] || return 0
+    [[ $LOCK_OWNER == "$BASHPID" ]] || return 1
+    DRAFT_GENERATION=$(draft_generation) || { die '无法核对当前配置文件。'; return 1; }
+    release_lock
+}
+
+resume_draft_lock() {
+    local generation
+    if [[ -z $DRAFT_GENERATION ]]; then [[ $LOCK_OWNER == "$BASHPID" ]]; return; fi
+    acquire_lock
+    check_private_dirs || return 1
+    if [[ -e $TX || -L $TX ]] || ! generation=$(draft_generation) || [[ $generation != "$DRAFT_GENERATION" ]]; then
+        die '等待期间部署状态已变化，请返回主页重新打开。'
+        return 1
+    fi
+    verify_running_script || return 1
+    select_core_path
+    DRAFT_GENERATION=''
+}
 
 svc_state_line() {
     # Keep failures in the shell that owns the current step and spinner.
@@ -3038,6 +3172,7 @@ svc_state_line() {
         verify) op='核对恢复结果' ;;
         stop) op='停止服务' ;;
         package) op='检查软件包占用' ;;
+        update) op='核对组件更新所需的服务状态' ;;
         *) die "未知的服务状态查询用途：$purpose。"; return 1 ;;
     esac
     data=$(timeout -k 2 5 systemctl show "$s" --all -p Id -p LoadState -p ActiveState -p UnitFileState 2>>"${STEP_LOG:-/dev/null}") || rc=$?
@@ -3085,7 +3220,7 @@ svc_state_line() {
             else die "无法$op：服务 $s 正在切换状态，请稍后重试。"; return 1; fi ;;
         *) die "无法$op：服务 $s 的运行状态为 ${active:-未知}。"; return 1 ;;
     esac
-    if [[ $purpose == package ]]; then
+    if [[ $purpose == package || $purpose == update ]]; then
         # Only the caller's explicit list of idle, unconfigured states permits a purge.
         state_out="$s $a $enabled"
         return
@@ -3214,8 +3349,11 @@ tx_begin() {
         svc_state_line c "$s" "$purpose" || return 1
         [[ -z $c ]] || service_records+=("$c")
     done
+    # Publish a complete ownership marker with a single rename. Both
+    # paths share the staging filesystem. A crash before the rename leaves TX empty.
+    printf '%s\n' "$MANAGED_TAG" > "$STAGE/tx-owner" || return 1
     mkdir -m 700 -- "$TX" || return 1
-    printf '%s\n' "$MANAGED_TAG" > "$TX/owner" || return 1
+    mv -fT -- "$STAGE/tx-owner" "$TX/owner" || return 1
     mkdir -m 700 -- "$TX/backup" || return 1
     : > "$TX/created-dirs" || return 1
     printf '%s\n' "${MANAGED_PATHS[@]}" > "$TX/paths" || return 1
@@ -3293,7 +3431,7 @@ tx_check_retired_backups() {
 }
 
 tx_discard_incomplete() {
-    local old_layout=0
+    local old_layout=0 p mode
     local -a paths=()
     [[ -e $TX || -L $TX ]] || return 0
     [[ -d $TX && ! -L $TX && ! -e $TX/ready && ! -L $TX/ready ]] || return 1
@@ -3309,12 +3447,20 @@ tx_discard_incomplete() {
         # Before 0.2.9 an unfinished backup had no owner marker. Its path list identifies it.
         if (( old_layout )) && [[ -d $TX/backup && ! -L $TX/backup ]]; then
             printf '%s\n' "$MANAGED_TAG" | atomic_write "$TX/owner" 600 || return 1
+        elif [[ -O $TX && -f $TX/owner && ! -L $TX/owner && ! -s $TX/owner ]] &&
+            [[ $(stat -c '%u:%a:%h' -- "$TX/owner") == "$EUID:600:1" ]]; then
+            # Old versions could die after opening owner but before writing its tag.
+            # Only the exact layout before backup starts qualifies for this repair.
+            mode=$(stat -c %a -- "$TX") && [[ $mode == 700 || $mode == 2700 ]] || return 1
+            for p in "$TX"/* "$TX"/.[!.]* "$TX"/..?*; do
+                [[ $p == "$TX/owner" || ( ! -e $p && ! -L $p ) ]] || return 1
+            done
+            rm -f -- "$TX/owner" && rmdir -- "$TX"; return
         else
             rmdir -- "$TX" 2>/dev/null; return
         fi
     fi
     # Keep owner until the last child is gone, including after an interrupted cleanup.
-    local p
     for p in "$TX"/* "$TX"/.[!.]* "$TX"/..?*; do
         [[ $p != "$TX/owner" && ( -e $p || -L $p ) ]] || continue
         rm -rf -- "$p" || return 1
@@ -3524,7 +3670,7 @@ tx_finish() {
 tx_commit() { tx_finish; }
 
 tx_recover_if_needed() {
-    local running_digest=''
+    local running_digest='' marker
     [[ -e $TX || -L $TX ]] || return 0
     [[ ! -L $TX && -d $TX ]] || fatal "事务路径不是普通目录，无法安全恢复：$TX"
     if [[ ! -f $TX/ready || -L $TX/ready ]]; then
@@ -3532,10 +3678,22 @@ tx_recover_if_needed() {
         return 0
     fi
     tx_systemd_snapshot || fatal "快照记录的服务管理方式与当前系统不一致，请手动检查 $TX。"
-    ui_warn '上次操作中途被打断，系统可能处于改了一半的状态。'
+    # Keep a reference to this exact ready marker while another session may recover.
+    local marker_fd
+    exec {marker_fd}<"$TX/ready" || fatal '无法打开事务标记。'
+    marker=/proc/$BASHPID/fd/$marker_fd
+    release_lock || exit 1
+    ui_warn '发现待恢复的事务。'
     if ! ask_yes '现在恢复到那次操作之前的状态'; then
         fatal '需要先完成恢复，才能进行其他操作。'
     fi
+    acquire_lock
+    check_private_dirs || exit 1
+    verify_running_script || exit 1
+    if [[ ! -e $TX && ! -L $TX ]]; then exec {marker_fd}<&-; return 0; fi
+    [[ -f $TX/ready && ! -L $TX/ready && $TX/ready -ef $marker ]] || fatal '待恢复的事务已变化，请重新打开。'
+    exec {marker_fd}<&-
+    tx_systemd_snapshot || fatal '无法核实当前快照的服务管理方式。'
     if [[ $SOURCE_PATH == "$SELF_SCRIPT_PATH" ]]; then
         running_digest=$(sha256sum < "$SOURCE_PATH") || fatal '无法核对当前管理脚本。'
     fi
@@ -3549,7 +3707,7 @@ tx_recover_if_needed() {
 
 is_stale_stage() {
     local dir=$1 suffix=${1#"$STAGE_BASE".}
-    [[ $dir != "$STAGE" && $suffix =~ ^[a-zA-Z0-9]{8}$ && ! -L $dir && -d $dir && -O $dir ]]
+    [[ $dir != "$STAGE" && $suffix =~ ^(live[.])?[a-zA-Z0-9]{8}$ && ! -L $dir && -d $dir && -O $dir ]]
 }
 
 remove_stage() {
@@ -3560,23 +3718,40 @@ clean_stale_stages() {
     local d
     for d in "$STAGE_BASE".*; do
         is_stale_stage "$d" || continue
-        if [[ -f $d/step.log && ! -L $d/step.log ]]; then
-            remove_stage "$d" || { ui_warn "已保留临时目录：$d"; return 1; }
-        else
-            # A crash between mktemp and log creation can leave an empty stage.
-            rmdir -- "$d" 2>/dev/null || true
-        fi
+        # Other editors can be idle without holding the management lock.
+        # FD 8 pins their private stage until its final user is finished.
+        (
+            local rc=0
+            exec 8<"$d" || { [[ ! -e $d && ! -L $d ]]; exit; }
+            flock -n -E 42 8 || rc=$?
+            (( rc != 42 )) || exit 0
+            (( rc == 0 )) || exit 1
+            [[ ! -L $d && $d -ef /proc/$BASHPID/fd/8 ]] || exit 0
+            if [[ -f $d/step.log && ! -L $d/step.log ]]; then remove_stage "$d"
+            else rmdir -- "$d" 2>/dev/null || true; fi
+        ) || { ui_warn "无法清理临时目录：$d"; return 1; }
     done
     return 0
 }
 
+
+finish_action_lock() {
+    local rc=0
+    [[ $LOCK_OWNER == "$BASHPID" ]] || return 0
+    if [[ -n $STAGE && ( -e $TX || -L $TX ) ]]; then
+        ui_err "事务未完成，重新打开后可恢复：$TX"
+        rc=1
+    fi
+    if (( ! TX_ACTIVE )); then release_lock || rc=1; fi
+    return "$rc"
+}
 
 on_action_error() {
     local code=$1 line=$2 func=${3:-} failed_command=${4:-}
     [[ $BASHPID == "${ACTION_PID:-$BASHPID}" ]] || exit "$code"
     # Ctrl+C can reach both the action and its supervisor. The supervisor's
     # forwarded TERM (or another keypress) must not interrupt this rollback.
-    trap '' INT TERM HUP
+    trap '' INT TERM HUP PIPE
     trap - EXIT ERR
     set +e
     UI_BUF_ON=0
@@ -3597,13 +3772,14 @@ on_action_error() {
     if [[ -n $STAGE ]] && ! remove_stage "$STAGE"; then
         ui_warn "临时目录未能清理，日志和 JSON 可能仍在：$STAGE"
     fi
+    finish_action_lock || code=1
     exit "$code"
 }
 
 on_action_exit() {
     local rc=$?
     [[ $BASHPID == "${ACTION_PID:-$BASHPID}" ]] || exit "$rc"
-    trap '' INT TERM HUP
+    trap '' INT TERM HUP PIPE
     trap - EXIT ERR
     set +e
     UI_BUF_ON=0
@@ -3614,6 +3790,7 @@ on_action_exit() {
         ui_warn "临时目录未能清理，日志和 JSON 可能仍在：$STAGE"
         if (( rc == 0 || rc == 20 || rc == RC_QUIET )); then rc=1; fi
     fi
+    finish_action_lock || rc=1
     exit "$rc"
 }
 
@@ -3718,13 +3895,19 @@ run_action() {
     trap - INT
     set -Eeuo pipefail
     ACTION_PID=$BASHPID
+    # A nested action must never clean its parent's stage or unlock its description.
+    STAGE='' STEP_LOG='' LOCK_OWNER='' DRAFT_GENERATION='' TX_ACTIVE=0 KEEP_TX=0
     trap 'on_action_error $? $LINENO "${FUNCNAME[0]:-}" "$BASH_COMMAND"' ERR
     trap 'on_action_error 130 $LINENO' INT
     trap 'on_action_error 143 $LINENO' TERM HUP
     trap 'TUI_RESIZED=1' WINCH
     trap on_action_exit EXIT
+    prepare_runtime
+    [[ $1 != : ]] || return 0
     make_dir "$(dirname -- "$STAGE_BASE")"
-    STAGE=$(mktemp -d "$STAGE_BASE.XXXXXXXX")
+    STAGE=$(mktemp -d "$STAGE_BASE.live.XXXXXXXX")
+    exec 8<"$STAGE"
+    flock -x 8
     STEP_LOG=$STAGE/step.log
     : > "$STEP_LOG"
     check_private_dirs || return 1
@@ -3732,6 +3915,7 @@ run_action() {
 }
 
 run_child() {
+    local -a INPUT_SUPERVISORS=("${INPUT_SUPERVISORS[@]}" "$BASHPID")
     local __rc_pid='' __rc_cancel=0 __rc_status=0 __rc_retry __rc_saved
     local __rc_int __rc_term __rc_hup __rc_err
     __rc_int=$(trap -p INT); __rc_term=$(trap -p TERM)
@@ -3774,7 +3958,6 @@ run_child() {
     set -e
     select_core_path
     if (( __rc_cancel == 143 )) && [[ -z $ACTION_PID ]]; then
-        after_action "$CHILD_RC"
         exit 143
     fi
     return 0
@@ -3787,7 +3970,7 @@ fetch() {
     # wait is interruptible: action cancellation can reap the download through
     # kill_jobs instead of waiting for curl's full transfer deadline.
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fLsS --retry 2 --retry-delay 2 \
-        --connect-timeout 10 --max-time 600 --speed-limit 1024 --speed-time 30 -o "$dest.part" "$url" >> "$STEP_LOG" 2>&1 3>&- 4>&- 5>&- 9>&- &
+        --connect-timeout 10 --max-time 600 --speed-limit 1024 --speed-time 30 -o "$dest.part" "$url" >> "$STEP_LOG" 2>&1 3>&- 4>&- 5>&- 8>&- 9>&- &
     child=$!
     if ! wait "$child"; then
         rm -f -- "$dest.part"
@@ -3812,7 +3995,7 @@ release_query_to() {
     local output=$1 child
     shift
     # Keep the job in the action's shell: its signal trap can interrupt wait and reap it.
-    "$@" </dev/null > "$output" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 5>&- 9>&- &
+    "$@" </dev/null > "$output" 2>>"${STEP_LOG:-/dev/null}" 3>&- 4>&- 5>&- 8>&- 9>&- &
     child=$!
     wait "$child"
 }
@@ -4021,7 +4204,7 @@ detect_public_ips() {
     NET_V4='' NET_V6=''
     if has_ipv6_stack; then
         (probe_public_ip 6 https://api64.ipify.org https://ipv6.icanhazip.com https://v6.ident.me || :) \
-            > "$STAGE/public-ip-v6" 3>&- 4>&- 5>&- 9>&- &
+            > "$STAGE/public-ip-v6" 3>&- 4>&- 5>&- 8>&- 9>&- &
         ipv6_job=$!
     fi
     NET_V4=$(probe_public_ip 4 https://api.ipify.org https://ipv4.icanhazip.com https://v4.ident.me) || NET_V4=''
@@ -4255,7 +4438,7 @@ sni_probe() (
         safe_remote_target "$d" 443 1 || { printf '%s\n' "$PARSE_ERR" > "$log"; return 1; }
     fi
     timeout -k 1 5 openssl s_client -connect "$d:443" -servername "$d" -tls1_3 -alpn h2 \
-        -verify_hostname "$d" -verify_return_error </dev/null > "$log" 2>&1 &
+        -verify_hostname "$d" -verify_return_error </dev/null > "$log" 2>&1 3>&- 4>&- 5>&- 8>&- 9>&- &
     probe_pid=$!
     wait "$probe_pid" || rc=$?
     probe_pid=''
@@ -4290,7 +4473,7 @@ sni_probe_job() {
     for i in 1 2 3; do
         t1=$(now_ms) || continue
         timeout -k 1 5 openssl s_client -connect "$d:443" -servername "$d" -tls1_3 -alpn h2 \
-            -verify_hostname "$d" -verify_return_error </dev/null > "$out.log" 2>&1 &
+            -verify_hostname "$d" -verify_return_error </dev/null > "$out.log" 2>&1 3>&- 4>&- 5>&- 8>&- 9>&- &
         probe_pid=$!
         rc=0
         wait "$probe_pid" || rc=$?
@@ -4343,7 +4526,7 @@ sni_auto_select() {
                 trap - ERR INT TERM HUP EXIT TSTP
                 set +e
                 sni_probe_job "${__sa_pool[$__sa_i]}" "$__sa_dir/$__sa_i"
-            ) 3>&- 4>&- 5>&- 9>&- &
+            ) 3>&- 4>&- 5>&- 8>&- 9>&- &
             __sa_pids+=("$!")
             __sa_next=$(( __sa_next + 1 ))
             __sa_running=$(( __sa_running + 1 ))
@@ -4707,8 +4890,17 @@ blocked_domains_json() {
     ' "$file"
 }
 
+# REALITY compares eight bytes. E.g. ab and ab00 select the same identity.
+readonly JQ_SHORT_ID_KEY='def short_id_key:
+    if type == "string" and length <= 16 and (length % 2) == 0 and (test("[^0-9a-fA-F]") | not)
+    then (ascii_downcase + "0000000000000000")[:16] else error("invalid REALITY shortId") end;'
+
 reality_short_ids() {
-    jq -c '.reality | .short_ids // [.short_id | select(type == "string" and length > 0)]' "${1:-$DRAFT}"
+    # Keep the first spelling and the subscription order when reading old state.
+    jq -ce "$JQ_SHORT_ID_KEY"'.reality | (.short_ids // [.short_id | select(type == "string" and length > 0)])
+        | if type != "array" then error("short_ids must be an array") else
+            reduce .[] as $id ({seen:{}, ids:[]}; ($id | short_id_key) as $key |
+                if .seen[$key] then . else .seen[$key] = true | .ids += [$id] end) | .ids end' "${1:-$DRAFT}"
 }
 
 reality_short_id() { reality_short_ids | jq -r '.[0] // empty'; }
@@ -6667,8 +6859,8 @@ edit_short_id() {
         fi
         value=${value,,}
         [[ $value != "${current,,}" ]] || return 0
-        if jq -e --arg value "$value" 'map(ascii_downcase) | index($value) != null' <<< "$ids" >/dev/null; then
-            ui_warn '这个 shortID 已存在，请输入其他值。'
+        if jq -e --arg value "$value" "$JQ_SHORT_ID_KEY"'any(.[]; short_id_key == ($value | short_id_key))' <<< "$ids" >/dev/null; then
+            ui_warn '已有等效的 shortID。末尾补 00 或更改大小写都代表同一个值。'
             continue
         fi
         if [[ $choice == 1 ]]; then
@@ -7678,7 +7870,7 @@ validate_ss_rust() {
         udp_only) protocols=(udp) ;;
         *) die 'SS-Rust 配置中的监听模式无效。'; return 1 ;;
     esac
-    "$USE_SS" -c "$STAGE/ss-check.json" --acl "$acl" >> "$STEP_LOG" 2>&1 3>&- 4>&- 5>&- 9>&- &
+    "$USE_SS" -c "$STAGE/ss-check.json" --acl "$acl" >> "$STEP_LOG" 2>&1 3>&- 4>&- 5>&- 8>&- 9>&- &
     child=$!
     for k in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.3
@@ -8712,6 +8904,8 @@ validate_network_targets() {
 }
 
 apply_draft() {
+    resume_draft_lock || return 1
+    check_foreign_install || return 1
     check_launcher_slot || return 1
     check_service_ownership || return 1
     if [[ -n $CLI_CORE_TAG ]] && needs_ss_rust; then
@@ -9181,18 +9375,32 @@ carry_meta_from_state() {
 }
 
 action_install() {
+    local had_old=0 installed=''
     check_launcher_slot || return 1
     check_foreign_install || return 1
-    ui_line '正在检测本机公网地址...'
-    detect_public_ips
     DRAFT=$STAGE/draft.json
-    local def=1 curidx=0 cli_first=1 had_old=0 s installed=''
     if state_ok; then
         had_old=1
-        installed=$(jq -r .scheme "$STATE")
-        curidx=$(scheme_index "$installed")
+        cp -- "$STATE" "$STAGE/editor-state.json" || return 1
+        installed=$(jq -r .scheme "$STAGE/editor-state.json") || return 1
         cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
     fi
+    [[ ! -L $SNI_POOL_FILE ]] || { die "候选站点列表须为普通文件：$SNI_POOL_FILE"; return 1; }
+    if [[ -f $SNI_POOL_FILE ]]; then
+        cp -- "$SNI_POOL_FILE" "$STAGE/editor-pool.txt" || return 1
+    fi
+    pause_draft_lock || return 1
+    ui_line '正在检测本机公网地址...'
+    detect_public_ips
+    edit_install_draft "$had_old" "$installed"
+    apply_draft
+    if [[ $MODE == modify ]]; then show_modify_result; else show_install_result; fi
+}
+
+edit_install_draft() {
+    local had_old=$1 installed=$2 def=1 curidx=0 cli_first=1 s
+    local STATE=$STAGE/editor-state.json SNI_POOL_FILE=$STAGE/editor-pool.txt
+    if (( had_old )); then curidx=$(scheme_index "$installed"); fi
     sni_stage_begin
     if (( had_old )) && [[ -z $CLI_SCHEME || $CLI_SCHEME == "$installed" ]]; then
         cli_first=0
@@ -9204,7 +9412,7 @@ action_install() {
         [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
         preview_loop
         case $PREVIEW_RESULT in
-            0) apply_draft; show_modify_result; return 0 ;;
+            0) return 0 ;;
             1) exit "$RC_QUIET" ;;
         esac
     fi
@@ -9226,7 +9434,7 @@ action_install() {
                 [[ -z $CLI_CORE_TAG ]] || st_sets .core.xray "$CLI_CORE_TAG"
                 preview_loop
                 case $PREVIEW_RESULT in
-                    0) apply_draft; show_modify_result; return 0 ;;
+                    0) return 0 ;;
                     1) exit "$RC_QUIET" ;;
                     2) continue ;;
                 esac
@@ -9245,8 +9453,6 @@ action_install() {
         preview_loop
         if [[ $PREVIEW_RESULT == 0 ]]; then
             # The confirmation is performed inside preview_loop. No edits are lost.
-            apply_draft
-            show_install_result
             return 0
         fi
         def=$(scheme_index "$s")
@@ -9341,11 +9547,9 @@ load_node_links() {
     done <<< "$rows"
 }
 
-print_nodes() {
-    local n i label note printed=0
-    if [[ ! -f $NODES_JSON ]]; then ui_line '还没有节点，请先在主页选择「安装」。'; return 0; fi
-    load_node_links || return 1
-    n=${#NODE_LINKS[@]}
+print_loaded_node_links() {
+    local note=$1 n=${#NODE_LINKS[@]} i label printed=0
+    shift
     for (( i = 0; i < n; i++ )); do
         if (( $# )) && ! in_list "${NODE_LABELS[$i]}" "$@"; then continue; fi
         (( ! printed )) || printf '\n' >&4
@@ -9354,17 +9558,23 @@ print_nodes() {
         printf '  %s%*d%s  %s%s%s\n' "$C_KEY" "${#n}" "$(( i + 1 ))" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" >&4
         printf '%s\n' "${NODE_LINKS[$i]}" >&4
     done
-    note=$(reality_short_id_note "$STATE") || return 1
     [[ -z $note ]] || ui_note "$note"
     return 0
+}
+
+print_nodes() {
+    local note
+    if [[ ! -f $NODES_JSON ]]; then ui_line '还没有节点，请先在主页选择「安装」。'; return 0; fi
+    load_node_links || return 1
+    note=$(reality_short_id_note "$STATE") || return 1
+    print_loaded_node_links "$note" "$@"
 }
 
 NODE_LABELS=() NODE_LINKS=()
 
 nd_build() {
-    local i n note
-    if state_ok; then DRAFT=$STATE; ui_page '分享链接' "$(scheme_label "$(scheme)")"
-    else ui_page '分享链接'; fi
+    local i n
+    ui_page '分享链接' "$node_scheme_label"
     n=${#NODE_LABELS[@]}
     KEY_W=${#n}
     for i in "${!NODE_LABELS[@]}"; do
@@ -9375,8 +9585,7 @@ nd_build() {
     ui_kv '订阅 Base64' "$SUB_B64"
     ui_kv '复现参数' "$STATE"
     ui_note 'state.json 含服务端密钥。可离线备份，重装时按原值填写。'
-    note=$(reality_short_id_note "$STATE") || return 1
-    [[ -z $note ]] || ui_note "$note"
+    [[ -z $node_short_id_note ]] || ui_note "$node_short_id_note"
     TUI_FOOT='上下键 移动   回车 查看   c 复制   Esc 返回'
     TUI_FOOT_PLAIN="$(key_range "$n") 显示链接   回车 返回"
 }
@@ -9394,19 +9603,29 @@ osc52_copy() {
 }
 
 action_nodes() {
-    local sel=0
-    if [[ ! -t 1 ]] || (( ASSUME_YES )); then
-        print_nodes
-        return 0
+    local sel=0 direct_output=0 has_file=0 node_scheme_label='' node_short_id_note=''
+    if [[ ! -t 1 ]] || (( ASSUME_YES )); then direct_output=1; fi
+    NODE_LABELS=() NODE_LINKS=()
+    if [[ -s $NODES_JSON ]]; then
+        has_file=1
+        load_node_links || return 1
+        node_short_id_note=$(reality_short_id_note "$STATE") || return 1
+        if (( ! direct_output )) && state_ok; then
+            local DRAFT=$STATE
+            node_scheme_label=$(scheme_label "$(scheme)") || return 1
+        fi
     fi
-    if [[ ! -s $NODES_JSON ]]; then
+    # Keep only display data while the terminal waits or a pipe is backpressured.
+    release_lock || return 1
+    if (( ! has_file )); then
+        if (( direct_output )); then ui_line '还没有节点，请先在主页选择「安装」。'; return 0; fi
         ui_page '分享链接'
         ui_line '还没有节点，请先在主页选择「安装」。'
         ui_rule
         ui_pause
         exit "$RC_QUIET"
     fi
-    load_node_links || return 1
+    if (( direct_output )); then print_loaded_node_links "$node_short_id_note"; return; fi
     if (( ${#NODE_LINKS[@]} == 0 )); then ui_note '当前没有可显示的节点链接。'; ui_pause; exit "$RC_QUIET"; fi
     while :; do
         if (( TUI )); then tui_menu nd_build "$sel" c; else tui_menu nd_build "$sel" ''; fi
@@ -9431,30 +9650,31 @@ action_nodes() {
 
 
 show_node_link() {
-    local link=$1 label=$2 note
+    local link=$1 label=$2
     ui_page "$label" '完整节点链接'
     printf '%s\n' "$link" >&4
-    note=$(reality_short_id_note "$STATE") || return 1
-    [[ -z $note ]] || ui_note "$note"
+    [[ -z $node_short_id_note ]] || ui_note "$node_short_id_note"
     ui_rule
     ui_pause
 }
 
 mt_build() {
+    local rollback_time
     ui_page '更新与维护'
     tui_item 1 '更新组件' '' 'Xray / SS-Rust / Nginx，保留配置'
     tui_item 2 '更新规则' '' '只更新地理规则，不升级核心'
     tui_item 3 '重启服务' '' '重启服务并检查运行状态'
     tui_item 4 '运行状态' '' '服务、端口、防火墙；日志按需查看'
     tui_item 5 '候选站点' '' '自动挑选伪装站点时测速的网站'
-    if prev_state_ok; then
-        tui_item 6 '回滚配置' '' "恢复到 $(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M') 那次修改之前"
+    if prev_state_ok && rollback_time=$(date -r "$DATA_DIR/state.prev.json" '+%m-%d %H:%M' 2>/dev/null); then
+        tui_item 6 '回滚配置' '' "恢复到 $rollback_time 那次修改之前"
     fi
     TUI_FOOT='上下键 移动   回车 选择   Esc 返回'
 }
 
 action_maintain() {
     local sel=0
+    release_lock || return 1
     while :; do
         tui_menu mt_build "$sel" ''
         sel=$TUI_CUR
@@ -9486,6 +9706,7 @@ action_rollback() {
     pv_snapshot "$STATE"
     mapfile -t PV_KEYS < <(preview_items)
     cp "$NODES_JSON" "$STAGE/nodes-before.json" 2>/dev/null || echo '[]' > "$STAGE/nodes-before.json"
+    pause_draft_lock || return 1
     pv_confirm '回滚配置' || exit "$RC_QUIET"
     apply_draft
     show_modify_result '已回滚'
@@ -9524,9 +9745,6 @@ save_prev_state() {
 run_sub() {
     run_child "$@"
     SUB_RC=$CHILD_RC
-    # The top-level action reports an incomplete transaction once.
-    if [[ -e $TX || -L $TX ]]; then exit 1; fi
-    after_action "$SUB_RC"
     if (( SUB_RC == RC_QUIET )); then return 0; fi
     if (( SUB_RC == 130 || SUB_RC == 143 )); then exit "$SUB_RC"; fi
     ui_pause
@@ -9615,7 +9833,7 @@ nginx_package_version() {
 }
 
 check_running_nginx() {
-    local bin=$1 refresh=${2:-1} i master port rows cmd reason
+    local bin=$1 refresh=${2:-1} i master port rows cmd reason state
     if (( refresh )) && ! nginx_running_current "$bin"; then
         check_service_ownership zxray-nginx || return 1
         svc_do restart zxray-nginx && wait_active zxray-nginx 10 || {
@@ -9639,8 +9857,9 @@ check_running_nginx() {
         done
         [[ -z $reason ]] || { service_log_to_step zxray-nginx; svc_fail zxray-nginx "$reason"; return 1; }
     fi
-    if ! svc_active xray; then
-        ui_note '当前未确认 Xray 正在运行，已跳过本轮 REALITY 端到端检查，将继续检查核心更新。'
+    svc_state_line state xray update || return 1
+    if [[ $state != 'xray 1 '* ]]; then
+        ui_note 'Xray 未运行，已跳过本轮 REALITY 端到端检查。'
         return 0
     fi
     reality_check
@@ -9711,12 +9930,14 @@ test_nginx_for_update() {
 }
 
 update_nginx() {
-    local bin owner installed p before after active=0 baseline='' new_hash verified_hash
+    local bin owner installed p before after active=0 state baseline='' new_hash verified_hash
     local -a packages=() service_env=()
     ui_step '更新 Nginx 和模块'
     check_service_ownership || return 1
     bin=$(type -P nginx) && bin=$(readlink -f -- "$bin") || { die '找不到当前方案使用的 Nginx。'; return 1; }
-    if svc_active zxray-nginx; then active=1; fi
+    svc_state_line state zxray-nginx update || return 1
+    [[ -n $state ]] || { die '缺少 Nginx 前置服务，请先重新应用配置。'; return 1; }
+    if [[ $state == 'zxray-nginx 1 '* ]]; then active=1; fi
     if ! owner=$(nginx_binary_package "$bin" 2>>"$STEP_LOG"); then
         if (( active )); then check_running_nginx "$bin" 0 || return 1; fi
         ui_step_skip '未自动更新'
@@ -9731,7 +9952,8 @@ update_nginx() {
     done <<< "$installed"
     in_list "$owner" "${packages[@]}" || { die 'Nginx 软件包状态异常，已停止更新。'; return 1; }
     before=$(nginx_package_version "$owner") || { die '无法读取已安装的 Nginx 软件包版本。'; return 1; }
-    if ! svc_active nginx; then
+    svc_state_line state nginx update || return 1
+    if [[ $state != 'nginx 1 '* ]]; then
         # The distro's default web server is separate from the managed SNI gate.
         service_env=(SYSTEMD_OFFLINE=1)
     fi
@@ -9931,8 +10153,8 @@ status_build() {
         [[ -n $s ]] || continue
         if svc_active "$s"; then v="${C_GREEN}运行中${C_RESET}"; else v="${C_RED}已停止${C_RESET}"; fi
         case $s in
-            xray) ui_kv "$(svc_label "$s")" "$v" "$(installed_version xray)" ;;
-            zxray-ss) ui_kv "$(svc_label "$s")" "$v" "$(installed_version ss)" ;;
+            xray) ui_kv "$(svc_label "$s")" "$v" "$(st .installed.xray)" ;;
+            zxray-ss) ui_kv "$(svc_label "$s")" "$v" "$(st .installed.ss)" ;;
             *) ui_kv "$(svc_label "$s")" "$v" ;;
         esac
     done <<< "$(wanted_services)"
@@ -10149,6 +10371,7 @@ logs_menu() {
 action_status() {
     local sel=0
     require_state
+    release_lock || return 1
     (( STATE_READY )) || return 0
     while :; do
         tui_menu status_build "$sel" ''
@@ -10208,6 +10431,7 @@ edit_sni_pool() {
     local -a rest=()
     f=$(sni_pool_file)
     while :; do
+        if (( ! SNI_POOL_STAGED )); then pause_draft_lock || return 1; fi
         tui_menu pool_build "$sel" ''
         sel=$TUI_CUR
         [[ $TUI_KEY == ENTER ]] || return 0
@@ -10224,12 +10448,16 @@ edit_sni_pool() {
                     TUI_MSG='该站点已经在列表里了。'
                     continue
                 fi
+                if (( ! SNI_POOL_STAGED )); then resume_draft_lock || return 1; fi
                 printf '%s\n' "${POOL[@]}" "$d" | atomic_write "$f" 600 ;;
             r)
-                ask_no '删除自定义列表，恢复默认' && rm -f -- "$f" ;;
+                ask_no '删除自定义列表，恢复默认' || continue
+                if (( ! SNI_POOL_STAGED )); then resume_draft_lock || return 1; fi
+                rm -f -- "$f" ;;
             *)
                 if (( ${#POOL[@]} == 1 )); then TUI_MSG='列表里至少要留一个站点。'; continue; fi
                 ask_no "从列表里删除 ${POOL[$((key - 1))]}" || continue
+                if (( ! SNI_POOL_STAGED )); then resume_draft_lock || return 1; fi
                 rest=("${POOL[@]}")
                 unset "rest[$(( key - 1 ))]"
                 printf '%s\n' "${rest[@]}" | atomic_write "$f" 600
@@ -10283,7 +10511,7 @@ uninstall_has_untracked_files() {
 
 uninstall_preflight() {
     local d
-    [[ ! -e $STATE && ! -e $TX ]] || return 0
+    [[ ! -e $STATE && ! -L $STATE && ! -e $TX && ! -L $TX ]] || return 0
     if uninstall_has_untracked_files; then
         TUI_MSG='缺少安装记录，请先核查残留文件。'
         TOP_RC=1
@@ -10329,7 +10557,9 @@ action_uninstall() {
         source_count=$(jq 'length' "$STAGE/source-cleanup.json")
         if has_manager_script || is_manager_launcher "$QUICK_BIN" || is_manager_launcher "$PUBLIC_XRAY" || is_core_link || (( source_count > 0 )); then
             ui_rule
+            pause_draft_lock || return 1
             if ask_no '删除管理脚本、zxray 命令及已确认的原始脚本'; then
+                resume_draft_lock || return 1
                 remove_self_files
                 cleanup_source_scripts
                 if (( SOURCE_CLEANUP_LEFT )); then ui_warn '管理脚本已删除；部分原始文件保留，见上方路径。'
@@ -10357,7 +10587,9 @@ action_uninstall() {
         ui_note '无可确认的原始脚本记录，旧下载文件需手动清理。'
     fi
     ui_rule
+    pause_draft_lock || return 1
     ask_no '确定完整卸载' || exit "$RC_QUIET"
+    resume_draft_lock || return 1
     if [[ $(jq -r '.meta.created_user // 0' "$STATE" 2>/dev/null) == 1 ]]; then
         own_user=1
         user_ids=$(jq -r '.meta.created_user_ids // empty' "$STATE") || return 1
@@ -10782,8 +11014,18 @@ home_build() {
     local installed=0
     ui_banner
     if (( ! TUI || UI_H > 14 )); then ui_blank; fi
+    if [[ -e $TX || -L $TX ]]; then
+        ui_kv '状态' '有操作进行中或待恢复'
+        ui_rule
+        tui_item r '检查事务' '' '恢复中断的操作'
+        tui_item 0 '退出'
+        TUI_FOOT='上下键 移动   回车 确认   q 退出'
+        TUI_FOOT_PLAIN='r 检查事务   0 退出'
+        return 0
+    fi
     if state_ok; then installed=1; DRAFT=$STATE; fi
-    home_status "$installed"
+    select_core_path
+    home_status "$installed" || ui_note '状态正在变化，请重新打开查看。'
     ui_rule
     if (( installed )); then
         tui_item 1 '修改配置' '' '查看或调整设置'
@@ -10811,40 +11053,56 @@ stop_update_check() {
             kill -0 "$UPDATE_BG_PID" 2>/dev/null || break
             sleep 0.05
         done
-        kill -KILL -- "-$UPDATE_BG_PID" 2>/dev/null || true
+        if kill -0 "$UPDATE_BG_PID" 2>/dev/null; then
+            kill -KILL -- "-$UPDATE_BG_PID" 2>/dev/null || true
+        fi
     fi
     wait "$UPDATE_BG_PID" 2>/dev/null || true
     [[ -z $UPDATE_BG_TMP ]] || rm -f -- "$UPDATE_BG_TMP" "$UPDATE_BG_TMP.tag"
     UPDATE_BG_PID='' UPDATE_BG_TMP=''
 }
 
+update_cache_due() {
+    local file=$DATA_DIR/update-check.json mtime now
+    [[ ! -e $TX && ! -L $TX && ! -L $file ]] || return 1
+    [[ -e $file ]] || return 0
+    [[ -f $file ]] && mtime=$(stat -c %Y -- "$file") && now=$(date +%s) || return 1
+    (( now < mtime || now - mtime >= 86400 ))
+}
+
 update_check_bg() {
-    state_ok || return 0
-    [[ -d $DATA_DIR ]] || return 0
-    local DRAFT=$STATE
-    needs_xray || return 0
+    local DRAFT=$STATE stamp monitor=0 x pending=''
+    update_cache_due || return 0
+    stamp=$(stat -c '%d:%i:%z' -- "$STATE" 2>/dev/null) || return 0
+    state_ok && needs_xray || return 0
     [[ $(jq -r '.core.xray // empty' "$STATE" 2>/dev/null) == latest ]] || return 0
-    local f=$DATA_DIR/update-check.json age monitor=0 x
-    if [[ ! -L $f && -f $f ]]; then
-        age=$(( $(date +%s) - $(stat -c %Y "$f" 2>/dev/null || echo 0) ))
-        (( age < 0 || age >= 86400 )) || return 0
-    fi
-    UPDATE_BG_TMP=$(mktemp "$DATA_DIR/.update-check.XXXXXXXX") || return 0
+    # Network I/O must neither hold the manager lock nor write into an installation
+    # that another terminal can snapshot, replace or uninstall in the meantime.
+    UPDATE_BG_TMP=$(mktemp "$ROOT/run/.zxray-update.XXXXXXXX") || return 0
     [[ $- != *m* ]] || monitor=1
-    # A dedicated job group lets cancellation terminate curl and its shells too.
     set -m
     (
         trap - ERR INT TERM HUP EXIT
         set +m
+        trap '' TSTP
         trap 'exit 143' TERM HUP
-        trap 'trap "" TERM HUP; kill_jobs; rm -f -- "$UPDATE_BG_TMP" "$UPDATE_BG_TMP.tag"' EXIT
+        trap 'trap "" TERM HUP; [[ -z $pending ]] || rm -f -- "$pending"; exec 9>&-; kill_jobs; rm -f -- "$UPDATE_BG_TMP" "$UPDATE_BG_TMP.tag"' EXIT
         set +e
         STEP_LOG=/dev/null
         latest_tag_try XTLS/Xray-core x "$UPDATE_BG_TMP" || exit 0
-        [[ -d $DATA_DIR ]] || exit 0
-        release_query_to "$UPDATE_BG_TMP" jq -n --arg x "$x" '{xray: $x}' &&
-            chmod 600 "$UPDATE_BG_TMP" && mv -fT -- "$UPDATE_BG_TMP" "$f"
-    ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 9>&- &
+        # Use an independent open description for this brief, optional write.
+        # /run starts empty after boot; concurrent first openers must use one inode.
+        [[ ! -L $LOCK_FILE && ( ! -e $LOCK_FILE || -f $LOCK_FILE ) ]] || exit 0
+        exec 9>> "$LOCK_FILE" || exit 0
+        flock -n 9 || exit 0
+        [[ ! -L $LOCK_FILE && /proc/$BASHPID/fd/9 -ef $LOCK_FILE ]] || exit 0
+        update_cache_due && check_private_dirs && [[ -f $STATE && ! -L $STATE ]] || exit 0
+        [[ $(stat -c '%d:%i:%z' -- "$STATE") == "$stamp" ]] || exit 0
+        cd -- "$DATA_DIR" || exit 0
+        pending=$(mktemp .update-check.XXXXXXXX) || exit 0
+        if jq -n --arg x "$x" '{xray: $x}' > "$pending" &&
+            mv -fT -- "$pending" update-check.json; then pending=''; fi
+    ) </dev/null >/dev/null 2>&1 3>&- 4>&- 5>&- 8>&- 9>&- &
     UPDATE_BG_PID=$!
     (( monitor )) || set +m
 }
@@ -10866,18 +11124,13 @@ run_top() {
     stop_update_check
     run_child "$@"
     TOP_RC=$CHILD_RC
+    if [[ $ACTION != menu ]] && (( TOP_RC == 42 )); then TOP_RC=1; fi
     TOP_QUIET=0
     if (( TOP_RC == RC_QUIET )); then TOP_RC=0 TOP_QUIET=1; fi
 }
 
 after_action() {
-    local rc=$1
-    if [[ -e $TX || -L $TX ]]; then
-        ui_err '有一次操作没能恢复完，重新运行脚本会继续恢复。'
-        ui_note "快照目录：$TX"
-        exit 1
-    fi
-    if (( rc == 20 )); then exit 0; fi
+    if (( $1 == 20 )); then exit 0; fi
     return 0
 }
 
@@ -10889,7 +11142,10 @@ check_private_dirs() {
         fi
         [[ -d $dir ]] || continue
         # The manager runs as root; a sourced test can use its own private tree.
-        mode=$(stat -c %a -- "$dir" 2>/dev/null) || mode=''
+        if ! mode=$(stat -c %a -- "$dir" 2>/dev/null); then
+            [[ ! -e $dir && ! -L $dir ]] && continue
+            die "无法读取托管目录权限：$dir"; return 1
+        fi
         if [[ ! -O $dir || ! $mode =~ ^[0-7]{1,4}$ ]] || (( (8#$mode & 0022) != 0 )); then
             die "托管目录的属主或权限异常：$dir" '请确认目录属于运行管理脚本的账号，且组和其他用户不可写。'
             return 1
@@ -10898,9 +11154,21 @@ check_private_dirs() {
     return 0
 }
 
+verify_running_script() {
+    local digest
+    [[ -z $SOURCE_DIGEST ]] && return 0
+    if ! digest=$(sha256sum < "$SOURCE_PATH") || [[ $digest != "$SOURCE_DIGEST" ]]; then
+        die '正在运行的脚本文件已变化，请退出后重新打开。'
+        return 1
+    fi
+}
+
 prepare_runtime() {
+    # A minimal install can need util-linux before its first lock. Validate
+    # the management paths before installing any dependencies in either case.
+    if have flock; then acquire_lock; fi
     check_private_dirs || exit 1
-    (( ! runtime_ready )) || return 0
+    verify_running_script || exit 1
     local d resolved
     local -a prefixes=("${ROOT:-/}" "$ROOT/usr")
     for d in "$ROOT/usr/local" "$ROOT/usr/local/"{bin,lib,share,etc}; do
@@ -10923,21 +11191,22 @@ prepare_runtime() {
         exit 1
     }
     ensure_deps || exit 1
-    acquire_lock
-    SOURCE_PATH=${BASH_SOURCE[0]}
-    SOURCE_RECORD=$(source_script_record "$SOURCE_PATH" 2>/dev/null) || SOURCE_RECORD=''
-    if [[ -f $SOURCE_PATH ]]; then SOURCE_PATH=$(readlink -f -- "$SOURCE_PATH"); fi
+    if [[ $LOCK_OWNER != "$BASHPID" ]]; then
+        acquire_lock
+        check_private_dirs || exit 1
+        verify_running_script || exit 1
+    fi
+    SOURCE_RECORD=$(source_script_record "${BASH_SOURCE[0]}" 2>/dev/null) || SOURCE_RECORD=''
     select_core_path
     tx_recover_if_needed
     migrate_state
     select_core_path
     check_state_file
     clean_stale_stages
-    runtime_ready=1
 }
 
 main() {
-    local runtime_ready=0 sel=0 key dir
+    local sel=0 key dir
     parse_args "$@" || return 1
     (( EUID == 0 )) || fatal '请用 root 运行（例如 sudo sh xray-manager.sh）。'
     # A non-login su may retain a PATH without administrative utilities.
@@ -10952,7 +11221,8 @@ main() {
     trap 'exit 143' TERM HUP
     trap 'on_main_exit' EXIT
     if [[ $ACTION == uninstall ]] && ! uninstall_preflight; then return "$TOP_RC"; fi
-    if [[ $ACTION != menu || -e $STATE || -L $STATE || -e $TX || -L $TX ]]; then prepare_runtime; fi
+    SOURCE_PATH=$(readlink -f -- "${BASH_SOURCE[0]}") || fatal '无法定位当前脚本文件。'
+    SOURCE_DIGEST=$(sha256sum < "$SOURCE_PATH") || fatal '无法核对当前脚本内容。'
     case $ACTION in
         install)
             if (( ASSUME_YES )); then run_top action_install_cli; else run_top action_install; fi
@@ -10965,7 +11235,13 @@ main() {
     esac
 
     trap 'TUI_RESIZED=1' WINCH
-    update_check_bg
+    check_private_dirs || exit 1
+    select_core_path
+    if [[ -e $TX || -L $TX ]] || { [[ -e $STATE || -L $STATE ]] && ! state_ok; }; then
+        run_top :
+        if (( TOP_RC != 0 && TOP_RC != 42 )); then exit "$TOP_RC"; fi
+    fi
+    if [[ ! -e $TX && ! -L $TX ]]; then update_check_bg; fi
     ui_flush
     while :; do
         tui_menu home_build "$sel" q
@@ -10982,7 +11258,7 @@ main() {
             continue
         fi
         if [[ $key == 4 ]] && ! uninstall_preflight; then continue; fi
-        prepare_runtime
+        if [[ $key == r ]]; then run_top :; continue; fi
         case $key in
             1) run_top action_install ;;
             2) run_top action_nodes; after_action "$TOP_RC"; continue ;;
