@@ -1,9 +1,9 @@
 # xray-manager 
-### v 0.2.8
-### 2026-11-23
+### v 0.3.0
+### 2026-11-25
 ### 准备工作
-- Debian / Ubuntu / Alpine 环境
 - root 权限
+- Debian / Ubuntu 
 - 已安装 curl / wget 和 bash
 <br>
 
